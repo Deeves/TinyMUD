@@ -14,6 +14,12 @@ config/name="TinyMUD"
 config/features=PackedStringArray("4.4", "Mobile")
 config/icon="res://icon.svg"
 
+[autoload]
+
+CommandParser="*res://src/core/commands/CommandParser.gd"
+NetworkManager="*res://src/core/networking/NetworkManager.gd"
+WorldDb="*res://src/core/world/WorldDB.gd"
+
 [rendering]
 
 renderer/rendering_method="mobile"
