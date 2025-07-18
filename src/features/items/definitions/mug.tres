@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemResource" load_steps=2 format=3 uid="uid://pj1avqsy5bk6"]
+
+[ext_resource type="Script" uid="uid://tsa8mufb5quj" path="res://src/features/items/item_resource.gd" id="1_kopgp"]
+
+[resource]
+script = ExtResource("1_kopgp")
+id = "mug"
+name = "Dwarven Mug"
+description = "A container for only the highest quailty of ales and meads."
+keywords = Array[String]([])
+properties = {
+"can_be_taken": true
+}
+metadata/_custom_type_script = "uid://tsa8mufb5quj"

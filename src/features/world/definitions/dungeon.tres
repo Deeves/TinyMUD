@@ -4,9 +4,9 @@
 
 [resource]
 script = ExtResource("1_yeunf")
-id = ""
-name = "A Room"
-description = "An empty room."
+id = "dungeon_entrance"
+name = "Dungeon, 1st Floor"
+description = "You have dared to walk down into the depths of the 1st level of the dungeon."
 exits = {}
 item_ids = Array[String]([])
 player_ids = Array[String]([])

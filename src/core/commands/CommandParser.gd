@@ -41,41 +41,41 @@ var command_map: Dictionary = {
 
 # Dictionary to track which commands require arguments and their error messages
 var commands_requiring_args = {
-    "get": "What do you want to get?",
-    "take": "What do you want to take?",
-    "drop": "What do you want to drop?",
-    "say": "What do you want to say?",
-    "tell": "Who do you want to tell what?",
-    "shout": "What do you want to shout?"
+	"get": "What do you want to get?",
+	"take": "What do you want to take?",
+	"drop": "What do you want to drop?",
+	"say": "What do you want to say?",
+	"tell": "Who do you want to tell what?",
+	"shout": "What do you want to shout?"
 }
 
 # This is the main entry point for the parser. It takes a player's ID and
 # the full text of their command. It then tokenizes the input and attempts
 # to execute the command.
 func parse_command(player_id: String, input_text: String) -> void:
-    # Sanitize the input by removing leading/trailing whitespace.
-    var sanitized_input = input_text.strip_edges()
-    if sanitized_input.is_empty():
-        return # Ignore empty commands.
+	# Sanitize the input by removing leading/trailing whitespace.
+	var sanitized_input = input_text.strip_edges()
+	if sanitized_input.is_empty():
+		return # Ignore empty commands.
 
-    # Tokenize the input string into an array of words.
-    var tokens: Array[String] = sanitized_input.split(" ", false)
-    var verb: String = tokens[0].to_lower()
-    var args: Array[String] = tokens.slice(1)
+	# Tokenize the input string into an array of words.
+	var tokens: Array[String] = sanitized_input.split(" ", false)
+	var verb: String = tokens[0].to_lower()
+	var args: Array[String] = tokens.slice(1)
 
-    # Check if the verb exists in our command map.
-    if command_map.has(verb):
-        # Check if command requires arguments but none were provided
-        if commands_requiring_args.has(verb) and args.is_empty():
-            print("Player '%s': %s" % [player_id, commands_requiring_args[verb]])
-            return
-            
-        var handler_func: Callable = command_map[verb]
-        # Call the handler with the player ID and arguments
-        handler_func.call(player_id, args)
-    else:
-        # If the command is not found, we'll eventually send an error to the player.
-        print("Player '%s' issued unknown command: '%s'" % [player_id, verb])
+	# Check if the verb exists in our command map.
+	if command_map.has(verb):
+		# Check if command requires arguments but none were provided
+		if commands_requiring_args.has(verb) and args.is_empty():
+			print("Player '%s': %s" % [player_id, commands_requiring_args[verb]])
+			return
+
+		var handler_func: Callable = command_map[verb]
+		# Call the handler with the player ID and arguments
+		handler_func.call(player_id, args)
+	else:
+		# If the command is not found, we'll eventually send an error to the player.
+		print("Player '%s' issued unknown command: '%s'" % [player_id, verb])
 
 
 # --- COMMAND HANDLER FUNCTIONS ---
@@ -119,16 +119,16 @@ func _handle_score(player_id: String, args: Array[String]) -> void:
 
 # Dictionary to map abbreviated directions to their full names
 var direction_map = {
-    "n": "north", "s": "south", "e": "east", "w": "west",
-    "ne": "northeast", "nw": "northwest", "se": "southeast", "sw": "southwest",
-    "u": "up", "d": "down"
+	"n": "north", "s": "south", "e": "east", "w": "west",
+	"ne": "northeast", "nw": "northwest", "se": "southeast", "sw": "southwest",
+	"u": "up", "d": "down"
 }
 
 func _handle_move(player_id: String, args: Array[String]) -> void:
-    var direction = args[0] if not args.is_empty() else ""
-    
-    # If no specific direction in args, use the command itself
-    if direction.is_empty():
-        direction = direction_map.get(verb, verb)
-        
-    print("Player '%s' is moving %s." % [player_id, direction])
+	var direction = args[0] if not args.is_empty() else ""
+
+	# If no specific direction in args, use the command itself
+	if direction.is_empty():
+		direction = direction_map.get(verb, verb)
+
+	print("Player '%s' is moving %s." % [player_id, direction])

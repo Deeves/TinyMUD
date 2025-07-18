@@ -4,9 +4,9 @@
 
 [resource]
 script = ExtResource("1_eovq3")
-id = ""
-name = "A Room"
-description = "An empty room."
+id = "inn"
+name = "The Inn"
+description = "The warm and friendly Inn, host to dozens of interesting characters."
 exits = {}
 item_ids = Array[String]([])
 player_ids = Array[String]([])
