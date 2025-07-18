@@ -33,85 +33,75 @@ var command_map: Dictionary = {
 
 
 # This is the main entry point for the parser. It takes a player's ID and
-# the full text of their command. It then tokenizes the input and attempts
-# to execute the command.
-func parse_command(player_id: String, input_text: String) -> void:
-	# Sanitize the input by removing leading/trailing whitespace.
+# the full text of their command. It now returns a string to be displayed.
+func parse_command(player_id: String, input_text: String) -> String:
 	var sanitized_input = input_text.strip_edges()
 	if sanitized_input.is_empty():
-		return # Ignore empty commands.
+		return ""
 
-	# Tokenize the input string into an array of words.
 	var tokens: Array[String] = sanitized_input.split(" ", false)
 	var verb: String = tokens[0].to_lower()
 	var args: Array[String] = tokens.slice(1)
 
-	# Check if the verb is a movement command first.
 	if MOVEMENT_VERBS.has(verb):
-		_handle_move(player_id, [verb])
-		return
+		return _handle_move(player_id, [verb])
 
-	# Check if the verb exists in our main command map.
 	if command_map.has(verb):
 		var handler_func: Callable = command_map[verb]
-		handler_func.call(player_id, args)
+		# The 'call' method will return the value from the called function.
+		return handler_func.call(player_id, args)
 	else:
-		# If the command is not found, we'll eventually send an error to the player.
-		# This is the ONLY place where 'verb' can be safely used for this message.
-		print("Player '%s' issued unknown command: '%s'" % [player_id, verb])
+		# Return a formatted error message for unknown commands.
+		return "[color=red]I don't know how to '%s'.[/color]" % verb
 
 
 # --- COMMAND HANDLER FUNCTIONS ---
-# For now, these are placeholders that print to the console. This allows us
-# to test the core logic without a UI. In Phase 3, these will be updated
-# to return formatted strings for the RichTextLabel.
+# These functions now return BBCode-formatted strings for the UI.
+# The logic is still placeholder, but the return type is correct for Phase 3.
 
-func _handle_look(player_id: String, args: Array[String]) -> void:
-	print("Player '%s' is looking. Args: %s" % [player_id, args])
+func _handle_look(player_id: String, args: Array[String]) -> String:
+	return "You look around. Everything is still under construction."
 
-func _handle_get(player_id: String, args: Array[String]) -> void:
+func _handle_get(player_id: String, args: Array[String]) -> String:
 	if args.is_empty():
-		print("Player '%s' needs to specify what to get." % player_id)
-		return
-	print("Player '%s' is getting. Args: %s" % [player_id, args])
+		return "[color=orange]What do you want to get?[/color]"
+	return "You try to get the %s." % args[0]
 
-func _handle_drop(player_id: String, args: Array[String]) -> void:
+func _handle_drop(player_id: String, args: Array[String]) -> String:
 	if args.is_empty():
-		print("Player '%s' needs to specify what to drop." % player_id)
-		return
-	print("Player '%s' is dropping. Args: %s" % [player_id, args])
+		return "[color=orange]What do you want to drop?[/color]"
+	return "You drop the %s." % args[0]
 
-func _handle_say(player_id: String, args: Array[String]) -> void:
+func _handle_say(player_id: String, args: Array[String]) -> String:
 	if args.is_empty():
-		print("Player '%s' needs to specify what to say." % player_id)
-		return
+		return "[color=orange]What do you want to say?[/color]"
 	var message = " ".join(args)
-	print("Player '%s' says: '%s'" % [player_id, message])
+	# In a real game, this would be broadcast to others.
+	return "You say, '[color=yellow]%s[/color]'" % message
 
-func _handle_tell(player_id: String, args: Array[String]) -> void:
+func _handle_tell(player_id: String, args: Array[String]) -> String:
 	if args.size() < 2:
-		print("Player '%s' tried to tell, but format is wrong. (tell <player> <message>)" % player_id)
-		return
+		return "[color=orange]Who do you want to tell, and what do you want to say?[/color]"
 	var target_player_name = args[0]
 	var message = " ".join(args.slice(1))
-	print("Player '%s' tells '%s': '%s'" % [player_id, target_player_name, message])
+	return "You tell %s, '[color=cyan]%s[/color]'" % [target_player_name, message]
 
-func _handle_shout(player_id: String, args: Array[String]) -> void:
+func _handle_shout(player_id: String, args: Array[String]) -> String:
 	if args.is_empty():
-		print("Player '%s' needs to specify what to shout." % player_id)
-		return
+		return "[color=orange]What do you want to shout?[/color]"
 	var message = " ".join(args)
-	print("Player '%s' shouts: '%s'" % [player_id, message])
+	return "You shout, '[color=red]%s[/color]'!" % message
 
-func _handle_who(player_id: String, args: Array[String]) -> void:
-	print("Player '%s' requests player list. Args: %s" % [player_id, args])
+func _handle_who(player_id: String, args: Array[String]) -> String:
+	return "[color=aqua]You are the only one online.[/color]"
 
-func _handle_inventory(player_id: String, args: Array[String]) -> void:
-	print("Player '%s' requests inventory. Args: %s" % [player_id, args])
+func _handle_inventory(player_id: String, args: Array[String]) -> String:
+	return "You are not carrying anything."
 
-func _handle_score(player_id: String, args: Array[String]) -> void:
-	print("Player '%s' requests XP score. Args: %s" % [player_id, args])
+func _handle_score(player_id: String, args: Array[String]) -> String:
+	return "[color=gold]You are a mighty adventurer, destined for greatness.[/color]"
 
-func _handle_move(player_id: String, args: Array[String]) -> void:
+func _handle_move(player_id: String, args: Array[String]) -> String:
 	var direction = args[0]
-	print("Player '%s' is moving %s." % [player_id, direction])
+	# In the future, this will trigger a room change and a new 'look' description.
+	return "You walk %s." % direction
