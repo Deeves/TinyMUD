@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="RoomResource" load_steps=2 format=3 uid="uid://22kjrapvh56o"]
+
+[ext_resource type="Script" uid="uid://dwbhm3kp1yvii" path="res://src/features/world/room_resource.gd" id="1_yeunf"]
+
+[resource]
+script = ExtResource("1_yeunf")
+id = ""
+name = "A Room"
+description = "An empty room."
+exits = {}
+item_ids = Array[String]([])
+player_ids = Array[String]([])
+metadata/_custom_type_script = "uid://dwbhm3kp1yvii"
