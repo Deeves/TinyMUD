@@ -4,7 +4,7 @@
 extends Control
 
 # A reference to the TileMap node within the SubViewport.
-@onready var tile_map: TileMap = %TileMap
+@onready var tile_map: TileMap = %RoomMap
 
 # These constants define which tile coordinates in our TileSet correspond to
 # which character. This mapping is essential for the draw_room function.

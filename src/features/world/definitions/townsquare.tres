@@ -8,8 +8,8 @@ id = "town_square"
 name = "The Town Square"
 description = "The bustling central hub of the town."
 exits = {
-"dungeon": "dungeon",
-"inn": "inn"
+"east": "dungeon",
+"west": "inn"
 }
 item_ids = Array[String]([])
 player_ids = Array[String]([])

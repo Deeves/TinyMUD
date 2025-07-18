@@ -7,7 +7,10 @@ script = ExtResource("1_eovq3")
 id = "inn"
 name = "The Inn"
 description = "The warm and friendly Inn, host to dozens of interesting characters."
-exits = {}
-item_ids = Array[String]([])
+exits = {
+"east": "townsquare"
+}
+item_ids = Array[String](["mug"])
 player_ids = Array[String]([])
+layout = ["#######", "#.....#", "#.....#", "#.....#", "#######"]
 metadata/_custom_type_script = "uid://dwbhm3kp1yvii"
