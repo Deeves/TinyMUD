@@ -38,3 +38,15 @@ extends Resource
 ## currently in this room. This list is highly dynamic and will be updated
 ## every time a player enters or leaves the room.
 @export var player_ids: Array[String] = []
+
+## A simple visual layout for the room, represented by an array of strings.
+## This will be used by the TileMap to draw a graphical representation.
+## '#' = Wall, '.' = Floor, etc. The specific characters will be mapped
+## to tiles in the ascii_tileset.
+@export var layout: PackedStringArray = [
+	"#######",
+	"#.....#",
+	"#.....#",
+	"#.....#",
+	"#######",
+]
