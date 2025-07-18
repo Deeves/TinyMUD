@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3 uid="uid://brdgn3b47di3e"]
+
+[ext_resource type="TileSet" uid="uid://rhojc3qk14lp" path="res://src/assets/tilesets/ascii_atlas.tres" id="1_bj3h2"]
+
+[node name="MapView" type="Node2D"]
+
+[node name="RoomMap" type="TileMapLayer" parent="."]
+tile_set = ExtResource("1_bj3h2")
+
+[node name="ItemMap" type="TileMapLayer" parent="."]
+
+[node name="EntityMap" type="TileMapLayer" parent="."]
+
+[node name="PlayerMap" type="TileMapLayer" parent="."]
