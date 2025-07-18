@@ -1,54 +1,79 @@
 # res://src/features/ui/main_ui.gd
 # This script controls the main game user interface. It is responsible for
 # capturing user input, sending it to the command parser, and displaying
-# the results in the text log.
+# the results in the text log and map view.
+#
+# REFACTOR: This script is now "stateless." It does not track the player's
+# location itself. Instead, it relies on WorldDB as the single source of truth
+# and uses the CommandParser to fetch the current state.
 extends Control
 
-# We'll get direct references to our UI nodes using the %-notation for convenience.
 @onready var text_log: RichTextLabel = %TextLog
 @onready var input_line: LineEdit = %InputLine
+@onready var map_view: Control = %MapView
 
-# A placeholder for the player's unique ID. In a single-player context, this
-# can be anything. Once networking is implemented, this will be assigned by the host.
-const FAKE_PLAYER_ID = "player_1"
+# The ID for our player in this single-player session.
+const PLAYER_ID = "player_1"
 
-
-# The _ready function is called when the scene is initialized.
-# This is the perfect place to set up our signal connection.
 func _ready() -> void:
-	# Connect the LineEdit's 'text_submitted' signal to our handler function.
-	# This means whenever the user presses Enter in the input field,
-	# the _on_input_submitted function will be called.
+	# --- Single-Player Setup ---
+	# For the prototype, we create a player instance directly in the database.
+	# In multiplayer, this will be handled by the NetworkManager.
+	var player_data = PlayerResource.new()
+	player_data.id = PLAYER_ID
+	player_data.name = "You"
+	player_data.location_id = "tearoom" # The starting room ID.
+	WorldDB.players[PLAYER_ID] = player_data
+	# --- End Single-Player Setup ---
+
 	input_line.text_submitted.connect(_on_input_submitted)
-
-	# Set the initial focus to the input line so the player can start typing immediately.
 	input_line.grab_focus()
-
-	# Display a welcome message.
+	
 	log_message("[color=aqua]Welcome to the MUD Revival MVP![/color]")
-	log_message("Type 'look' to see your surroundings.")
+	
+	# Perform an initial "look" to show the player where they are.
+	_update_view()
 
 
-# This function is the signal handler for the input line.
 func _on_input_submitted(text: String) -> void:
-	# First, echo the player's command to the log so they can see what they typed.
-	log_message("[color=gray]> %s[/color]" % text)
+	if text.is_empty():
+		return
 
-	# Pass the command to the parser for processing. The parser will return a
-	# string (or null if there's no output).
-	var response = CommandParser.parse_command(FAKE_PLAYER_ID, text)
+	log_message("\n[color=gray]> %s[/color]" % text)
 
-	# If the parser returned a message, log it.
+	# The parser now handles all logic and returns the result.
+	var response = CommandParser.parse_command(PLAYER_ID, text)
+	
 	if response:
 		log_message(response)
 
-	# Clear the input line for the next command.
+	# After every command, refresh the view to show any changes.
+	_update_view()
+
 	input_line.clear()
-	# Re-focus the input line in case the user clicked elsewhere.
 	input_line.grab_focus()
 
 
-# A helper function to append messages to our RichTextLabel.
 func log_message(message: String) -> void:
-	# append_text handles BBCode parsing and adds a newline automatically.
 	text_log.append_text(message)
+	text_log.scroll_to_end()
+
+
+# This function now gets all its information from the WorldDB.
+func _update_view() -> void:
+	# Get the player's current data from the database.
+	var player: PlayerResource = WorldDB.players.get(PLAYER_ID)
+	if not player: return
+
+	# Get the player's current room data.
+	var room: RoomResource = WorldDB.rooms.get(player.location_id)
+	if not room:
+		log_message("[color=red]ERROR: Current room '%s' not found![/color]" % player.location_id)
+		return
+
+	# Tell the map view to draw the room and the player.
+	# For now, we'll just put the player in the center of the map view.
+	# A more advanced system could define specific coordinates in the RoomResource.
+	var map_center = map_view.tile_map.get_used_rect().get_center()
+	map_view.draw_room(room)
+	map_view.update_player_position(map_center)
