@@ -8,6 +8,10 @@ extends Node
 # We need access to the WorldDB to query and modify game state.
 @onready var world_db: WorldDB = get_node("/root/WorldDB")
 
+# A set of all verbs that are treated as movement commands. Using a PackedStringArray
+# allows for a fast 'has()' check.
+const MOVEMENT_VERBS = ["north", "n", "south", "s", "east", "e", "west", "w", "northeast", "ne", "northwest", "nw", "southeast", "se", "southwest", "sw", "up", "u", "down", "d"]
+
 # The command_map is a dictionary that links command strings (and their aliases)
 # to the functions that will handle them. This makes the system highly extensible.
 # Adding a new command is as simple as adding a new entry to this map.
@@ -25,29 +29,8 @@ var command_map: Dictionary = {
 	"who": _handle_who,
 	"inventory": _handle_inventory, "i": _handle_inventory, "inv": _handle_inventory,
 	"score": _handle_score, "stat": _handle_score,
-	# Movement
-	"north": _handle_move, "n": _handle_move,
-	"south": _handle_move, "s": _handle_move,
-	"east": _handle_move, "e": _handle_move,
-	"west": _handle_move, "w": _handle_move,
-	"northeast": _handle_move, "ne": _handle_move,
-	"northwest": _handle_move, "nw": _handle_move,
-	"southeast": _handle_move, "se": _handle_move,
-	"southwest": _handle_move, "sw": _handle_move,
-	"up": _handle_move, "u": _handle_move,
-	"down": _handle_move, "d": _handle_move,
 }
 
-
-# Dictionary to track which commands require arguments and their error messages
-var commands_requiring_args = {
-	"get": "What do you want to get?",
-	"take": "What do you want to take?",
-	"drop": "What do you want to drop?",
-	"say": "What do you want to say?",
-	"tell": "Who do you want to tell what?",
-	"shout": "What do you want to shout?"
-}
 
 # This is the main entry point for the parser. It takes a player's ID and
 # the full text of their command. It then tokenizes the input and attempts
@@ -63,18 +46,18 @@ func parse_command(player_id: String, input_text: String) -> void:
 	var verb: String = tokens[0].to_lower()
 	var args: Array[String] = tokens.slice(1)
 
-	# Check if the verb exists in our command map.
-	if command_map.has(verb):
-		# Check if command requires arguments but none were provided
-		if commands_requiring_args.has(verb) and args.is_empty():
-			print("Player '%s': %s" % [player_id, commands_requiring_args[verb]])
-			return
+	# Check if the verb is a movement command first.
+	if MOVEMENT_VERBS.has(verb):
+		_handle_move(player_id, [verb])
+		return
 
+	# Check if the verb exists in our main command map.
+	if command_map.has(verb):
 		var handler_func: Callable = command_map[verb]
-		# Call the handler with the player ID and arguments
 		handler_func.call(player_id, args)
 	else:
 		# If the command is not found, we'll eventually send an error to the player.
+		# This is the ONLY place where 'verb' can be safely used for this message.
 		print("Player '%s' issued unknown command: '%s'" % [player_id, verb])
 
 
@@ -87,24 +70,36 @@ func _handle_look(player_id: String, args: Array[String]) -> void:
 	print("Player '%s' is looking. Args: %s" % [player_id, args])
 
 func _handle_get(player_id: String, args: Array[String]) -> void:
+	if args.is_empty():
+		print("Player '%s' needs to specify what to get." % player_id)
+		return
 	print("Player '%s' is getting. Args: %s" % [player_id, args])
 
 func _handle_drop(player_id: String, args: Array[String]) -> void:
+	if args.is_empty():
+		print("Player '%s' needs to specify what to drop." % player_id)
+		return
 	print("Player '%s' is dropping. Args: %s" % [player_id, args])
 
 func _handle_say(player_id: String, args: Array[String]) -> void:
+	if args.is_empty():
+		print("Player '%s' needs to specify what to say." % player_id)
+		return
 	var message = " ".join(args)
 	print("Player '%s' says: '%s'" % [player_id, message])
 
 func _handle_tell(player_id: String, args: Array[String]) -> void:
 	if args.size() < 2:
-		print("Player '%s' tried to tell, but format is wrong." % player_id)
+		print("Player '%s' tried to tell, but format is wrong. (tell <player> <message>)" % player_id)
 		return
 	var target_player_name = args[0]
 	var message = " ".join(args.slice(1))
 	print("Player '%s' tells '%s': '%s'" % [player_id, target_player_name, message])
 
 func _handle_shout(player_id: String, args: Array[String]) -> void:
+	if args.is_empty():
+		print("Player '%s' needs to specify what to shout." % player_id)
+		return
 	var message = " ".join(args)
 	print("Player '%s' shouts: '%s'" % [player_id, message])
 
@@ -117,18 +112,6 @@ func _handle_inventory(player_id: String, args: Array[String]) -> void:
 func _handle_score(player_id: String, args: Array[String]) -> void:
 	print("Player '%s' requests score. Args: %s" % [player_id, args])
 
-# Dictionary to map abbreviated directions to their full names
-var direction_map = {
-	"n": "north", "s": "south", "e": "east", "w": "west",
-	"ne": "northeast", "nw": "northwest", "se": "southeast", "sw": "southwest",
-	"u": "up", "d": "down"
-}
-
 func _handle_move(player_id: String, args: Array[String]) -> void:
-	var direction = args[0] if not args.is_empty() else ""
-
-	# If no specific direction in args, use the command itself
-	if direction.is_empty():
-		direction = direction_map.get(verb, verb)
-
+	var direction = args[0]
 	print("Player '%s' is moving %s." % [player_id, direction])
