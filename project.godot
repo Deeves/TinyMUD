@@ -19,6 +19,16 @@ config/icon="res://icon.svg"
 CommandParser="*res://src/core/commands/CommandParser.gd"
 NetworkManager="*res://src/core/networking/NetworkManager.gd"
 WorldDb="*res://src/core/world/WorldDB.gd"
+Noray="*res://addons/netfox.noray/noray.gd"
+PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
+
+[dotnet]
+
+project/assembly_name="TinyMUD"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/netfox.internals/plugin.cfg", "res://addons/netfox.noray/plugin.cfg")
 
 [rendering]
 
