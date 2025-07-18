@@ -56,7 +56,7 @@ func _load_resources_from_path(path: String, dictionary: Dictionary) -> void:
 				# Load the resource from the disk.
 				var resource = load(path.path_join(file_name))
 				# Check if the resource and its ID are valid before adding it.
-				if resource and resource.has("id") and resource.id != "":
+				if resource and resource.get("id") != null and resource.id != "":
 					dictionary[resource.id] = resource
 				else:
 					# This is a critical error. A resource file is invalid.

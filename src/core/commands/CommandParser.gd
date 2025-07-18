@@ -5,7 +5,7 @@ extends Node
 
 # Get a reference to the WorldDB singleton by its global name.
 # This is more robust than get_node() and avoids load-order issues.
-var world_db = WorldDB
+@onready var world_db = get_node("/root/WorldDb")  # Note: lowercase 'b' to match project.godot
 
 # This flag prevents the parser from running until the database is ready.
 var is_ready = false

@@ -12,15 +12,20 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_fufqt")
 
+[node name="MapView" parent="." instance=ExtResource("2_ndl70")]
+layout_mode = 2
+anchor_right = 1.0
+anchor_bottom = 0.698
+offset_right = -1.0
+offset_bottom = -0.304016
+
 [node name="VBoxContainer" type="VBoxContainer" parent="."]
 layout_mode = 1
 anchors_preset = -1
 anchor_right = 1.007
 anchor_bottom = 1.0
-offset_right = -8.06409
-
-[node name="MapView" parent="VBoxContainer" instance=ExtResource("2_ndl70")]
-layout_mode = 2
+offset_top = 418.0
+offset_right = -8.06396
 
 [node name="ScrollContainer" type="ScrollContainer" parent="VBoxContainer"]
 layout_mode = 2
@@ -32,3 +37,7 @@ size_flags_horizontal = 3
 bbcode_enabled = true
 text = "> "
 threaded = true
+
+[node name="InputLine" type="LineEdit" parent="VBoxContainer"]
+layout_mode = 2
+caret_blink = true

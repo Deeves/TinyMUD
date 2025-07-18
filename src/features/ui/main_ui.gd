@@ -8,11 +8,12 @@
 # and uses the CommandParser to fetch the current state.
 extends Control
 
-@onready var text_log: RichTextLabel = %TextLog
-@onready var input_line: LineEdit = %InputLine
-@onready var map_view: Control = %MapView
+@onready var text_log = $VBoxContainer/ScrollContainer/RichTextLabel
+@onready var input_line = $VBoxContainer/InputLine  # Note: You may need to add this node to your scene
+@onready var map_view = $VBoxContainer/MapView
 
-@onready var world_db: WorldDB = get_node("/root/WorldDB")
+# Updated to match the autoload name in project.godot (WorldDb with lowercase 'b')
+@onready var world_db: WorldDB = get_node("/root/WorldDb")
 
 # This flag prevents the parser from running until the database is ready.
 var is_ready = false
@@ -41,7 +42,7 @@ func _on_input_submitted(text: String) -> void:
 
 	log_message("\n[color=gray]> %s[/color]" % text)
 
-	# The parser now handles all logic and returns the result.
+	# The parser now handles all logic and returns the response.
 	var response = CommandParser.parse_command(PLAYER_ID, text)
 
 	if response:
