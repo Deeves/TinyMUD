@@ -13,3 +13,14 @@ export_credentials.cfg
 .mono/
 data_*/
 mono_crash.*.json
+
+# User-specific files
+*.user
+*.usercfg
+
+# Build output
+build/
+dist/
+
+# VS Code
+.vscode/
