@@ -110,7 +110,7 @@ func _handle_inventory(player_id: String, args: Array[String]) -> void:
 	print("Player '%s' requests inventory. Args: %s" % [player_id, args])
 
 func _handle_score(player_id: String, args: Array[String]) -> void:
-	print("Player '%s' requests score. Args: %s" % [player_id, args])
+	print("Player '%s' requests XP score. Args: %s" % [player_id, args])
 
 func _handle_move(player_id: String, args: Array[String]) -> void:
 	var direction = args[0]
