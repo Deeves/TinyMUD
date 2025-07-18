@@ -8,11 +8,11 @@
 - **Minimalistic Design**: TinyMUD focuses on the core aspects of MUD gameplay, providing a simple yet powerful foundation for developers.
 - **Extensibility**: The modular architecture allows for easy addition of new features and mechanics, enabling developers to customize their game worlds.
 - **Lightweight**: The TinyMUD client is less than 10mb in size, as small as a .png file.
-- **Cutting Edge Technology**: Leveraging Godot 4, TinyMUD aims to provide a state-of-the-art development experience.
+- **Cutting Edge Technology**: Leveraging Godot 4, TinyMUD aims to provide the most state-of-the-art and feature-rich multiplayer text adventure platform possible.
 
 ## Getting Started
 
-To get started with TinyMUD, clone the repository and follow the installation instructions in the [INSTALL.md](INSTALL.md) file.
+To get started with TinyMUD, clone the repository and follow the installation instructions.
 
 
 git clone https://github.com/deeves/TinyMUD.git
