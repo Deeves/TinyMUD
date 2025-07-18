@@ -1,10 +1,14 @@
 # res://src/core/commands/command_parser.gd
 # REFACTOR: This version contains the live game logic for the MVP.
-# The handler functions now directly query and modify the WorldDB to
-# reflect the player's actions.
+# It now waits for the WorldDB to be ready before processing commands.
 extends Node
 
-@onready var world_db: WorldDB = get_node("/root/WorldDB")
+# Get a reference to the WorldDB singleton by its global name.
+# This is more robust than get_node() and avoids load-order issues.
+var world_db = WorldDB
+
+# This flag prevents the parser from running until the database is ready.
+var is_ready = false
 
 const MOVEMENT_VERBS = ["north", "n", "south", "s", "east", "e", "west", "w", "northeast", "ne", "northwest", "nw", "southeast", "se", "southwest", "sw", "up", "u", "down", "d"]
 
@@ -16,7 +20,18 @@ var command_map: Dictionary = {
 	# Other commands will be added here.
 }
 
+func _ready():
+	# Wait for the WorldDB to finish loading before allowing commands.
+	await world_db.database_ready
+	is_ready = true
+	print("CommandParser is ready.")
+
+
 func parse_command(player_id: String, input_text: String) -> String:
+	# If the database isn't ready, don't process any commands.
+	if not is_ready:
+		return "[color=orange]World database is still loading...[/color]"
+
 	var sanitized_input = input_text.strip_edges()
 	if sanitized_input.is_empty(): return ""
 
@@ -46,7 +61,7 @@ func _handle_look(player_id: String, args: Array[String]) -> String:
 	var result = ""
 	result += "[b][color=white]%s[/color][/b]\n" % room.name
 	result += "  %s\n" % room.description
-	
+
 	# List items in the room.
 	if not room.item_ids.is_empty():
 		result += "[color=lime]You also see:[/color]\n"
@@ -67,17 +82,17 @@ func _handle_move(player_id: String, direction: String) -> String:
 	var room: RoomResource = world_db.rooms.get(player.location_id)
 
 	# Check if the exit exists.
-	if not room.exits.has(direction):
+	if not direction in room.exits:
 		return "[color=red]You can't go that way.[/color]"
 
 	# Get the destination room ID.
 	var destination_id = room.exits[direction]
 	if not world_db.rooms.has(destination_id):
 		return "[color=red]Error: That exit leads nowhere.[/color]"
-	
+
 	# Update the player's location.
 	player.location_id = destination_id
-	
+
 	# Return the description of the new room.
 	return _handle_look(player_id, [])
 
@@ -85,7 +100,7 @@ func _handle_inventory(player_id: String, args: Array[String]) -> String:
 	var player: PlayerResource = world_db.players.get(player_id)
 	if player.inventory_ids.is_empty():
 		return "You are not carrying anything."
-	
+
 	var result = "You are carrying:\n"
 	for item_id in player.inventory_ids:
 		var item_res: ItemResource = world_db.items.get(item_id)
@@ -95,7 +110,7 @@ func _handle_inventory(player_id: String, args: Array[String]) -> String:
 
 func _handle_get(player_id: String, args: Array[String]) -> String:
 	if args.is_empty(): return "[color=orange]What do you want to get?[/color]"
-	
+
 	var player: PlayerResource = world_db.players.get(player_id)
 	var room: RoomResource = world_db.rooms.get(player.location_id)
 	var target_keyword = args[0].to_lower()
@@ -126,5 +141,5 @@ func _handle_drop(player_id: String, args: Array[String]) -> String:
 			player.inventory_ids.erase(item_id)
 			room.item_ids.append(item_id)
 			return "You drop the %s." % item_res.name
-			
+
 	return "You don't have that."

@@ -8,6 +8,10 @@
 class_name WorldDB
 extends Node
 
+# This signal is emitted after all resources have been loaded into the
+# dictionaries. Other nodes can wait for this signal to safely access the data.
+signal database_ready
+
 # Master dictionary for all RoomResources, keyed by their unique 'id'.
 var rooms: Dictionary = {}
 
@@ -30,6 +34,9 @@ func _ready() -> void:
 	_load_resources_from_path(ROOM_DEFINITIONS_PATH, rooms)
 	_load_resources_from_path(ITEM_DEFINITIONS_PATH, items)
 	print("WorldDB: %d rooms and %d items loaded." % [rooms.size(), items.size()])
+
+	# After all loading is complete, emit the signal.
+	emit_signal("database_ready")
 
 
 # A generic helper function to load all .tres resource files from a given path.

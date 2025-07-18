@@ -7,7 +7,11 @@ script = ExtResource("1_7tfmj")
 id = "town_square"
 name = "The Town Square"
 description = "The bustling central hub of the town."
-exits = {}
+exits = {
+"dungeon": "dungeon",
+"inn": "inn"
+}
 item_ids = Array[String]([])
 player_ids = Array[String]([])
+layout = ["#######", "#.....#", "#.....#", "#.....#", "#######"]
 metadata/_custom_type_script = "uid://dwbhm3kp1yvii"

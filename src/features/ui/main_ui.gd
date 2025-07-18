@@ -12,25 +12,25 @@ extends Control
 @onready var input_line: LineEdit = %InputLine
 @onready var map_view: Control = %MapView
 
+@onready var world_db: WorldDB = get_node("/root/WorldDB")
+
+# This flag prevents the parser from running until the database is ready.
+var is_ready = false
+
 # The ID for our player in this single-player session.
 const PLAYER_ID = "player_1"
 
-func _ready() -> void:
-	# --- Single-Player Setup ---
-	# For the prototype, we create a player instance directly in the database.
-	# In multiplayer, this will be handled by the NetworkManager.
-	var player_data = PlayerResource.new()
-	player_data.id = PLAYER_ID
-	player_data.name = "You"
-	player_data.location_id = "tearoom" # The starting room ID.
-	WorldDB.players[PLAYER_ID] = player_data
-	# --- End Single-Player Setup ---
+func _ready():
+	# Wait for the WorldDB to finish loading before allowing commands.
+	await world_db.database_ready
+	is_ready = true
+	print("CommandParser is ready.")
 
 	input_line.text_submitted.connect(_on_input_submitted)
 	input_line.grab_focus()
-	
+
 	log_message("[color=aqua]Welcome to the MUD Revival MVP![/color]")
-	
+
 	# Perform an initial "look" to show the player where they are.
 	_update_view()
 
@@ -43,7 +43,7 @@ func _on_input_submitted(text: String) -> void:
 
 	# The parser now handles all logic and returns the result.
 	var response = CommandParser.parse_command(PLAYER_ID, text)
-	
+
 	if response:
 		log_message(response)
 
@@ -62,11 +62,11 @@ func log_message(message: String) -> void:
 # This function now gets all its information from the WorldDB.
 func _update_view() -> void:
 	# Get the player's current data from the database.
-	var player: PlayerResource = WorldDB.players.get(PLAYER_ID)
+	var player: PlayerResource = world_db.players.get(PLAYER_ID)
 	if not player: return
 
 	# Get the player's current room data.
-	var room: RoomResource = WorldDB.rooms.get(player.location_id)
+	var room: RoomResource = world_db.rooms.get(player.location_id)
 	if not room:
 		log_message("[color=red]ERROR: Current room '%s' not found![/color]" % player.location_id)
 		return
