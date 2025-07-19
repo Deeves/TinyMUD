@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="TinyMUD"
-run/main_scene="uid://curlmme6couja"
+run/main_scene="uid://bh0fs7so2bj0r"
 config/features=PackedStringArray("4.4", "Mobile")
 config/icon="res://icon.svg"
 
