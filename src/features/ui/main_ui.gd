@@ -1,80 +1,39 @@
-# res://src/features/ui/main_ui.gd
-# This script controls the main game user interface. It is responsible for
-# capturing user input, sending it to the command parser, and displaying
-# the results in the text log and map view.
-#
-# REFACTOR: This script is now "stateless." It does not track the player's
-# location itself. Instead, it relies on WorldDB as the single source of truth
-# and uses the CommandParser to fetch the current state.
+# main_ui.gd
+# This script should be attached to the root node of your `main_ui.tscn`.
+# It is responsible for managing all the nodes within the UI scene.
+# Its responsibilities are:
+# 1. Managing its own child nodes (text_log, input_line).
+# 2. Emitting a signal (`command_submitted`) when the player enters a command.
+# 3. Providing a public function (`append_to_log`) that parent scenes can call
+#    to display text in the RichTextLabel.
+
 extends Control
 
-@onready var text_log = $VBoxContainer/ScrollContainer/RichTextLabel
-@onready var input_line = $VBoxContainer/InputLine  # Note: You may need to add this node to your scene
-@onready var map_view = $VBoxContainer/MapView
+# A signal to notify the parent scene (Game.gd) that a command is ready to be sent.
+# This allows us to communicate upwards without a hard dependency.
+signal command_submitted(text)
 
-# Updated to match the autoload name in project.godot (WorldDb with lowercase 'b')
-@onready var world_db: WorldDB = get_node("/root/WorldDb")
+# --- Node References ---
+# Use @export to link the nodes from within the main_ui.tscn scene.
+@export var text_log: RichTextLabel
+@export var input_line: LineEdit
 
-# This flag prevents the parser from running until the database is ready.
-var is_ready = false
-
-# The ID for our player in this single-player session.
-const PLAYER_ID = "player_1"
-
+# Called when the node enters the scene tree for the first time.
 func _ready():
-	# Wait for the WorldDB to finish loading before allowing commands.
-	await world_db.database_ready
-	is_ready = true
-	print("CommandParser is ready.")
+	# Connect the LineEdit's built-in signal to our local handler.
+	input_line.text_submitted.connect(_on_input_line_submitted)
 
-	input_line.text_submitted.connect(_on_input_submitted)
-	input_line.grab_focus()
-
-	log_message("[color=aqua]Welcome to the MUD Revival MVP![/color]")
-
-	# Perform an initial "look" to show the player where they are.
-	_update_view()
-
-
-func _on_input_submitted(text: String) -> void:
-	if text.is_empty():
-		return
-
-	log_message("\n[color=gray]> %s[/color]" % text)
-
-	# The parser now handles all logic and returns the response.
-	var response = CommandParser.parse_command(PLAYER_ID, text)
-
-	if response:
-		log_message(response)
-
-	# After every command, refresh the view to show any changes.
-	_update_view()
-
+# This function is called when the player presses Enter in the input field.
+func _on_input_line_submitted(text: String):
+	# Clear the input field for the next command.
 	input_line.clear()
-	input_line.grab_focus()
+	# Emit our custom signal, passing the user's text along. The parent
+	# scene (Game.gd) will be listening for this.
+	emit_signal("command_submitted", text)
 
-
-func log_message(message: String) -> void:
-	text_log.append_text(message)
-	text_log.scroll_to_end()
-
-
-# This function now gets all its information from the WorldDB.
-func _update_view() -> void:
-	# Get the player's current data from the database.
-	var player: PlayerResource = world_db.players.get(PLAYER_ID)
-	if not player: return
-
-	# Get the player's current room data.
-	var room: RoomResource = world_db.rooms.get(player.location_id)
-	if not room:
-		log_message("[color=red]ERROR: Current room '%s' not found![/color]" % player.location_id)
-		return
-
-	# Tell the map view to draw the room and the player.
-	# For now, we'll just put the player in the center of the map view.
-	# A more advanced system could define specific coordinates in the RoomResource.
-	var map_center = map_view.tile_map.get_used_rect().get_center()
-	map_view.draw_room(room)
-	map_view.update_player_position(map_center)
+# This is a public function that the parent scene (Game.gd) can call.
+# It's the proper way to allow outside scenes to interact with this UI.
+func append_to_log(message: String):
+	# Append the text from the host to our on-screen log.
+	# We add a newline character to ensure each message is on its own line.
+	text_log.append_text(message + "\n")

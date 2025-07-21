@@ -5,12 +5,13 @@
 # will interact with this singleton to query and modify the game state.
 # This centralized approach is essential for maintaining a single,
 # authoritative source of truth on the session host.
-class_name WorldDB
 extends Node
 
 # This signal is emitted after all resources have been loaded into the
 # dictionaries. Other nodes can wait for this signal to safely access the data.
 signal database_ready
+
+var is_ready: bool = false
 
 # Master dictionary for all RoomResources, keyed by their unique 'id'.
 var rooms: Dictionary = {}
@@ -36,6 +37,7 @@ func _ready() -> void:
 	print("WorldDB: %d rooms and %d items loaded." % [rooms.size(), items.size()])
 
 	# After all loading is complete, emit the signal.
+	is_ready = true
 	emit_signal("database_ready")
 
 

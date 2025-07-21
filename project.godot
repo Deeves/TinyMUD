@@ -17,11 +17,12 @@ config/icon="res://icon.svg"
 
 [autoload]
 
-WorldDb="*res://src/core/world/WorldDB.gd"
-NetworkManager="res://src/core/networking/NetworkManager.gd"
+WorldDB="*res://src/core/world/WorldDB.gd"
+NetworkManager="*res://src/core/networking/NetworkManager.gd"
 Noray="*res://addons/netfox.noray/noray.gd"
 PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
 CommandParser="*res://src/core/commands/CommandParser.gd"
+Game="*res://src/core/game/game.gd"
 
 [dotnet]
 

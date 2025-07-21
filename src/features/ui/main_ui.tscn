@@ -3,7 +3,7 @@
 [ext_resource type="Script" uid="uid://djva8mxwtxxp3" path="res://src/features/ui/main_ui.gd" id="1_fufqt"]
 [ext_resource type="PackedScene" uid="uid://brdgn3b47di3e" path="res://src/features/ui/map_view.tscn" id="2_ndl70"]
 
-[node name="MainUI" type="Control"]
+[node name="MainUI" type="Control" node_paths=PackedStringArray("text_log", "input_line")]
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -11,6 +11,8 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_fufqt")
+text_log = NodePath("VBoxContainer/ScrollContainer/TextLog")
+input_line = NodePath("VBoxContainer/InputLine")
 
 [node name="MapView" parent="." instance=ExtResource("2_ndl70")]
 layout_mode = 2
@@ -33,7 +35,7 @@ offset_right = -8.06396
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="RichTextLabel" type="RichTextLabel" parent="VBoxContainer/ScrollContainer"]
+[node name="TextLog" type="RichTextLabel" parent="VBoxContainer/ScrollContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
 bbcode_enabled = true
@@ -46,7 +48,8 @@ threaded = true
 layout_mode = 2
 caret_blink = true
 
-[node name="ColorRect" type="ColorRect" parent="."]
+[node name="AppBackround" type="ColorRect" parent="."]
+visible = false
 modulate = Color(0.107011, 0.0838506, 0.164508, 1)
 layout_mode = 2
 offset_top = -1.0
@@ -55,3 +58,5 @@ offset_bottom = 648.0
 grow_horizontal = 2
 grow_vertical = 2
 color = Color(0.040736, 0.040736, 0.040736, 1)
+
+[connection signal="text_submitted" from="VBoxContainer/InputLine" to="." method="_on_input_submitted"]

@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="PlayerResource" load_steps=2 format=3 uid="uid://bqfrokwff08j5"]
+
+[ext_resource type="Script" uid="uid://bj00gfpjl0eae" path="res://src/features/player/player_resource.gd" id="1_ow0an"]
+
+[resource]
+script = ExtResource("1_ow0an")
+id = "player_1"
+name = "Adventurer"
+location_id = "townsquare"
+inventory_ids = Array[String]([])
+stats = {}
+metadata/_custom_type_script = "uid://bj00gfpjl0eae"
