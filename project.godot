@@ -18,9 +18,9 @@ config/icon="res://icon.svg"
 [autoload]
 
 WorldDB="*res://src/core/world/WorldDB.gd"
-NetworkManager="*res://src/core/networking/NetworkManager.gd"
 Noray="*res://addons/netfox.noray/noray.gd"
 PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
+NetworkManager="*res://src/core/networking/NetworkManager.gd"
 CommandParser="*res://src/core/commands/CommandParser.gd"
 Game="*res://src/core/game/game.gd"
 
@@ -31,6 +31,13 @@ project/assembly_name="TinyMUD"
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/netfox.internals/plugin.cfg", "res://addons/netfox.noray/plugin.cfg")
+
+[display]
+
+window/size/viewport_width=1152
+window/size/viewport_height=648
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"
 
 [rendering]
 

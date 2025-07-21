@@ -3,8 +3,9 @@
 [ext_resource type="PackedScene" uid="uid://curlmme6couja" path="res://src/features/ui/main_ui.tscn" id="1_80nbo"]
 [ext_resource type="Script" uid="uid://drkl4h7cor3iw" path="res://src/core/game/game.gd" id="1_e2o6t"]
 
-[node name="Game" type="Node2D"]
+[node name="Game" type="Node2D" node_paths=PackedStringArray("main_ui")]
 script = ExtResource("1_e2o6t")
+main_ui = NodePath("MainUI")
 
 [node name="MainUI" parent="." instance=ExtResource("1_80nbo")]
 anchors_preset = 0
@@ -21,3 +22,7 @@ size_flags_vertical = 6
 
 [node name="Camera2D" type="Camera2D" parent="."]
 position = Vector2(578, 325)
+
+[node name="MultiplayerSpawner" type="MultiplayerSpawner" parent="."]
+_spawnable_scenes = PackedStringArray("uid://cpciwplyw6b8")
+spawn_path = NodePath("..")

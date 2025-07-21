@@ -1,0 +1,21 @@
+[gd_scene load_steps=5 format=3 uid="uid://cpciwplyw6b8"]
+
+[ext_resource type="Script" uid="uid://ci4sb568oaedc" path="res://src/features/player/player.gd" id="1_oubcf"]
+[ext_resource type="Texture2D" uid="uid://bie3528rmfpqn" path="res://src/assets/tilesets/entity sprite sheet.png" id="2_0ph83"]
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_3v8pm"]
+atlas = ExtResource("2_0ph83")
+region = Rect2(476, 0, 16, 16)
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_0ph83"]
+
+[node name="Player" type="Node2D"]
+script = ExtResource("1_oubcf")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture_filter = 1
+texture = SubResource("AtlasTexture_3v8pm")
+region_rect = Rect2(0, 0, 64, 64)
+
+[node name="MultiplayerSynchronizer" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("SceneReplicationConfig_0ph83")
