@@ -15,6 +15,7 @@ extends Control
 # By using @export, we create fields in the Inspector. This allows us to
 # drag and drop the actual nodes from the scene tree onto this script's
 # properties, creating a direct and safe reference without hardcoding paths.
+@export var singleplayer: Button
 @export var host_button: Button
 @export var join_button: Button
 @export var session_id_input: LineEdit
@@ -29,6 +30,7 @@ func _ready():
 	# --- Connect UI Signals ---
 	# Connect the 'pressed' signal of our buttons to their handler functions.
 	# This is the standard way to handle UI events in Godot.
+	singleplayer.pressed.connect(_on_singleplayer_button_pressed)
 	host_button.pressed.connect(_on_host_button_pressed)
 	join_button.pressed.connect(_on_join_button_pressed)
 
@@ -74,6 +76,14 @@ func _on_join_button_pressed():
 	# Call the join_session function in our singleton.
 	NetworkManager.join_session(oid)
 
+# --- Singleplayer Signal Handlers ---
+
+func _on_singleplayer_button_pressed():
+	host_button.disabled = true
+	join_button.disabled = true
+	session_id_input.editable = false
+	status_label.text = "starting Singleplayer..."
+	NetworkManager.host_session()
 
 # --- NetworkManager Signal Handlers ---
 

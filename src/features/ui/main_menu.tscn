@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://e5pnobjskcbm" path="res://src/features/ui/main_menu.gd" id="1_nic4u"]
 
-[node name="MainMenu" type="Control" node_paths=PackedStringArray("host_button", "join_button", "session_id_input", "status_label")]
+[node name="MainMenu" type="Control" node_paths=PackedStringArray("singleplayer", "host_button", "join_button", "session_id_input", "status_label")]
 auto_translate_mode = 2
 layout_mode = 3
 anchors_preset = 15
@@ -11,6 +11,7 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_nic4u")
+singleplayer = NodePath("SubViewportContainer/SubViewport/VBoxContainer/Singleplayer")
 host_button = NodePath("SubViewportContainer/SubViewport/VBoxContainer/HostButton")
 join_button = NodePath("SubViewportContainer/SubViewport/VBoxContainer/HBoxContainer/JoinButton")
 session_id_input = NodePath("SubViewportContainer/SubViewport/VBoxContainer/HBoxContainer/LineEdit")
@@ -48,6 +49,10 @@ theme_override_constants/separation = 10
 layout_mode = 2
 text = "Status: Disconnected"
 horizontal_alignment = 1
+
+[node name="Singleplayer" type="Button" parent="SubViewportContainer/SubViewport/VBoxContainer"]
+layout_mode = 2
+text = "Singleplayer"
 
 [node name="HostButton" type="Button" parent="SubViewportContainer/SubViewport/VBoxContainer"]
 layout_mode = 2

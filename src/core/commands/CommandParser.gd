@@ -36,6 +36,7 @@ func parse_command(input_text: String):
 	# Instead of returning the result, the host now sends it back to the
 	# specific client who issued the command using another RPC.
 	Game.rpc_id(player_id, "log_message", response)
+	print(response)
 
 
 # --- Example Command Handler (to be expanded in Phase 5) ---

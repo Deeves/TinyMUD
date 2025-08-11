@@ -11,18 +11,19 @@ config_version=5
 [application]
 
 config/name="TinyMUD"
-run/main_scene="uid://bh0fs7so2bj0r"
+run/main_scene="uid://curlmme6couja"
 config/features=PackedStringArray("4.4", "Mobile")
 config/icon="res://icon.svg"
 
 [autoload]
 
 WorldDB="*res://src/core/world/WorldDB.gd"
-Noray="*res://addons/netfox.noray/noray.gd"
-PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
 NetworkManager="*res://src/core/networking/NetworkManager.gd"
 CommandParser="*res://src/core/commands/CommandParser.gd"
 Game="*res://src/core/game/game.gd"
+Noray="*res://addons/netfox.noray/noray.gd"
+PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
+
 
 [dotnet]
 
