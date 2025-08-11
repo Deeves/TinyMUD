@@ -24,6 +24,12 @@ Game="*res://src/core/game/game.gd"
 Noray="*res://addons/netfox.noray/noray.gd"
 PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
 
+[display]
+
+window/size/viewport_width=1152
+window/size/viewport_height=648
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"
 
 [dotnet]
 
@@ -32,13 +38,6 @@ project/assembly_name="TinyMUD"
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/netfox.internals/plugin.cfg", "res://addons/netfox.noray/plugin.cfg")
-
-[display]
-
-window/size/viewport_width=1152
-window/size/viewport_height=648
-window/stretch/mode="canvas_items"
-window/stretch/aspect="keep"
 
 [rendering]
 

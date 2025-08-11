@@ -41,14 +41,14 @@ func _ready():
 	# connection lifecycle. This is the core of our event-driven networking.
 	# We are listening for specific events from the Noray addon and will
 	# trigger our own logic in response.
-	Noray.registered_with_server.connect(_on_noray_registered_with_server)
-	Noray.register_with_server_failed.connect(_on_noray_register_with_server_failed)
-	Noray.connected_to_peer.connect(_on_noray_connected_to_peer)
+	Noray.register_host()
+
 
 	# Immediately try to connect to the Noray server upon game start.
 	# This gets our client registered and ready to host or join a session.
 	print("Connecting to Noray server at %s:%d" % [NORAY_SERVER_URL, NORAY_SERVER_PORT])
-	Noray.connect_to_server(NORAY_SERVER_URL, NORAY_SERVER_PORT)
+
+
 
 
 # --- Public Methods ---
