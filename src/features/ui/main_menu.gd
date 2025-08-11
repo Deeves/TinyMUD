@@ -72,6 +72,7 @@ func _on_join_button_pressed():
 	join_button.disabled = true
 	session_id_input.editable = false
 	status_label.text = "Joining session..."
+	set_process_input(false)
 
 	# Call the join_session function in our singleton.
 	NetworkManager.join_session(oid)
@@ -84,6 +85,7 @@ func _on_singleplayer_button_pressed():
 	session_id_input.editable = false
 	status_label.text = "starting Singleplayer..."
 	NetworkManager.host_session(true)
+	set_process_input(false)
 
 # --- NetworkManager Signal Handlers ---
 
