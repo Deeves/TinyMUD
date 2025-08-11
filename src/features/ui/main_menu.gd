@@ -83,7 +83,7 @@ func _on_singleplayer_button_pressed():
 	join_button.disabled = true
 	session_id_input.editable = false
 	status_label.text = "starting Singleplayer..."
-	NetworkManager.host_session()
+	NetworkManager.host_session(true)
 
 # --- NetworkManager Signal Handlers ---
 
