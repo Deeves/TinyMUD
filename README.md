@@ -1,8 +1,16 @@
-# AI Multi‑User Dungeon (Godot + Python)
+# TinyMUD
+ The public repo for TinyMUD
 
-A tiny, beginner‑friendly MUD prototype: a Godot 4 client chats with a Python server that can reply as an AI NPC (Gemini) or a friendly offline fallback.
+ TinyMUD is a thought experiment in revisiting the concept of a minimalistic, extensible, and modular [MUD (Multi-User Dungeon)](https://en.wikipedia.org/wiki/Multi-user_dungeon) server, utilizing cutting edge software. It is designed to be lightweight and easy to extend, allowing developers to create their own game worlds and mechanics.
 
-Great first contributions: add new locations (rooms), add NPC names, or tweak the AI persona.
+## Features
+
+- **Minimalistic Design**: TinyMUD focuses on the core aspects of MUD gameplay, providing a simple yet powerful foundation for developers.
+- **Extensibility**: The modular architecture allows for easy addition of new features and mechanics, enabling developers to customize their game worlds.
+- **Lightweight**: The TinyMUD client is less than 10mb in size, as small as a .png file.
+- **Cutting Edge Technology**: Leveraging Godot 4, TinyMUD aims to provide the most state-of-the-art and feature-rich multiplayer text adventure platform possible.
+- **Admin Tools** Create nearly anything in-game with Admin tools, become the ultimate Dungeon Master.
+- **Google Gemini Support** AI NPCs reply in-character with provided Google Gemini API key ([They're free!](https://aistudio.google.com/)) with an offline fallback.
 
 ## What’s inside
 
@@ -17,6 +25,8 @@ Great first contributions: add new locations (rooms), add NPC names, or tweak th
   - `server/world.py` — very small world model: Rooms, Players, NPC lists
 
 See also: docs/architecture.md for a gentle code tour and data flow diagrams.
+
+Great first contributions: add new locations (rooms), add NPC names, or tweak the AI persona. Make the world your own!
 
 ## Prerequisites
 
