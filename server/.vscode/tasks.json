@@ -1,0 +1,38 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Flask-SocketIO server",
+			"type": "shell",
+			"command": "python app.py",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run server.py",
+			"type": "shell",
+			"command": "python server.py",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run Python server",
+			"type": "shell",
+			"command": "python server.py",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		}
+	]
+}

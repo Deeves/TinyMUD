@@ -10,32 +10,7 @@ config_version=5
 
 [application]
 
-config/name="TinyMUD"
-run/main_scene="uid://42875keb3beg"
-config/features=PackedStringArray("4.4", "Mobile")
+config/name="AI Multi User Dungeon"
+run/main_scene="uid://ba8tqqbwwdoco"
+config/features=PackedStringArray("4.5", "Forward Plus")
 config/icon="res://icon.svg"
-
-[autoload]
-
-WorldDB="*res://src/core/world/WorldDB.gd"
-NetworkManager="*res://src/core/networking/NetworkManager.gd"
-CommandParser="*res://src/core/commands/CommandParser.gd"
-Game="*res://src/core/game/game.gd"
-Noray="*res://addons/netfox.noray/noray.gd"
-PacketHandshake="*res://addons/netfox.noray/packet-handshake.gd"
-
-[display]
-
-window/stretch/mode="canvas_items"
-
-[dotnet]
-
-project/assembly_name="TinyMUD"
-
-[editor_plugins]
-
-enabled=PackedStringArray("res://addons/netfox.internals/plugin.cfg", "res://addons/netfox.noray/plugin.cfg")
-
-[rendering]
-
-renderer/rendering_method="mobile"

@@ -1,0 +1,68 @@
+[gd_scene load_steps=6 format=3 uid="uid://ba8tqqbwwdoco"]
+
+[ext_resource type="Script" uid="uid://4be784juhajl" path="res://src/chat_ui.gd" id="1_f5dq2"]
+[ext_resource type="FontFile" uid="uid://bfxpq0elhrmp8" path="res://assets/fonts/PerfectDOSVGA437.ttf" id="2_41vka"]
+[ext_resource type="FontFile" uid="uid://dyxvn2gxta30m" path="res://assets/fonts/RunelikeFree-Regular.ttf" id="3_oeqk1"]
+[ext_resource type="FontFile" uid="uid://dsomvmxntlph0" path="res://assets/fonts/firstorderplain.ttf" id="4_p8frv"]
+[ext_resource type="FontFile" uid="uid://do5sckj4b5uyx" path="res://assets/fonts/hobbitonbrushhand.ttf" id="5_nh2bv"]
+
+[node name="ChatUi" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_f5dq2")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0, 0, 0, 1)
+
+[node name="RichTextLabel" type="RichTextLabel" parent="."]
+layout_mode = 1
+anchors_preset = -1
+anchor_right = 1.0
+anchor_bottom = 0.95400006
+offset_bottom = -0.1920166
+focus_mode = 0
+focus_behavior_recursive = 1
+theme_override_fonts/normal_font = ExtResource("2_41vka")
+theme_override_fonts/bold_font = ExtResource("4_p8frv")
+theme_override_fonts/bold_italics_font = ExtResource("3_oeqk1")
+theme_override_fonts/italics_font = ExtResource("5_nh2bv")
+bbcode_enabled = true
+text = "TinyMUD V2.0.0"
+scroll_following = true
+context_menu_enabled = true
+threaded = true
+selection_enabled = true
+
+[node name="LineEdit" type="LineEdit" parent="."]
+layout_mode = 1
+anchors_preset = -1
+anchor_top = 0.952
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = 0.104003906
+grow_horizontal = 2
+grow_vertical = 0
+focus_behavior_recursive = 2
+theme_override_fonts/font = ExtResource("2_41vka")
+max_length = 280
+keep_editing_on_text_submit = true
+expand_to_text_length = true
+backspace_deletes_composite_character_enabled = true
+clear_button_enabled = true
+caret_blink = true
+
+[node name="OptionsButton" type="Button" parent="."]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.9
+anchor_right = 1.0
+anchor_bottom = 0.048
+text = "Options"

@@ -1,26 +1,50 @@
 # Godot 4+ specific ignores
 .godot/
-
-# Godot-specific ignores
 .import/
-export.cfg
-export_credentials.cfg
+*.import
+/android/
+export/
+Compiled Clients/
+Compiled Clients*/
 
-# Imported translations (automatically generated from CSV files)
-*.translation
+# Temporary/backup
+*.tmp
+*.bak
+*.swp
+*.swo
 
-# Mono-specific ignores
-.mono/
-data_*/
-mono_crash.*.json
-
-# User-specific files
-*.user
-*.usercfg
-
-# Build output
-build/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+env/
+.mypy_cache/
+.pytest_cache/
+.coverage*
+htmlcov/
 dist/
+build/
+*.egg-info/
+.eggs/
+.cache/
 
-# VS Code
-.vscode/
+# Local env
+.env
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/tasks.json
+
+# Runtime data (regenerate locally)
+server/world_state.json
+server/__pycache__/
+
+# Logs
+*.log

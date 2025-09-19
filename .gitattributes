@@ -1,4 +1,19 @@
-# Auto detect text files and perform LF normalization
-* text=auto
-*.ogg filter=lfs diff=lfs merge=lfs -text
-*.png filter=lfs diff=lfs merge=lfs -text
+# Normalize EOL for all files that Git considers text files.
+* text=auto eol=lf
+
+# Treat common binary assets as binary (no diff)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.zip binary
+
+# Godot text assets
+*.tscn text eol=lf
+*.tres text eol=lf
+*.gd text eol=lf

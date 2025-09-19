@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run server to verify startup print",
+			"type": "shell",
+			"command": "python server/server.py",
+			"args": [],
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		}
+	]
+}
