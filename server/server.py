@@ -95,6 +95,7 @@ from admin_service import (
 )
 from ascii_art import ASCII_ART
 from security_utils import redact_sensitive
+from dice_utils import roll as dice_roll, DiceParseError as DiceError
 
 
 def _print_command_help() -> None:
@@ -112,6 +113,7 @@ def _print_command_help() -> None:
     "  move up stairs | move down stairs    - use stairs, if present",
         "  say <message>                        - say something; anyone present may respond",
         "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
+    "  roll <dice> [| Private]             - roll dice publicly or privately",
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
         "  /sheet                              - show your character sheet",
@@ -184,6 +186,7 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("move up stairs | move down stairs                — use stairs, if present")
     lines.append("say <message>                                    — say something; anyone present may respond")
     lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
+    lines.append("roll <dice> [| Private]                         — roll dice publicly or privately")
     lines.append("/rename <new name>                               — change your display name")
     lines.append("/describe <text>                                 — update your character description")
     lines.append("/sheet                                           — show your character sheet")
@@ -1094,6 +1097,48 @@ def handle_message(data):
                 emit('message', {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
                 return
             # If it was some other look- prefixed text, fall through to normal chat
+        
+        # --- ROLL command (non-slash) ---
+        if text_lower == "roll" or text_lower.startswith("roll "):
+            if sid not in world.players:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first to roll dice.'})
+                return
+            raw = player_message.strip()
+            # Remove leading keyword
+            arg = raw[4:].strip() if len(raw) > 4 else ""
+            if not arg:
+                emit('message', {'type': 'error', 'content': 'Usage: roll <dice expression> [| Private]'})
+                return
+            # Support optional "| Private" suffix (case-insensitive, space around | optional)
+            priv = False
+            if '|' in arg:
+                left, right = arg.split('|', 1)
+                expr = left.strip()
+                if right.strip().lower() == 'private':
+                    priv = True
+            else:
+                expr = arg
+            try:
+                result = dice_roll(expr)
+            except DiceError as e:
+                emit('message', {'type': 'error', 'content': f'Dice error: {e}'})
+                return
+            # Compose result text (concise)
+            res_text = f"{result.expression} = {result.total}"
+            player_obj = world.players.get(sid)
+            pname = player_obj.sheet.display_name if player_obj else 'Someone'
+            if priv:
+                emit('message', {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
+                return
+            # Public roll: tell roller and broadcast to room
+            emit('message', {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
+            if player_obj:
+                broadcast_to_room(player_obj.room_id, {
+                    'type': 'system',
+                    'content': f"{pname} pulls out the sacred geometric stones from their pocket and rolls {res_text}."
+                }, exclude_sid=sid)
+            return
+
         # --- SAY command handling (targets + AI replies) ---
         is_say, targets, say_msg = _parse_say(player_message)
         if is_say:
@@ -1489,6 +1534,44 @@ def handle_command(sid: str | None, text: str) -> None:
             f"[b]Inventory[/b]\n{inv_text}"
         )
         emit('message', {'type': 'system', 'content': content})
+        return
+
+    # /roll command (slash variant for convenience)
+    if cmd == 'roll':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        if sid not in world.players:
+            emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+            return
+        if not args:
+            emit('message', {'type': 'error', 'content': 'Usage: /roll <dice expression> [| Private]'})
+            return
+        joined = " ".join(args)
+        priv = False
+        expr = joined
+        if '|' in joined:
+            left, right = joined.split('|', 1)
+            expr = left.strip()
+            if right.strip().lower() == 'private':
+                priv = True
+        try:
+            result = dice_roll(expr)
+        except DiceError as e:
+            emit('message', {'type': 'error', 'content': f'Dice error: {e}'})
+            return
+        res_text = f"{result.expression} = {result.total}"
+        player_obj = world.players.get(sid)
+        pname = player_obj.sheet.display_name if player_obj else 'Someone'
+        if priv:
+            emit('message', {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
+            return
+        emit('message', {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
+        if player_obj:
+            broadcast_to_room(player_obj.room_id, {
+                'type': 'system',
+                'content': f"{pname} pulls out the sacred geometric stones from their pocket and rolls {res_text}."
+            }, exclude_sid=sid)
         return
 
     # Admin-only commands below
