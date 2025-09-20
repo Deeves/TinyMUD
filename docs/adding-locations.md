@@ -46,3 +46,11 @@ Now typing `go tavern` will move the player and describe the new room.
 - Keep descriptions short (1–3 lines) so they fit nicely in the chat window.
 - Use present tense and sensory hints (sight, sound, smell) to set the mood.
 - NPC names in `npcs` are just strings; adding them makes them “listed” in the room.
+
+## Doors
+
+Use `/room adddoor <room_id> | <door name> | <target_room_id>` to add a door in a room that leads to another room. Remove a door with `/room removedoor <room_id> | <door name>`.
+
+When you add a door and the target room already exists, a matching door is automatically created in the target room that links back to the source. If the same door name is already in use in the target room and points somewhere else, a readable unique variant like `<door name> (to <source_room_id>)`, with a numeric suffix if needed, will be used on the target side.
+
+If the target room doesn't exist yet, the door will be created one-way. Once you create the target room, you can either run `/room adddoor` again from that side, or use `/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>` to explicitly pair doors.

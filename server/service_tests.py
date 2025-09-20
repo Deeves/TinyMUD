@@ -116,6 +116,13 @@ def test_room_adddoor_suggestions(tmpfile):
     handled3, err3, emits3 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|oak door|beta'])
     assert_true(handled3 and err3 is None, f'unexpected error on valid adddoor: {err3}')
     assert_true(w.rooms['alpha'].doors.get('oak door') == 'beta', 'door not set correctly')
+    # Reciprocal door should also be created in beta pointing back to alpha
+    assert_true(any(rid == 'alpha' for rid in w.rooms['beta'].doors.values()), 'reciprocal door not created in target room')
+
+    # 4) Adding a door to an unknown target should keep one-way and inform via emits
+    handled4, err4, emits4 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|mystery door|gamma'])
+    assert_true(handled4 and err4 is None, 'adddoor to missing target should be handled without fatal error')
+    assert_true(w.rooms['alpha'].doors.get('mystery door') == 'gamma', 'one-way door to missing target not stored')
 
 
 def main():

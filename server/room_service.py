@@ -83,6 +83,7 @@ def handle_room_command(world, state_path: str, args: list[str]) -> Tuple[bool, 
             return True, f"Room '{room_id}' not found.", emits
         if not target_room:
             return True, 'Target room id cannot be empty.', emits
+        # Create or update forward door
         room.doors[door_name] = target_room
         # Assign a stable id for this door if missing
         try:
@@ -90,8 +91,36 @@ def handle_room_command(world, state_path: str, args: list[str]) -> Tuple[bool, 
                 room.door_ids[door_name] = str(uuid.uuid4())
         except Exception:
             pass
+
+        # If the target room exists, also create a reciprocal door there
+        tgt = world.rooms.get(target_room)
+        created_back = None
+        if tgt:
+            # Try to use the same door name on the target; if it collides with an existing different link, pick a unique variant
+            back_name = door_name
+            if back_name in tgt.doors and tgt.doors.get(back_name) != room_id:
+                # Propose a readable fallback like "<name> (to <room_id>)", then add numeric suffixes if necessary
+                base = f"{door_name} (to {room_id})"
+                candidate = base
+                n = 2
+                while candidate in tgt.doors and tgt.doors.get(candidate) != room_id:
+                    candidate = f"{base} #{n}"
+                    n += 1
+                back_name = candidate
+            # Create/update the back link
+            tgt.doors[back_name] = room_id
+            created_back = back_name
+            try:
+                if back_name not in tgt.door_ids:
+                    tgt.door_ids[back_name] = str(uuid.uuid4())
+            except Exception:
+                pass
+            emits.append({'type': 'system', 'content': f"Linked door '{door_name}' in '{room_id}' <-> '{back_name}' in '{target_room}'."})
+        else:
+            # Target does not exist yet: keep original one-way behavior and inform the admin
+            emits.append({'type': 'system', 'content': f"Door '{door_name}' in room '{room_id}' now leads to '{target_room}'. (Note: target room not found; back-link not created)"})
+
         _save_silent(world, state_path)
-        emits.append({'type': 'system', 'content': f"Door '{door_name}' in room '{room_id}' now leads to '{target_room}'."})
         return True, None, emits
 
     if sub == 'removedoor':
