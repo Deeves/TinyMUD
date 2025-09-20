@@ -76,8 +76,7 @@ def _print_command_help() -> None:
         "",
     "Player commands (after auth):",
         "  look | l                             - describe your current room",
-        "  /look                                - same as 'look'",
-        "  /look at <name>                      - inspect a Player or NPC in the room",
+        "  look at <name>                       - inspect a Player or NPC in the room",
     "  move through <door name>             - go via a named door in the room",
     "  move up stairs | move down stairs    - use stairs, if present",
         "  say <message>                        - say something; anyone present may respond",
@@ -145,8 +144,7 @@ def _build_help_text(sid: str | None) -> str:
     # Player commands (only meaningful once logged in, but list for visibility)
     lines.append("[b]Player[/b]")
     lines.append("look | l                                         — describe your current room")
-    lines.append("/look                                            — same as 'look'")
-    lines.append("/look at <name>                                  — inspect a Player or NPC in the room")
+    lines.append("look at <name>                                   — inspect a Player or NPC in the room")
     lines.append("move through <door name>                         — go via a named door in the room")
     lines.append("move up stairs | move down stairs                — use stairs, if present")
     lines.append("say <message>                                    — say something; anyone present may respond")
@@ -954,13 +952,56 @@ def handle_message(data):
                         broadcast_to_room(room_id, payload, exclude_sid=sid)
                     return
 
-        if text_lower in ("look", "l"):
-            desc = _format_look(world, sid)
-            emit('message', {
-                'type': 'system',
-                'content': desc
-            })
-            return
+        # Look commands (non-slash):
+        # - "look" | "l" => room description
+        # - "look at <name>" | "l at <name>" => inspect a player or NPC in the room
+        if text_lower == "look" or text_lower == "l" or text_lower.startswith("look ") or text_lower.startswith("l "):
+            # Handle bare look / l
+            if text_lower in ("look", "l"):
+                desc = _format_look(world, sid)
+                emit('message', {'type': 'system', 'content': desc})
+                return
+            # Handle "look at <name>" / "l at <name>"
+            if text_lower.startswith("look at ") or text_lower.startswith("l at "):
+                # Extract name after the first occurrence of " at "
+                try:
+                    lower_parts = player_message.strip()
+                    # find the index of " at " regardless of starting with 'look' or 'l'
+                    at_idx = lower_parts.lower().find(" at ")
+                    name_raw = lower_parts[at_idx + 4:].strip() if at_idx != -1 else ""
+                except Exception:
+                    name_raw = ""
+                if not name_raw:
+                    emit('message', {'type': 'error', 'content': 'Usage: look at <name>'})
+                    return
+                # Must be authenticated to be in a room
+                player = world.players.get(sid) if sid else None
+                if not player:
+                    emit('message', {'type': 'error', 'content': 'Please authenticate first to look at someone.'})
+                    return
+                room = world.rooms.get(player.room_id)
+                # Try players first (includes self)
+                psid, pname = _resolve_player_in_room(world, room, name_raw)
+                if psid and pname:
+                    try:
+                        p = world.players.get(psid)
+                        if p:
+                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}"})
+                            return
+                    except Exception:
+                        pass
+                # Try NPCs
+                npcs = _resolve_npcs_in_room(room, [name_raw])
+                if npcs:
+                    npc_name = npcs[0]
+                    sheet = world.npc_sheets.get(npc_name)
+                    if not sheet:
+                        sheet = _ensure_npc_sheet(npc_name)
+                    emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}"})
+                    return
+                emit('message', {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
+                return
+            # If it was some other look- prefixed text, fall through to normal chat
         # --- SAY command handling (targets + AI replies) ---
         is_say, targets, say_msg = _parse_say(player_message)
         if is_say:
