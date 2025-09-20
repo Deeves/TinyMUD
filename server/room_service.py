@@ -6,7 +6,7 @@ They are pure of Flask/SocketIO and only touch the world model and save file.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import uuid
 
 from world import Room
@@ -53,7 +53,7 @@ def _suggest_room_ids(world, typed_id: str) -> list[str]:
 def handle_room_command(world, state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
     emits: List[dict] = []
     if not args:
-        return True, 'Usage: /room <create|setdesc|adddoor|removedoor|setstairs|linkdoor|linkstairs> ...', emits
+        return True, 'Usage: /room <create|setdesc|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -335,6 +335,117 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
                 pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Linked stairs {d} from '{room_a_res}' <-> opposite in '{room_b_res}'."})
+        return True, None, emits
+
+    if sub == 'lockdoor':
+        # Syntax:
+        # /room lockdoor <door name> | <comma separated list of players and NPCs permitted>
+        # or
+        # /room lockdoor <door name> | <relationship: <type> with <player or NPC>>
+        # Applies to the admin's current room ('here').
+        if sid is None or sid not in getattr(world, 'players', {}):
+            return True, 'You must be in a room to lock a door. Please authenticate.', emits
+        player = world.players.get(sid)
+        room = world.rooms.get(getattr(player, 'room_id', None))
+        if not room:
+            return True, 'You are nowhere.', emits
+        parts_joined = " ".join(sub_args)
+        try:
+            door_in, policy_in = _parse_pipe_parts(parts_joined, expected=2)
+        except Exception:
+            return True, 'Usage: /room lockdoor <door name> | <name1, name2, ...>  or  /room lockdoor <door name> | relationship: <type> with <name>', emits
+        door_in = _strip_quotes(door_in)
+        policy_in = policy_in.strip()
+        if not door_in or not policy_in:
+            return True, 'Usage: /room lockdoor <door name> | <names...> or relationship: <type> with <name>', emits
+        # Resolve door name within current room
+        okd, derr, door_name = _resolve_door_name(room, door_in)
+        if not okd or not door_name:
+            return True, (derr or f"Door '{door_in}' not found in this room."), emits
+
+        # Helper: resolve an entity display name to a stable id (user.user_id or npc_id)
+        def resolve_entity_id_by_name(name: str) -> Tuple[Optional[str], Optional[str]]:
+            n = _strip_quotes(name).strip()
+            if not n:
+                return None, None
+            # Try user exact/ci-exact
+            try:
+                for uid, user in getattr(world, 'users', {}).items():
+                    if user.display_name.lower() == n.lower():
+                        return user.user_id, user.display_name
+            except Exception:
+                pass
+            # Try NPCs by fuzzy
+            try:
+                cand = None
+                names = list(getattr(world, 'npc_sheets', {}).keys())
+                for nm in names:
+                    if nm.lower() == n.lower():
+                        cand = nm; break
+                if cand is None:
+                    prefs = [nm for nm in names if nm.lower().startswith(n.lower())]
+                    if len(prefs) == 1:
+                        cand = prefs[0]
+                if cand is None:
+                    subs = [nm for nm in names if n.lower() in nm.lower()]
+                    if len(subs) == 1:
+                        cand = subs[0]
+                if cand:
+                    return world.get_or_create_npc_id(cand), cand
+            except Exception:
+                pass
+            return None, None
+
+        # Parse policy
+        allow_ids: list[str] = []
+        rel_rules: list[dict] = []
+        if policy_in.lower().startswith('relationship:'):
+            # Expect: relationship: <type> with <name>
+            raw = policy_in[len('relationship:'):].strip()
+            # Split on ' with '
+            rel_type = None
+            who_raw = None
+            low = raw.lower()
+            if ' with ' in low:
+                idx = low.index(' with ')
+                rel_type = raw[:idx].strip()
+                who_raw = raw[idx + len(' with '):].strip()
+            else:
+                return True, 'Usage: relationship: <type> with <name>', emits
+            if not rel_type or not who_raw:
+                return True, 'Usage: relationship: <type> with <name>', emits
+            # Resolve target entity id
+            tgt_id, tgt_disp = resolve_entity_id_by_name(who_raw)
+            if not tgt_id:
+                return True, f"'{who_raw}' not found as a player or NPC.", emits
+            rel_rules.append({'type': rel_type, 'to': tgt_id})
+        else:
+            # Comma separated names
+            names = [p.strip() for p in policy_in.split(',') if p.strip()]
+            if not names:
+                return True, 'Provide at least one name.', emits
+            resolved_disp: list[str] = []
+            for nm in names:
+                eid, disp = resolve_entity_id_by_name(nm)
+                if not eid:
+                    return True, f"'{nm}' not found as a player or NPC.", emits
+                allow_ids.append(eid)
+                resolved_disp.append(disp or nm)
+
+        # Store policy on the room
+        if not hasattr(room, 'door_locks') or room.door_locks is None:
+            room.door_locks = {}
+        room.door_locks[door_name] = {
+            'allow_ids': allow_ids,
+            'allow_rel': rel_rules,
+        }
+        _save_silent(world, state_path)
+        if allow_ids:
+            emits.append({'type': 'system', 'content': f"Door '{door_name}' is now locked. Permitted: {len(allow_ids)} entity(s)."})
+        else:
+            # relationship rule
+            rule = rel_rules[0]
+            emits.append({'type': 'system', 'content': f"Door '{door_name}' is now locked. Permitted: anyone with relationship [{rule['type']}] to the specified entity."})
         return True, None, emits
 
     return False, None, emits

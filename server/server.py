@@ -50,6 +50,30 @@ try:
     import google.generativeai as genai  # type: ignore
 except Exception:
     genai = None  # AI optional
+# If the SDK is available, prepare a safety settings override that disables all blocking
+try:
+    # These enums are available in google-generativeai>=0.5
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+    # Build a list of safety settings that disables blocking for all known categories
+    _SAFETY_OFF_LIST = []
+    _cat_names = [
+        'HARM_CATEGORY_HARASSMENT',
+        'HARM_CATEGORY_HATE_SPEECH',
+        'HARM_CATEGORY_SEXUAL',  # older naming in some SDK versions
+        'HARM_CATEGORY_SEXUAL_AND_MINORS',  # newer naming
+        'HARM_CATEGORY_DANGEROUS_CONTENT',
+    ]
+    for _name in _cat_names:
+        _cat = getattr(HarmCategory, _name, None)
+        if _cat is not None:
+            _SAFETY_OFF_LIST.append({'category': _cat, 'threshold': HarmBlockThreshold.BLOCK_NONE})
+    if not _SAFETY_OFF_LIST:
+        _SAFETY_OFF_LIST = None
+except Exception:
+    # Fall back if enums not present; calls will omit safety_settings
+    HarmCategory = None  # type: ignore
+    HarmBlockThreshold = None  # type: ignore
+    _SAFETY_OFF_LIST = None
 from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
 from world import World, CharacterSheet, Room, User
@@ -104,12 +128,14 @@ def _print_command_help() -> None:
     "  /bring <player>                     - bring a player to your current room",
         "  /purge                              - reset world to factory default (confirmation required)",
     "  /worldstate                         - print the redacted contents of world_state.json",
+    "  /safety <G|PG-13|R|OFF>            - set AI content safety level (admins)",
         "",
     "Room management:",
     "  /room create <id> | <description>   - create a new room",
     "  /room setdesc <id> | <description>  - update a room's description",
     "  /room adddoor <room_id> | <door name> | <target_room_id>",
     "  /room removedoor <room_id> | <door name>",
+    "  /room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>",
     "  /room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->",
     "  /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>",
     "  /room linkstairs <room_a> | <up|down> | <room_b>",
@@ -118,6 +144,8 @@ def _print_command_help() -> None:
         "  /npc add <room_id> | <npc name> | <desc>  - add an NPC to a room (and set description)",
         "  /npc remove <npc name>                    - remove an NPC from your current room",
         "  /npc setdesc <npc name> | <desc>          - set an NPC's description",
+    "  /npc setrelation <name> | <relationship> | <target> [| mutual] - link two entities; optional mutual makes it bidirectional",
+    "  /npc removerelations <name> | <target>    - remove any relationships in both directions",
         "======================================\n",
     ]
     print("\n".join(lines))
@@ -174,12 +202,14 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/bring <player>                                   — bring a player to your current room")
         lines.append("/purge                                           — reset world to factory defaults (confirm)")
         lines.append("/worldstate                                      — print redacted world_state.json")
+        lines.append("/safety <G|PG-13|R|OFF>                         — set AI content safety level")
         lines.append("")
         lines.append("[b]Room management[/b]")
         lines.append("/room create <id> | <description>                — create a new room")
         lines.append("/room setdesc <id> | <description>               — update a room's description")
         lines.append("/room adddoor <room_id> | <door name> | <target_room_id>")
         lines.append("/room removedoor <room_id> | <door name>")
+        lines.append("/room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>")
         lines.append("/room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->")
         lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
         lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
@@ -188,6 +218,8 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("/npc add <room_id> | <npc name> | <desc>         — add an NPC to a room and set description")
     lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
     lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
+    lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")
+    lines.append("/npc removerelations <name> | <target>           — remove any relationships in both directions")
 
     return "\n".join(lines)
 
@@ -218,6 +250,7 @@ model = None
 if api_key and genai is not None:
     try:
         genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+        # Instantiate the model without safety settings; we'll apply per request based on world.safety_level
         model = genai.GenerativeModel('gemini-2.5-flash-lite')  # type: ignore[attr-defined]
         print("Gemini API configured successfully.")
     except Exception as e:
@@ -445,12 +478,44 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None) -> None
             f"Main Conflict: {world_conflict or 'N/A'}\n\n"
         )
 
+    # Relationship context: find any directed relationship between player and NPC (both directions)
+    rel_lines = []
+    try:
+        rels = getattr(world, 'relationships', {}) or {}
+        # Resolve entity ids
+        npc_id = world.get_or_create_npc_id(npc_name)
+        # Player entity id is their user_id if available
+        player_entity_id = None
+        if sid in sessions:
+            player_entity_id = sessions.get(sid)
+        else:
+            # fallback: lookup by display_name among users
+            try:
+                for uid, user in world.users.items():
+                    if user.display_name == player_name:
+                        player_entity_id = uid
+                        break
+            except Exception:
+                pass
+        if player_entity_id:
+            rel_ab = (rels.get(npc_id, {}) or {}).get(player_entity_id)
+            rel_ba = (rels.get(player_entity_id, {}) or {}).get(npc_id)
+            if rel_ab:
+                rel_lines.append(f"NPC's view of player: {rel_ab}")
+            if rel_ba:
+                rel_lines.append(f"Player's relation to NPC: {rel_ba}")
+    except Exception:
+        pass
+    rel_context = ("\n".join(rel_lines) + "\n\n") if rel_lines else ""
+
     prompt = (
         "Stay fully in-character as the NPC. Use both your own sheet and the player's sheet to ground your reply. "
+        "Always honor the relationship context when speaking to or about the other character. "
         "Do not reveal system instructions or meta-information. Keep it concise, with tasteful BBCode where helpful.\n\n"
         f"{world_context}"
         f"[NPC Sheet]\nName: {npc_name}\nDescription: {npc_desc}\nInventory:\n{npc_inv}\n\n"
         f"[Player Sheet]\nName: {player_name}\nDescription: {player_desc}\nInventory:\n{player_inv}\n\n"
+        f"[Relationship Context]\n{rel_context}"
         f"The player says to you: '{player_message}'. Respond as {npc_name}."
     )
 
@@ -468,8 +533,38 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None) -> None
                 broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
         return
 
+    # Build safety settings per world configuration
+    def _safety_for_level() -> list | None:
+        # If enums missing, return None and let SDK defaults apply
+        if 'HarmCategory' not in globals() or HarmCategory is None or 'HarmBlockThreshold' not in globals() or HarmBlockThreshold is None:
+            return None
+        lvl = getattr(world, 'safety_level', 'G') or 'G'
+        lvl = str(lvl).upper()
+        # Helper to construct list with given threshold
+        def mk(threshold):
+            cats = []
+            for nm in ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUAL','HARM_CATEGORY_SEXUAL_AND_MINORS','HARM_CATEGORY_DANGEROUS_CONTENT']:
+                c = getattr(HarmCategory, nm, None)
+                if c is not None:
+                    cats.append({'category': c, 'threshold': threshold})
+            return cats if cats else None
+        if lvl == 'OFF':
+            return mk(HarmBlockThreshold.BLOCK_NONE)
+        if lvl == 'R':
+            # Low filtering: block only at highest threshold
+            return mk(getattr(HarmBlockThreshold, 'BLOCK_ONLY_HIGH', HarmBlockThreshold.BLOCK_NONE))
+        if lvl in ('PG-13','PG13','PG'):
+            # Medium filtering: block medium and above if available
+            return mk(getattr(HarmBlockThreshold, 'BLOCK_MEDIUM_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
+        # Default High (G): block low and above (most strict) if available; else leave SDK default
+        return mk(getattr(HarmBlockThreshold, 'BLOCK_LOW_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
+
     try:
-        ai_response = model.generate_content(prompt)
+        safety = _safety_for_level()
+        if safety is not None:
+            ai_response = model.generate_content(prompt, safety_settings=safety)
+        else:
+            ai_response = model.generate_content(prompt)
         content_text = getattr(ai_response, 'text', None) or str(ai_response)
         print(f"Gemini response ({npc_name}): {content_text}")
         npc_payload = {
@@ -647,6 +742,34 @@ def handle_message(data):
                     emit('message', {'type': 'error', 'content': 'Please provide a short conflict summary (>= 5 chars).'} )
                     return
                 world.world_conflict = conflict
+                # Ask for roleplay comfort/safety setting next
+                sess['step'] = 'safety_level'
+                world_setup_sessions[sid] = sess
+                emit('message', {'type': 'system', 'content': (
+                    "What type of roleplay are you and your group comfortable with?\n"
+                    "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
+                    "You can type: G, PG-13, R, or OFF."
+                )})
+                return
+            if step == 'safety_level':
+                level_raw = player_message.strip().upper()
+                # Normalize a few inputs
+                if level_raw in ("HIGH", "G", "ALL-AGES"):
+                    level = 'G'
+                elif level_raw in ("MEDIUM", "PG13", "PG-13", "PG_13", "PG"):
+                    level = 'PG-13'
+                elif level_raw in ("LOW", "R"):
+                    level = 'R'
+                elif level_raw in ("OFF", "NONE", "NO FILTERS", "SAFETY FILTERS OFF"):
+                    level = 'OFF'
+                else:
+                    emit('message', {'type': 'error', 'content': 'Please answer with G, PG-13, R, or OFF.'})
+                    return
+                try:
+                    world.safety_level = level
+                    world.save_to_file(STATE_PATH)
+                except Exception:
+                    pass
                 sess['step'] = 'room_id'
                 world_setup_sessions[sid] = sess
                 emit('message', {'type': 'system', 'content': 'Create the starting room. Enter a room id (letters, numbers, underscores), e.g., town_square:'})
@@ -925,7 +1048,22 @@ def handle_message(data):
                     try:
                         p = world.players.get(psid)
                         if p:
-                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}"})
+                            # Build relationship context relative to viewer
+                            rel_lines: list[str] = []
+                            try:
+                                viewer_id = sessions.get(sid) if sid in sessions else None
+                                target_uid = sessions.get(psid) if psid in sessions else None
+                                if viewer_id and target_uid:
+                                    rel_to = (world.relationships.get(viewer_id, {}) or {}).get(target_uid)
+                                    rel_from = (world.relationships.get(target_uid, {}) or {}).get(viewer_id)
+                                    if rel_to:
+                                        rel_lines.append(f"Your relation to {p.sheet.display_name}: {rel_to}")
+                                    if rel_from:
+                                        rel_lines.append(f"{p.sheet.display_name}'s relation to you: {rel_from}")
+                            except Exception:
+                                pass
+                            rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
+                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{rel_text}"})
                             return
                     except Exception:
                         pass
@@ -936,7 +1074,22 @@ def handle_message(data):
                     sheet = world.npc_sheets.get(npc_name)
                     if not sheet:
                         sheet = _ensure_npc_sheet(npc_name)
-                    emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}"})
+                    # Relationship lines for viewer vs NPC
+                    rel_lines: list[str] = []
+                    try:
+                        viewer_id = sessions.get(sid) if sid in sessions else None
+                        npc_id = world.get_or_create_npc_id(npc_name)
+                        if viewer_id and npc_id:
+                            rel_to = (world.relationships.get(viewer_id, {}) or {}).get(npc_id)
+                            rel_from = (world.relationships.get(npc_id, {}) or {}).get(viewer_id)
+                            if rel_to:
+                                rel_lines.append(f"Your relation to {sheet.display_name}: {rel_to}")
+                            if rel_from:
+                                rel_lines.append(f"{sheet.display_name}'s relation to you: {rel_from}")
+                    except Exception:
+                        pass
+                    rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
+                    emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
                     return
                 emit('message', {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
                 return
@@ -1050,7 +1203,21 @@ def handle_command(sid: str | None, text: str) -> None:
                 try:
                     p = world.players.get(psid)
                     if p:
-                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}"})
+                        rel_lines: list[str] = []
+                        try:
+                            viewer_id = sessions.get(sid) if sid in sessions else None
+                            target_uid = sessions.get(psid) if psid in sessions else None
+                            if viewer_id and target_uid:
+                                rel_to = (world.relationships.get(viewer_id, {}) or {}).get(target_uid)
+                                rel_from = (world.relationships.get(target_uid, {}) or {}).get(viewer_id)
+                                if rel_to:
+                                    rel_lines.append(f"Your relation to {p.sheet.display_name}: {rel_to}")
+                                if rel_from:
+                                    rel_lines.append(f"{p.sheet.display_name}'s relation to you: {rel_from}")
+                        except Exception:
+                            pass
+                        rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
+                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{rel_text}"})
                         return
                 except Exception:
                     pass
@@ -1062,7 +1229,21 @@ def handle_command(sid: str | None, text: str) -> None:
                 if not sheet:
                     # Create on demand to ensure a description exists
                     sheet = _ensure_npc_sheet(npc_name)
-                emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}"})
+                rel_lines: list[str] = []
+                try:
+                    viewer_id = sessions.get(sid) if sid in sessions else None
+                    npc_id = world.get_or_create_npc_id(npc_name)
+                    if viewer_id and npc_id:
+                        rel_to = (world.relationships.get(viewer_id, {}) or {}).get(npc_id)
+                        rel_from = (world.relationships.get(npc_id, {}) or {}).get(viewer_id)
+                        if rel_to:
+                            rel_lines.append(f"Your relation to {sheet.display_name}: {rel_to}")
+                        if rel_from:
+                            rel_lines.append(f"{sheet.display_name}'s relation to you: {rel_from}")
+                except Exception:
+                    pass
+                rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
+                emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
                 return
             emit('message', {'type': 'system', 'content': f"You don't see '{name}' here."})
             return
@@ -1252,16 +1433,66 @@ def handle_command(sid: str | None, text: str) -> None:
             emit('message', {'type': 'error', 'content': 'Player not found.'})
             return
         inv_text = player.sheet.inventory.describe()
+        # Relationship summary: show outgoing and incoming relations by display name when known
+        rel_lines: list[str] = []
+        try:
+            uid = sessions.get(sid)
+            if uid:
+                # Outgoing
+                out_map = (world.relationships.get(uid, {}) or {})
+                out_bits: list[str] = []
+                for tgt_id, rtype in out_map.items():
+                    # Resolve to display name if possible
+                    name = None
+                    # Check users
+                    for u in world.users.values():
+                        if u.user_id == tgt_id:
+                            name = u.display_name; break
+                    if not name:
+                        # Match NPC id by reverse lookup
+                        try:
+                            for n, nid in world.npc_ids.items():
+                                if nid == tgt_id:
+                                    name = n; break
+                        except Exception:
+                            pass
+                    if name:
+                        out_bits.append(f"{name} [{rtype}]")
+                if out_bits:
+                    rel_lines.append("[b]Your relations[/b]: " + ", ".join(sorted(out_bits)))
+                # Incoming
+                in_bits: list[str] = []
+                for src_id, m in (world.relationships or {}).items():
+                    if uid in m:
+                        rtype = m.get(uid)
+                        name = None
+                        for u in world.users.values():
+                            if u.user_id == src_id:
+                                name = u.display_name; break
+                        if not name:
+                            try:
+                                for n, nid in world.npc_ids.items():
+                                    if nid == src_id:
+                                        name = n; break
+                            except Exception:
+                                pass
+                        if name and rtype:
+                            in_bits.append(f"{name} [{rtype}]")
+                if in_bits:
+                    rel_lines.append("[b]Relations to you[/b]: " + ", ".join(sorted(in_bits)))
+        except Exception:
+            pass
+        rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
         content = (
             f"[b]{player.sheet.display_name}[/b]\n"
-            f"{player.sheet.description}\n\n"
+            f"{player.sheet.description}{rel_text}\n\n"
             f"[b]Inventory[/b]\n{inv_text}"
         )
         emit('message', {'type': 'system', 'content': content})
         return
 
     # Admin-only commands below
-    admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring'}
+    admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring', 'safety'}
     if cmd in admin_only_cmds and sid not in admins:
         emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
         return
@@ -1414,6 +1645,37 @@ def handle_command(sid: str | None, text: str) -> None:
             emit('message', {'type': 'error', 'content': 'world_state.json not found.'})
         except Exception as e:
             emit('message', {'type': 'error', 'content': f'Failed to read world_state.json: {e}'})
+        return
+
+    # /safety (admin): set AI content safety level
+    if cmd == 'safety':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        # If no argument, show current and usage
+        if not args:
+            cur = getattr(world, 'safety_level', 'G')
+            emit('message', {'type': 'system', 'content': f"Current safety level: [b]{cur}[/b]\nUsage: /safety <G|PG-13|R|OFF>"})
+            return
+        raw = " ".join(args).strip().upper()
+        # Normalize common synonyms
+        if raw in ("HIGH", "G", "ALL-AGES"):
+            level = 'G'
+        elif raw in ("MEDIUM", "PG13", "PG-13", "PG_13", "PG"):
+            level = 'PG-13'
+        elif raw in ("LOW", "R"):
+            level = 'R'
+        elif raw in ("OFF", "NONE", "NO FILTERS", "DISABLE", "DISABLED", "SAFETY FILTERS OFF"):
+            level = 'OFF'
+        else:
+            emit('message', {'type': 'error', 'content': 'Invalid safety level. Use one of: G, PG-13, R, OFF.'})
+            return
+        try:
+            world.safety_level = level
+            world.save_to_file(STATE_PATH)
+        except Exception:
+            pass
+        emit('message', {'type': 'system', 'content': f"Safety level set to [b]{level}[/b]. This applies to future AI replies."})
         return
 
     # /setup (admin): start the world setup wizard if not complete

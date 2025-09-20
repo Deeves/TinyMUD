@@ -70,6 +70,49 @@ def test_movement(tmpfile):
     assert_true(not ok, 'should not move up when no stairs')
 
 
+def test_lockdoor(tmpfile):
+    from world import Room
+    w = World()
+    # Rooms and door
+    w.rooms['start'] = Room(id='start', description='Start')
+    w.rooms['hall'] = Room(id='hall', description='Hall')
+    w.rooms['start'].doors['oak door'] = 'hall'
+    # Ensure new accounts spawn in 'start'
+    w.start_room_id = 'start'
+    # Create two users and login to create players with shared sheet refs
+    sessions = {}
+    admins = set()
+    sid_admin = 'sidA'
+    ok1, err1, emits1, broadcasts1 = create_account_and_login(w, sid_admin, 'Alice', 'pw', 'desc', sessions, admins, tmpfile)
+    assert_true(ok1 and not err1, f"setup create Alice failed: {err1}")
+    sid_bob = 'sidB'
+    ok2, err2, emits2, broadcasts2 = create_account_and_login(w, sid_bob, 'Bob', 'pw2', 'desc2', sessions, admins, tmpfile)
+    assert_true(ok2 and not err2, f"setup create Bob failed: {err2}")
+    # Lock door to allow only Alice by name
+    handled, err, emits = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|Alice'], sid_admin)
+    assert_true(handled and not err, f"lockdoor allow Alice failed: {err}")
+    # Bob should be denied
+    ok, err, emitsM, broadcastsM = move_through_door(w, sid_bob, 'oak door')
+    assert_true((not ok) and err is not None and 'locked' in err.lower(), 'Bob should be blocked by lockdoor')
+    # Alice should be allowed
+    ok3, err3, emits3, broadcasts3 = move_through_door(w, sid_admin, 'oak door')
+    assert_true(ok3 and not err3, f"Alice should pass locked door: {err3}")
+    # Now test relationship rule: allow anyone with relation friend to Alice
+    # Put Alice back in start
+    w.move_player(sid_admin, 'start')
+    # Set relationship Bob —[friend]→ Alice
+    w.relationships = w.relationships or {}
+    uid_alice = next(uid for uid, u in w.users.items() if u.display_name == 'Alice')
+    uid_bob = next(uid for uid, u in w.users.items() if u.display_name == 'Bob')
+    w.relationships.setdefault(uid_bob, {})[uid_alice] = 'friend'
+    # Relock with relationship rule
+    handled2, errR, emitsR = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|relationship: friend with Alice'], sid_admin)
+    assert_true(handled2 and not errR, f"lockdoor relationship failed: {errR}")
+    # Bob should now be able to pass
+    ok4, err4, emits4, broadcasts4 = move_through_door(w, sid_bob, 'oak door')
+    assert_true(ok4 and not err4, f"Bob should pass by relationship rule: {err4}")
+
+
 def test_purge(tmpfile):
     w = World()
     # Simulate a connected player (even without rooms)
@@ -130,6 +173,7 @@ def main():
         tmpfile = os.path.join(d, 'world_state.json')
         test_accounts_and_admins(tmpfile)
         test_movement(tmpfile)
+        test_lockdoor(tmpfile)
         test_purge(tmpfile)
         test_room_adddoor_suggestions(tmpfile)
         test_teleport(tmpfile)

@@ -43,6 +43,48 @@ def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None
     if target not in world.rooms:
         return False, f"Door '{name_in}' is linked to unknown room '{target}'.", emits, broadcasts
 
+    # Enforce optional door locks
+    try:
+        locks = getattr(room, 'door_locks', {}) or {}
+        policy = locks.get(name_in)
+        if policy:
+            # Determine acting entity id (user id)
+            actor_uid = None
+            try:
+                # world.users is keyed by user_id, but we need mapping from sid. Server session map isn't available here, so fall back:
+                # Find a user whose sheet object is the same instance as player's sheet.
+                for uid, user in getattr(world, 'users', {}).items():
+                    if user.sheet is world.players.get(sid).sheet:
+                        actor_uid = uid
+                        break
+            except Exception:
+                actor_uid = None
+            # If we couldn't resolve, deny by default to be safe
+            if not actor_uid:
+                return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
+            allow_ids = set(policy.get('allow_ids') or [])
+            if actor_uid in allow_ids:
+                pass  # allowed
+            else:
+                # Check relationship rule(s)
+                rel_rules = policy.get('allow_rel') or []
+                permitted = False
+                relationships = getattr(world, 'relationships', {}) or {}
+                for rule in rel_rules:
+                    rtype = str(rule.get('type') or '').strip()
+                    to_id = rule.get('to')
+                    if not rtype or not to_id:
+                        continue
+                    # Check if actor has relationship rtype towards to_id
+                    if relationships.get(actor_uid, {}).get(to_id) == rtype:
+                        permitted = True
+                        break
+                if not permitted:
+                    return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
+    except Exception:
+        # On any error in checking, default to denying passage for safety
+        return False, f"The {name_in} is locked.", emits, broadcasts
+
     # Announce departure
     broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} leaves through the {name_in}."}))
     # Move

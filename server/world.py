@@ -184,6 +184,9 @@ class Room:
     # New: stable identifiers for stairs objects (if present)
     stairs_up_id: Optional[str] = None
     stairs_down_id: Optional[str] = None
+    # New: optional door lock policies per door name
+    # Schema: { door_name: { 'allow_ids': [entity_id,...], 'allow_rel': [ {'type': str, 'to': entity_id} ] } }
+    door_locks: Dict[str, dict] = field(default_factory=dict)
 
     def describe(self, world: "World", viewer_sid: str | None = None) -> str:
         """Return a short multi-line description for a player to read.
@@ -231,6 +234,8 @@ class Room:
             "door_ids": self.door_ids,
             "stairs_up_id": self.stairs_up_id,
             "stairs_down_id": self.stairs_down_id,
+            # Door locks
+            "door_locks": self.door_locks,
         }
 
     @staticmethod
@@ -248,6 +253,7 @@ class Room:
             door_ids=dict(data.get("door_ids", {})),
             stairs_up_id=data.get("stairs_up_id"),
             stairs_down_id=data.get("stairs_down_id"),
+            door_locks=dict(data.get("door_locks", {})),
         )
         # Backfill missing door IDs for existing door names
         for dname in list(room.doors.keys()):
@@ -280,6 +286,11 @@ class World:
         self.start_room_id: Optional[str] = None
         # Once the first admin finishes setup
         self.setup_complete: bool = False
+        # Content safety level for AI replies: 'G' | 'PG-13' | 'R' | 'OFF'
+        self.safety_level: str = 'G'
+        # Relationship graph (directed): entity_id -> { target_entity_id: relationship_type }
+        # entity_id is user.user_id for players and world.get_or_create_npc_id(name) for NPCs
+        self.relationships: Dict[str, Dict[str, str]] = {}
 
     def ensure_default_room(self) -> Optional[Room]:
         """No longer auto-creates a default room; setup wizard defines the first room."""
@@ -354,6 +365,9 @@ class World:
             "world_conflict": self.world_conflict,
             "start_room_id": self.start_room_id,
             "setup_complete": self.setup_complete,
+            "safety_level": self.safety_level,
+            # Relationships
+            "relationships": self.relationships,
         }
 
     @classmethod
@@ -396,6 +410,24 @@ class World:
         w.world_conflict = data.get("world_conflict")
         w.start_room_id = data.get("start_room_id")
         w.setup_complete = bool(data.get("setup_complete", False))
+        # Safety level with default to 'G' if missing
+        lvl = (data.get("safety_level") or 'G').upper()
+        if lvl not in ('G', 'PG-13', 'R', 'OFF'):
+            lvl = 'G'
+        w.safety_level = lvl
+        # Relationships graph
+        rels = data.get("relationships", {})
+        if isinstance(rels, dict):
+            # Ensure nested dicts are of correct type (string keys)
+            w.relationships = {}
+            try:
+                for src, m in rels.items():
+                    if not isinstance(src, str) or not isinstance(m, dict):
+                        continue
+                    w.relationships[src] = {str(tgt): str(val) for tgt, val in m.items()}
+            except Exception:
+                # Fallback to raw if any issues
+                w.relationships = dict(rels)
         return w
 
     def save_to_file(self, path: str) -> None:

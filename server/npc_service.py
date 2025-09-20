@@ -8,11 +8,13 @@ Backward compatibility:
     - /npc add <room_id> <npc name...>
     - /npc remove <room_id> <npc name...>
     - /npc setdesc <npc name> | <description>
+    - /npc setrelation <source name> | <relationship type> | <target name>
+    - /npc removerelations <source name> | <target name>
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from world import CharacterSheet
 from id_parse_utils import (
@@ -39,7 +41,7 @@ def _normalize_room_input(world, sid: str | None, typed: str) -> tuple[bool, str
 def handle_npc_command(world, state_path: str, sid: str | None, args: list[str]) -> Tuple[bool, str | None, List[dict]]:
     emits: List[dict] = []
     if not args:
-        return True, 'Usage: /npc <add|remove|setdesc> ...', emits
+        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations> ...', emits
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -185,6 +187,201 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
         sheet.description = desc
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"NPC '{npc_name}' description updated."})
+        return True, None, emits
+
+    if sub == 'setrelation':
+        # /npc setrelation <source name> | <relationship type> | <target name> [| mutual]
+        try:
+            parts_joined = " ".join(sub_args)
+            # Accept 3 or 4 parts. The 4th optional part is the literal word 'mutual'.
+            parts = _parse_pipe_parts(parts_joined)
+            if len(parts) < 3:
+                raise ValueError('not enough parts')
+            # Rejoin extras beyond 3 into the 3rd slot to be tolerant of extra pipes in names
+            if len(parts) > 4:
+                parts = parts[:3] + ["mutual"]  # if too many, prioritize setting mutual
+            if len(parts) == 3:
+                src_in, rel_in, tgt_in = parts
+                mutual_flag = False
+            else:
+                src_in, rel_in, tgt_in, mutual_raw = parts[:4]
+                mutual_flag = str(mutual_raw).strip().lower() in ("mutual", "yes", "true", "both")
+        except Exception:
+            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits
+
+        src_name = _strip_quotes(src_in)
+        tgt_name = _strip_quotes(tgt_in)
+        rel_type = rel_in.strip()
+        if not src_name or not tgt_name or not rel_type:
+            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits
+
+        # Resolve entity IDs for source and target. Entities can be: connected players, any user by display name, or NPC by name.
+        def resolve_entity_id(name: str) -> Tuple[Optional[str], Optional[str]]:
+            # Try connected players first
+            try:
+                for psid, p in list(getattr(world, 'players', {}).items()):
+                    if p.sheet and p.sheet.display_name.lower() == name.lower():
+                        # Players map to their user id if connected
+                        # Find user id via sessions if available, else derive by matching user display_name
+                        for uid, user in list(getattr(world, 'users', {}).items()):
+                            if user.display_name.lower() == name.lower():
+                                return user.user_id, user.display_name
+            except Exception:
+                pass
+            # Try any known user
+            try:
+                user = world.get_user_by_display_name(name)
+                if user:
+                    return user.user_id, user.display_name
+            except Exception:
+                pass
+            # Try NPC by name
+            try:
+                if name in getattr(world, 'npc_sheets', {}):
+                    npc_id = world.get_or_create_npc_id(name)
+                    return npc_id, name
+            except Exception:
+                pass
+            # Try fuzzy within NPC names
+            try:
+                names = list(getattr(world, 'npc_sheets', {}).keys())
+                # simple ci-exact / prefix / substring
+                cand = None
+                for n in names:
+                    if n.lower() == name.lower():
+                        cand = n; break
+                if cand is None:
+                    prefs = [n for n in names if n.lower().startswith(name.lower())]
+                    if len(prefs) == 1:
+                        cand = prefs[0]
+                if cand is None:
+                    subs = [n for n in names if name.lower() in n.lower()]
+                    if len(subs) == 1:
+                        cand = subs[0]
+                if cand is not None:
+                    npc_id = world.get_or_create_npc_id(cand)
+                    return npc_id, cand
+            except Exception:
+                pass
+            return None, None
+
+        src_id, src_resolved = resolve_entity_id(src_name)
+        if not src_id:
+            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits
+        tgt_id, tgt_resolved = resolve_entity_id(tgt_name)
+        if not tgt_id:
+            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits
+
+        # Set directed relationship
+        rels: Dict[str, Dict[str, str]] = getattr(world, 'relationships', {})
+        if src_id not in rels:
+            rels[src_id] = {}
+        rels[src_id][tgt_id] = rel_type
+        # Optional reciprocal
+        if mutual_flag:
+            if tgt_id not in rels:
+                rels[tgt_id] = {}
+            rels[tgt_id][src_id] = rel_type
+        world.relationships = rels
+        _save_silent(world, state_path)
+        # Report with resolved display names
+        src_disp = src_resolved or src_name
+        tgt_disp = tgt_resolved or tgt_name
+        if mutual_flag:
+            emits.append({'type': 'system', 'content': f"Relationship set (mutual): {src_disp} ⇄ {tgt_disp} as [{rel_type}]"})
+        else:
+            emits.append({'type': 'system', 'content': f"Relationship set: {src_disp} —[{rel_type}]→ {tgt_disp}"})
+        return True, None, emits
+
+    if sub == 'removerelations':
+        # /npc removerelations <source> | <target>
+        try:
+            parts_joined = " ".join(sub_args)
+            src_in, tgt_in = _parse_pipe_parts(parts_joined, expected=2)
+        except Exception:
+            return True, 'Usage: /npc removerelations <source> | <target>', emits
+
+        src_name = _strip_quotes(src_in)
+        tgt_name = _strip_quotes(tgt_in)
+        if not src_name or not tgt_name:
+            return True, 'Usage: /npc removerelations <source> | <target>', emits
+
+        # Reuse resolver from setrelation
+        def resolve_entity_id(name: str) -> Tuple[Optional[str], Optional[str]]:
+            try:
+                for psid, p in list(getattr(world, 'players', {}).items()):
+                    if p.sheet and p.sheet.display_name.lower() == name.lower():
+                        for uid, user in list(getattr(world, 'users', {}).items()):
+                            if user.display_name.lower() == name.lower():
+                                return user.user_id, user.display_name
+            except Exception:
+                pass
+            try:
+                user = world.get_user_by_display_name(name)
+                if user:
+                    return user.user_id, user.display_name
+            except Exception:
+                pass
+            try:
+                if name in getattr(world, 'npc_sheets', {}):
+                    npc_id = world.get_or_create_npc_id(name)
+                    return npc_id, name
+            except Exception:
+                pass
+            try:
+                names = list(getattr(world, 'npc_sheets', {}).keys())
+                cand = None
+                for n in names:
+                    if n.lower() == name.lower():
+                        cand = n; break
+                if cand is None:
+                    prefs = [n for n in names if n.lower().startswith(name.lower())]
+                    if len(prefs) == 1:
+                        cand = prefs[0]
+                if cand is None:
+                    subs = [n for n in names if name.lower() in n.lower()]
+                    if len(subs) == 1:
+                        cand = subs[0]
+                if cand is not None:
+                    npc_id = world.get_or_create_npc_id(cand)
+                    return npc_id, cand
+            except Exception:
+                pass
+            return None, None
+
+        src_id, src_resolved = resolve_entity_id(src_name)
+        if not src_id:
+            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits
+        tgt_id, tgt_resolved = resolve_entity_id(tgt_name)
+        if not tgt_id:
+            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits
+
+        rels: Dict[str, Dict[str, str]] = getattr(world, 'relationships', {})
+        changed = False
+        if src_id in rels and tgt_id in rels[src_id]:
+            try:
+                del rels[src_id][tgt_id]
+                changed = True
+                if not rels[src_id]:
+                    del rels[src_id]
+            except Exception:
+                pass
+        if tgt_id in rels and src_id in rels.get(tgt_id, {}):
+            try:
+                del rels[tgt_id][src_id]
+                changed = True
+                if not rels[tgt_id]:
+                    del rels[tgt_id]
+            except Exception:
+                pass
+        world.relationships = rels
+        if changed:
+            _save_silent(world, state_path)
+            src_disp = src_resolved or src_name
+            tgt_disp = tgt_resolved or tgt_name
+            emits.append({'type': 'system', 'content': f"Removed relationships between {src_disp} and {tgt_disp}."})
+        else:
+            emits.append({'type': 'system', 'content': 'No relationships existed to remove.'})
         return True, None, emits
 
     return False, None, emits
