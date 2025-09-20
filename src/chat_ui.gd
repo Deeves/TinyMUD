@@ -164,6 +164,23 @@ func _on_text_submitted(player_text: String):
 	_last_sent_message = player_text
 	# Don't echo auth commands as speech
 	if player_text.begins_with("/"):
+		# Client-side /help: show quick tips without round-trip
+		var low := player_text.strip_edges().to_lower()
+		if low == "/help":
+			var lines := [
+				"[b]Client Help[/b]",
+				"Type plain text to chat. Use 'say <text>' for NPC replies.",
+				"[b]Auth[/b]: /auth create <name> | <password> | <description> | /auth login <name> | <password>",
+				"[b]Basics[/b]: look | /rename <new> | /describe <text> | /sheet",
+				"[b]Admin[/b]: /teleport <room_id>  |  /teleport <player> | <room_id>",
+				"         /bring <player> | <room_id>  |  /kick <player>",
+				"Note: room ids accept fuzzy matches (prefix/substring).",
+			]
+			for l in lines:
+				append_to_log(l)
+			input_box.clear()
+			input_box.grab_focus()
+			return
 		# Client-side command: /quit — graceful exit without sending to server
 		if player_text.strip_edges().to_lower() == "/quit":
 			append_to_log("[color=gray]Exiting. Safe travels![/color]")

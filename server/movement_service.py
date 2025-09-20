@@ -94,3 +94,34 @@ def move_stairs(world, sid: str, direction: str) -> Tuple[bool, str | None, List
         return True, None, emits, broadcasts
 
     return False, "Direction must be 'up' or 'down'.", emits, broadcasts
+
+
+def teleport_player(world, sid: str, target_room_id: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+    """Teleport a player to a specific room id without requiring a door.
+
+    Returns (ok, err, emits, broadcasts) where:
+      - emits: messages to send to the acting/affected player
+      - broadcasts: (room_id, payload) tuples to notify other players of leave/arrive
+    """
+    emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
+
+    player = world.players.get(sid)
+    if not player:
+        return False, 'Player not found.', emits, broadcasts
+    if target_room_id not in world.rooms:
+        return False, f"Room '{target_room_id}' not found.", emits, broadcasts
+
+    cur_room_id = player.room_id
+    # Announce departure from current room
+    if cur_room_id in world.rooms:
+        broadcasts.append((cur_room_id, {'type': 'system', 'content': f"{player.sheet.display_name} vanishes in a flash of light."}))
+
+    # Move silently via world helper
+    world.move_player(sid, target_room_id)
+
+    # Announce arrival in target room
+    broadcasts.append((target_room_id, {'type': 'system', 'content': f"{player.sheet.display_name} appears out of thin air."}))
+    # Show the new room description to the player
+    emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
+    return True, None, emits, broadcasts

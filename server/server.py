@@ -47,7 +47,7 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
 from world import World, CharacterSheet, Room, User
 from account_service import create_account_and_login, login_existing
-from movement_service import move_through_door, move_stairs
+from movement_service import move_through_door, move_stairs, teleport_player
 from room_service import handle_room_command
 from npc_service import handle_npc_command
 from admin_service import (
@@ -63,6 +63,7 @@ from admin_service import (
     execute_purge,
 )
 from ascii_art import ASCII_ART
+from security_utils import redact_sensitive
 
 
 def _print_command_help() -> None:
@@ -75,6 +76,8 @@ def _print_command_help() -> None:
         "",
     "Player commands (after auth):",
         "  look | l                             - describe your current room",
+        "  /look                                - same as 'look'",
+        "  /look at <name>                      - inspect a Player or NPC in the room",
     "  move through <door name>             - go via a named door in the room",
     "  move up stairs | move down stairs    - use stairs, if present",
         "  say <message>                        - say something; anyone present may respond",
@@ -89,7 +92,11 @@ def _print_command_help() -> None:
     "  /auth list_admins                   - list admin users",
         "  /kick <playerName>                  - disconnect a player",
     "  /setup                              - start world setup (create first room & NPC)",
+    "  /teleport <room_id>                 - teleport yourself to a room (fuzzy room id)",
+    "  /teleport <player> | <room_id>      - teleport another player to a room (fuzzy room id)",
+    "  /bring <player> | <room_id>         - move a player to a room (fuzzy room id)",
         "  /purge                              - reset world to factory default (confirmation required)",
+    "  /worldstate                         - print the redacted contents of world_state.json",
         "",
     "Room management:",
     "  /room create <id> | <description>   - create a new room",
@@ -193,6 +200,51 @@ def get_sid() -> str | None:
         return None
 
 
+# --- Fuzzy room resolver ---
+def _resolve_room_id_fuzzy(typed: str) -> tuple[bool, str | None, str | None]:
+    """Resolve a possibly-partial room id to a concrete existing id.
+
+    Strategy:
+      1) Exact match
+      2) Case-insensitive exact match
+      3) Unique prefix match (case-insensitive)
+      4) Unique substring match (case-insensitive)
+
+    Returns (ok, err, resolved_id). On ambiguity or not found, ok=False and err contains
+    a helpful message with suggestions.
+    """
+    t = (typed or '').strip()
+    if not t:
+        return False, 'Target room id required.', None
+    # Exact
+    if t in world.rooms:
+        return True, None, t
+    # CI exact
+    lower_map = {rid.lower(): rid for rid in world.rooms.keys()}
+    if t.lower() in lower_map:
+        return True, None, lower_map[t.lower()]
+    # Prefix candidates
+    prefs = [rid for rid in world.rooms.keys() if rid.lower().startswith(t.lower())]
+    if len(prefs) == 1:
+        return True, None, prefs[0]
+    if len(prefs) > 1:
+        prefs_sorted = sorted(prefs)[:10]
+        return False, 'Ambiguous room id. Did you mean: ' + ", ".join(prefs_sorted) + ' ?', None
+    # Substring candidates
+    subs = [rid for rid in world.rooms.keys() if t.lower() in rid.lower()]
+    if len(subs) == 1:
+        return True, None, subs[0]
+    if len(subs) > 1:
+        subs_sorted = sorted(subs)[:10]
+        return False, 'Ambiguous room id. Did you mean: ' + ", ".join(subs_sorted) + ' ?', None
+    # Not found with suggestions based on first letter
+    first = t[:1].lower()
+    suggestions = [rid for rid in world.rooms.keys() if rid[:1].lower() == first]
+    if suggestions:
+        return False, f"Room '{typed}' not found. Did you mean: " + ", ".join(sorted(suggestions)[:10]) + '?', None
+    return False, f"Room '{typed}' not found.", None
+
+
 # --- Helper: broadcast payload to all players in a world room (except one) ---
 def broadcast_to_room(room_id: str, payload: dict, exclude_sid: str | None = None) -> None:
     room = world.rooms.get(room_id)
@@ -209,6 +261,68 @@ def broadcast_to_room(room_id: str, payload: dict, exclude_sid: str | None = Non
             # Best-effort broadcast; ignore per-client errors
             pass
 
+
+
+def _format_look(w: World, sid: str | None) -> str:
+    """Return a formatted room description:
+    'You are in <room_id>. <room_description>\n<lists of players, NPCs, and objects>'
+    Objects include doors and stairs currently present in the room.
+    """
+    if sid is None or sid not in w.players:
+        return "You are in the backrooms. How did you get here? try /teleport to escape."
+    try:
+        player = w.players.get(sid)
+        if not player:
+            return "You are in the backrooms. How did you get here? try /teleport to escape."
+        room = w.rooms.get(player.room_id)
+        if not room:
+            return "You are in the backrooms. How did you get here? try /teleport to escape."
+
+        lines: list[str] = []
+        room_desc = (room.description or "").strip()
+        lines.append(f"You are in {room.id}. {room_desc}")
+
+        bits: list[str] = []
+        # Other players (exclude viewer)
+        try:
+            other_sids = [psid for psid in room.players if psid != sid]
+            other_names = [w.players[psid].sheet.display_name for psid in other_sids if psid in w.players]
+            if other_names:
+                bits.append("Players: " + ", ".join(sorted(other_names)))
+        except Exception:
+            pass
+
+        # NPCs present
+        try:
+            if getattr(room, 'npcs', None) and room.npcs:
+                bits.append("NPCs: " + ", ".join(sorted(room.npcs)))
+        except Exception:
+            pass
+
+        # Objects: list doors and stairs as room objects
+        try:
+            object_names: list[str] = []
+            if getattr(room, 'doors', None):
+                object_names.extend(sorted(room.doors.keys()))
+            if getattr(room, 'stairs_up_to', None):
+                object_names.append("stairs up")
+            if getattr(room, 'stairs_down_to', None):
+                object_names.append("stairs down")
+            if object_names:
+                bits.append("Objects: " + ", ".join(object_names))
+        except Exception:
+            pass
+
+        if bits:
+            lines.append("; ".join(bits))
+
+        return "\n".join(lines)
+    except Exception:
+        # Fall back to existing world description on any unexpected error
+        try:
+            return w.describe_room_for(sid)
+        except Exception:
+            return "You are nowhere."
 
 
 
@@ -244,6 +358,41 @@ def _resolve_npcs_in_room(room: Room | None, requested: list[str]) -> list[str]:
             continue
     return resolved
 
+
+def _resolve_player_in_room(w: World, room: Room | None, requested: str) -> tuple[str | None, str | None]:
+    """Resolve a player in the given room by display name.
+    Returns (sid, name) or (None, None).
+    Strategy: case-insensitive exact, then startswith, then substring. Includes self.
+    """
+    if room is None:
+        return None, None
+    # Build (sid, name) list
+    entries: list[tuple[str, str]] = []
+    for psid in list(room.players):
+        try:
+            p = w.players.get(psid)
+            if p and p.sheet and p.sheet.display_name:
+                entries.append((psid, p.sheet.display_name))
+        except Exception:
+            continue
+    target = (requested or "").strip()
+    if not target:
+        return None, None
+    tlow = target.lower()
+
+    # exact
+    for sid2, name in entries:
+        if name.lower() == tlow:
+            return sid2, name
+    # startswith
+    for sid2, name in entries:
+        if name.lower().startswith(tlow):
+            return sid2, name
+    # substring
+    for sid2, name in entries:
+        if tlow in name.lower():
+            return sid2, name
+    return None, None
 
 def _ensure_npc_sheet(npc_name: str) -> CharacterSheet:
     """Ensure an NPC has a CharacterSheet in world.npc_sheets, creating a basic one if missing."""
@@ -735,7 +884,7 @@ def handle_message(data):
                     return
 
         if text_lower in ("look", "l"):
-            desc = world.describe_room_for(sid) if sid else "You are nowhere."
+            desc = _format_look(world, sid)
             emit('message', {
                 'type': 'system',
                 'content': desc
@@ -825,6 +974,50 @@ def handle_command(sid: str | None, text: str) -> None:
 
     cmd = parts[0].lower()
     args = parts[1:]
+
+    # Player convenience: /look and /look at <name>
+    if cmd == 'look':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        if not args:
+            # same as bare look
+            emit('message', {'type': 'system', 'content': _format_look(world, sid)})
+            return
+        # Support: /look at <name>
+        if len(args) >= 2 and args[0].lower() == 'at':
+            name = " ".join(args[1:]).strip()
+            # Must be in a room
+            player = world.players.get(sid)
+            if not player:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+                return
+            room = world.rooms.get(player.room_id)
+            # Try players first (includes self)
+            psid, pname = _resolve_player_in_room(world, room, name)
+            if psid and pname:
+                try:
+                    p = world.players.get(psid)
+                    if p:
+                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}"})
+                        return
+                except Exception:
+                    pass
+            # Try NPCs
+            npcs = _resolve_npcs_in_room(room, [name])
+            if npcs:
+                npc_name = npcs[0]
+                sheet = world.npc_sheets.get(npc_name)
+                if not sheet:
+                    # Create on demand to ensure a description exists
+                    sheet = _ensure_npc_sheet(npc_name)
+                emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}"})
+                return
+            emit('message', {'type': 'system', 'content': f"You don't see '{name}' here."})
+            return
+        # Otherwise, unrecognized look usage
+        emit('message', {'type': 'error', 'content': 'Usage: /look  or  /look at <name>'})
+        return
 
     # --- Auth workflow: /auth create and /auth login ---
     if cmd == 'auth':
@@ -1007,7 +1200,7 @@ def handle_command(sid: str | None, text: str) -> None:
         return
 
     # Admin-only commands below
-    admin_only_cmds = {'kick', 'room', 'npc', 'purge'}
+    admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring'}
     if cmd in admin_only_cmds and sid not in admins:
         emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
         return
@@ -1038,6 +1231,101 @@ def handle_command(sid: str | None, text: str) -> None:
             emit('message', {'type': 'error', 'content': f"Failed to kick '{target_name}': {e}"})
         return
 
+    # /teleport (admin): teleport self or another player to a room
+    if cmd == 'teleport':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        # Syntax:
+        #   /teleport <room_id>
+        #   /teleport <playerName> | <room_id>
+        if not args:
+            emit('message', {'type': 'error', 'content': 'Usage: /teleport <room_id>  or  /teleport <playerName> | <room_id>'})
+            return
+        target_sid = sid  # default: self
+        target_room = None
+        if '|' in " ".join(args):
+            try:
+                joined = " ".join(args)
+                player_name, target_room = [p.strip() for p in joined.split('|', 1)]
+            except Exception:
+                emit('message', {'type': 'error', 'content': 'Usage: /teleport <playerName> | <room_id>'})
+                return
+            # Lookup player by name
+            tsid = find_player_sid_by_name(world, player_name)
+            if not tsid:
+                emit('message', {'type': 'error', 'content': f"Player '{player_name}' not found."})
+                return
+            target_sid = tsid
+        else:
+            # Self teleport with one argument
+            target_room = " ".join(args).strip()
+        if not target_room:
+            emit('message', {'type': 'error', 'content': 'Target room id required.'})
+            return
+        # Resolve room id fuzzily
+        rok, rerr, resolved = _resolve_room_id_fuzzy(target_room)
+        if not rok or not resolved:
+            emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
+            return
+        ok, err, emits2, broadcasts2 = teleport_player(world, target_sid, resolved)
+        if not ok:
+            emit('message', {'type': 'error', 'content': err or 'Teleport failed.'})
+            return
+        # Send emits to the affected player (could be self or another)
+        for payload in emits2:
+            try:
+                if target_sid == sid:
+                    emit('message', payload)
+                else:
+                    socketio.emit('message', payload, to=target_sid)
+            except Exception:
+                pass
+        # Broadcast leave/arrive messages
+        for room_id, payload in broadcasts2:
+            broadcast_to_room(room_id, payload, exclude_sid=target_sid)
+        # Confirm action if admin teleported someone else
+        if target_sid != sid:
+            emit('message', {'type': 'system', 'content': 'Teleport complete.'})
+        return
+
+    # /bring (admin): bring a player to a specified room
+    if cmd == 'bring':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        if not args:
+            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName> | <room_id>'})
+            return
+        try:
+            joined = " ".join(args)
+            player_name, target_room = [p.strip() for p in joined.split('|', 1)]
+        except Exception:
+            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName> | <room_id>'})
+            return
+        tsid = find_player_sid_by_name(world, player_name)
+        if not tsid:
+            emit('message', {'type': 'error', 'content': f"Player '{player_name}' not found."})
+            return
+        rok, rerr, resolved = _resolve_room_id_fuzzy(target_room)
+        if not rok or not resolved:
+            emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
+            return
+        ok, err, emits2, broadcasts2 = teleport_player(world, tsid, resolved)
+        if not ok:
+            emit('message', {'type': 'error', 'content': err or 'Bring failed.'})
+            return
+        # Notify affected and broadcasts
+        for payload in emits2:
+            try:
+                socketio.emit('message', payload, to=tsid)
+            except Exception:
+                pass
+        for room_id, payload in broadcasts2:
+            broadcast_to_room(room_id, payload, exclude_sid=tsid)
+        emit('message', {'type': 'system', 'content': 'Bring complete.'})
+        return
+
     # /purge (admin): delete persisted world file and reset to defaults with confirmation
     if cmd == 'purge':
         if sid is None:
@@ -1045,6 +1333,29 @@ def handle_command(sid: str | None, text: str) -> None:
             return
         _pending_confirm[sid] = 'purge'
         emit('message', purge_prompt())
+        return
+
+    # /worldstate (admin): print the JSON contents of the persisted world state file (passwords redacted)
+    if cmd == 'worldstate':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        try:
+            import json
+            with open(STATE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Deep redact sensitive fields (e.g., password) before printing
+            sanitized = redact_sensitive(data)
+            raw = json.dumps(sanitized, ensure_ascii=False, indent=2)
+            # Send as a single system message. Keep raw formatting; client uses RichTextLabel and can display plain text.
+            emit('message', {
+                'type': 'system',
+                'content': f"[b]world_state.json[/b]\n{raw}"
+            })
+        except FileNotFoundError:
+            emit('message', {'type': 'error', 'content': 'world_state.json not found.'})
+        except Exception as e:
+            emit('message', {'type': 'error', 'content': f'Failed to read world_state.json: {e}'})
         return
 
     # /setup (admin): start the world setup wizard if not complete

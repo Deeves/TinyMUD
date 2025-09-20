@@ -12,6 +12,20 @@ import uuid
 from world import Room
 
 
+def _suggest_room_ids(world, typed_id: str) -> list[str]:
+    """Return a list of room ids that start with the same first letter as typed_id (case-insensitive).
+    If typed_id is empty or there are no matches, returns an empty list. Sorted for stable output.
+    """
+    try:
+        first = (typed_id or "").strip()[:1].lower()
+        if not first:
+            return []
+        candidates = [rid for rid in world.rooms.keys() if isinstance(rid, str) and rid[:1].lower() == first]
+        return sorted(candidates)
+    except Exception:
+        return []
+
+
 def handle_room_command(world, state_path: str, args: list[str]) -> Tuple[bool, str | None, List[dict]]:
     emits: List[dict] = []
     if not args:
@@ -58,6 +72,14 @@ def handle_room_command(world, state_path: str, args: list[str]) -> Tuple[bool, 
             return True, 'Usage: /room adddoor <room_id> | <door name> | <target_room_id>', emits
         room = world.rooms.get(room_id)
         if not room:
+            # Offer a friendly suggestion list using the first letter (case-insensitive)
+            suggestions = _suggest_room_ids(world, room_id)
+            if suggestions:
+                return True, (
+                    f"Room '{room_id}' not found. Did you mean: "
+                    + ", ".join(suggestions)
+                    + "?"
+                ), emits
             return True, f"Room '{room_id}' not found.", emits
         if not target_room:
             return True, 'Target room id cannot be empty.', emits
