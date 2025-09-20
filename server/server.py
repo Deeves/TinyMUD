@@ -85,6 +85,7 @@ def _print_command_help() -> None:
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
         "  /sheet                              - show your character sheet",
+        "  /help                               - list available commands",
         "",
     "Admin commands (first created user is admin):",
     "  /auth promote <name>                - elevate a user to admin",
@@ -114,6 +115,76 @@ def _print_command_help() -> None:
         "======================================\n",
     ]
     print("\n".join(lines))
+
+
+def _build_help_text(sid: str | None) -> str:
+    """Return BBCode-formatted help text tailored to the current user.
+
+    - Unauthenticated: shows how to create/login and basic look/help.
+    - Player: shows movement, look, say, and profile commands.
+    - Admins: includes admin, room, and NPC management commands.
+    """
+    is_player = bool(sid and sid in world.players)
+    is_admin = bool(sid and sid in admins)
+
+    lines: list[str] = []
+
+    # Header
+    lines.append("[b]Commands[/b]")
+    lines.append("")
+
+    # Auth section (always visible)
+    lines.append("[b]Auth[/b]")
+    lines.append("/auth create <name> | <password> | <description>  — create an account & character")
+    lines.append("/auth login <name> | <password>                   — log in to your character")
+    lines.append("/auth list_admins                                 — list admin users")
+    if not is_player:
+        lines.append("create | login                                   — interactive flows without /auth")
+    lines.append("")
+
+    # Player commands (only meaningful once logged in, but list for visibility)
+    lines.append("[b]Player[/b]")
+    lines.append("look | l                                         — describe your current room")
+    lines.append("/look                                            — same as 'look'")
+    lines.append("/look at <name>                                  — inspect a Player or NPC in the room")
+    lines.append("move through <door name>                         — go via a named door in the room")
+    lines.append("move up stairs | move down stairs                — use stairs, if present")
+    lines.append("say <message>                                    — say something; anyone present may respond")
+    lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
+    lines.append("/rename <new name>                               — change your display name")
+    lines.append("/describe <text>                                 — update your character description")
+    lines.append("/sheet                                           — show your character sheet")
+    lines.append("/help                                            — show this help")
+    lines.append("")
+
+    # Admin commands (only if current user is admin)
+    if is_admin:
+        lines.append("[b]Admin[/b]")
+        lines.append("/auth promote <name>                             — elevate a user to admin")
+        lines.append("/auth demote <name>                              — revoke a user's admin rights")
+        lines.append("/kick <playerName>                               — disconnect a player")
+        lines.append("/setup                                           — start world setup (create first room & NPC)")
+        lines.append("/teleport <room_id>                              — teleport yourself to a room (fuzzy id)")
+        lines.append("/teleport <player> | <room_id>                   — teleport another player (fuzzy id)")
+        lines.append("/bring <player> | <room_id>                      — move a player to a room (fuzzy id)")
+        lines.append("/purge                                           — reset world to factory defaults (confirm)")
+        lines.append("/worldstate                                      — print redacted world_state.json")
+        lines.append("")
+        lines.append("[b]Room management[/b]")
+        lines.append("/room create <id> | <description>                — create a new room")
+        lines.append("/room setdesc <id> | <description>               — update a room's description")
+        lines.append("/room adddoor <room_id> | <door name> | <target_room_id>")
+        lines.append("/room removedoor <room_id> | <door name>")
+        lines.append("/room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->")
+        lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
+        lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
+        lines.append("")
+        lines.append("[b]NPC management[/b]")
+        lines.append("/npc add <room_id> <npc name...>                 — add an NPC to a room")
+        lines.append("/npc remove <room_id> <npc name...>              — remove an NPC from a room")
+        lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
+
+    return "\n".join(lines)
 
 
 # --- Get API Key on Startup ---
@@ -1017,6 +1088,12 @@ def handle_command(sid: str | None, text: str) -> None:
             return
         # Otherwise, unrecognized look usage
         emit('message', {'type': 'error', 'content': 'Usage: /look  or  /look at <name>'})
+        return
+
+    # /help: context-aware help for auth/player/admin
+    if cmd == 'help':
+        help_text = _build_help_text(sid)
+        emit('message', {'type': 'system', 'content': help_text})
         return
 
     # --- Auth workflow: /auth create and /auth login ---

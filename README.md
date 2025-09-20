@@ -66,7 +66,7 @@ You should see “Gemini API configured successfully.” when the key is valid. 
   - Create: `/auth create <name> | <password> | <description>`
   - Login: `/auth login <name> | <password>`
   - Tip: the first user you create becomes an admin.
-- Then try `look` to describe your current room.
+- Then try `look` to describe your current room, or `/help` to see available commands.
 
 Tip: For production or when deploying publicly, set `SECRET_KEY` in the environment. The server will warn if using a dev default.
 
@@ -110,6 +110,7 @@ Please also read CONTRIBUTING.md for style and PR tips.
   - First created account becomes admin automatically
 - Basics:
   - `look` or `l` — describe current room
+  - `/help` — list available commands for your role
   - `/rename <new name>` — change your display name
   - `/describe <text>` — update your description
   - `/sheet` — show your character sheet
