@@ -39,6 +39,13 @@ try:
 except Exception:
     pass
 from dialogue_utils import parse_say as _parse_say, split_targets as _split_targets
+from id_parse_utils import (
+    strip_quotes as _strip_quotes,
+    resolve_room_id as _resolve_room_id_generic,
+    resolve_player_sid_in_room as _resolve_player_sid_in_room,
+    resolve_player_sid_global as _resolve_player_sid_global,
+    resolve_npcs_in_room as _resolve_npcs_in_room_fuzzy,
+)
 try:
     import google.generativeai as genai  # type: ignore
 except Exception:
@@ -92,9 +99,9 @@ def _print_command_help() -> None:
     "  /auth list_admins                   - list admin users",
         "  /kick <playerName>                  - disconnect a player",
     "  /setup                              - start world setup (create first room & NPC)",
-    "  /teleport <room_id>                 - teleport yourself to a room (fuzzy room id)",
-    "  /teleport <player> | <room_id>      - teleport another player to a room (fuzzy room id)",
-    "  /bring <player> | <room_id>         - move a player to a room (fuzzy room id)",
+    "  /teleport <room_id>                 - teleport yourself to a room (fuzzy; 'here' allowed)",
+    "  /teleport <player> | <room_id>      - teleport another player (fuzzy; 'here' = your room)",
+    "  /bring <player>                     - bring a player to your current room",
         "  /purge                              - reset world to factory default (confirmation required)",
     "  /worldstate                         - print the redacted contents of world_state.json",
         "",
@@ -108,9 +115,9 @@ def _print_command_help() -> None:
     "  /room linkstairs <room_a> | <up|down> | <room_b>",
         "",
         "NPC management:",
-        "  /npc add <room_id> <npc name...>    - add an NPC to a room",
-        "  /npc remove <room_id> <npc name...> - remove an NPC from a room",
-        "  /npc setdesc <npc name> | <desc>    - set an NPC's description",
+        "  /npc add <room_id> | <npc name> | <desc>  - add an NPC to a room (and set description)",
+        "  /npc remove <npc name>                    - remove an NPC from your current room",
+        "  /npc setdesc <npc name> | <desc>          - set an NPC's description",
         "======================================\n",
     ]
     print("\n".join(lines))
@@ -162,9 +169,9 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/auth demote <name>                              — revoke a user's admin rights")
         lines.append("/kick <playerName>                               — disconnect a player")
         lines.append("/setup                                           — start world setup (create first room & NPC)")
-        lines.append("/teleport <room_id>                              — teleport yourself to a room (fuzzy id)")
-        lines.append("/teleport <player> | <room_id>                   — teleport another player (fuzzy id)")
-        lines.append("/bring <player> | <room_id>                      — move a player to a room (fuzzy id)")
+        lines.append("/teleport <room_id>                              — teleport yourself (fuzzy; 'here' allowed)")
+        lines.append("/teleport <player> | <room_id>                   — teleport another player (fuzzy; 'here' = your room)")
+        lines.append("/bring <player>                                   — bring a player to your current room")
         lines.append("/purge                                           — reset world to factory defaults (confirm)")
         lines.append("/worldstate                                      — print redacted world_state.json")
         lines.append("")
@@ -177,10 +184,10 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
         lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
         lines.append("")
-        lines.append("[b]NPC management[/b]")
-        lines.append("/npc add <room_id> <npc name...>                 — add an NPC to a room")
-        lines.append("/npc remove <room_id> <npc name...>              — remove an NPC from a room")
-        lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
+    lines.append("[b]NPC management[/b]")
+    lines.append("/npc add <room_id> | <npc name> | <desc>         — add an NPC to a room and set description")
+    lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
+    lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
 
     return "\n".join(lines)
 
@@ -270,48 +277,37 @@ def get_sid() -> str | None:
 
 
 # --- Fuzzy room resolver ---
-def _resolve_room_id_fuzzy(typed: str) -> tuple[bool, str | None, str | None]:
-    """Resolve a possibly-partial room id to a concrete existing id.
+def _normalize_room_input(sid: str | None, typed: str) -> tuple[bool, str | None, str | None]:
+    """Normalize special room identifiers like 'here' to concrete room ids.
 
-    Strategy:
-      1) Exact match
-      2) Case-insensitive exact match
-      3) Unique prefix match (case-insensitive)
-      4) Unique substring match (case-insensitive)
-
-    Returns (ok, err, resolved_id). On ambiguity or not found, ok=False and err contains
-    a helpful message with suggestions.
+    - 'here' (case-insensitive, quotes ignored) resolves to the player's current room.
+    - otherwise returns the input unchanged (quotes stripped).
     """
-    t = (typed or '').strip()
-    if not t:
-        return False, 'Target room id required.', None
-    # Exact
-    if t in world.rooms:
-        return True, None, t
-    # CI exact
-    lower_map = {rid.lower(): rid for rid in world.rooms.keys()}
-    if t.lower() in lower_map:
-        return True, None, lower_map[t.lower()]
-    # Prefix candidates
-    prefs = [rid for rid in world.rooms.keys() if rid.lower().startswith(t.lower())]
-    if len(prefs) == 1:
-        return True, None, prefs[0]
-    if len(prefs) > 1:
-        prefs_sorted = sorted(prefs)[:10]
-        return False, 'Ambiguous room id. Did you mean: ' + ", ".join(prefs_sorted) + ' ?', None
-    # Substring candidates
-    subs = [rid for rid in world.rooms.keys() if t.lower() in rid.lower()]
-    if len(subs) == 1:
-        return True, None, subs[0]
-    if len(subs) > 1:
-        subs_sorted = sorted(subs)[:10]
-        return False, 'Ambiguous room id. Did you mean: ' + ", ".join(subs_sorted) + ' ?', None
-    # Not found with suggestions based on first letter
-    first = t[:1].lower()
-    suggestions = [rid for rid in world.rooms.keys() if rid[:1].lower() == first]
-    if suggestions:
-        return False, f"Room '{typed}' not found. Did you mean: " + ", ".join(sorted(suggestions)[:10]) + '?', None
-    return False, f"Room '{typed}' not found.", None
+    t = _strip_quotes(typed or "")
+    if t.lower() == 'here':
+        if not sid or sid not in world.players:
+            return False, 'You are nowhere.', None
+        player = world.players.get(sid)
+        room_id = getattr(player, 'room_id', None)
+        if not room_id:
+            return False, 'You are nowhere.', None
+        return True, None, room_id
+    return True, None, t
+
+
+def _resolve_room_id_fuzzy(sid: str | None, typed: str) -> tuple[bool, str | None, str | None]:
+    # First normalize shorthand like 'here'
+    okn, errn, norm = _normalize_room_input(sid, typed)
+    if not okn:
+        return False, errn, None
+    # Delegate to generic resolver with quoted support
+    assert isinstance(norm, str)
+    ok, err, rid = _resolve_room_id_generic(world, norm)
+    if not ok:
+        # adjust message to mention room when possible
+        if err and "not found" in err:
+            return False, err.replace("'", "Room '", 1) if err.startswith("'") else f"Room {err}", None
+    return ok, err, rid
 
 
 # --- Helper: broadcast payload to all players in a world room (except one) ---
@@ -396,71 +392,13 @@ def _format_look(w: World, sid: str | None) -> str:
 
 
 def _resolve_npcs_in_room(room: Room | None, requested: list[str]) -> list[str]:
-    """Map requested NPC names to actual NPCs in the room.
-    Resolution strategy: case-insensitive exact match, then startswith, then substring.
-    Returns the resolved in-room NPC names (unique, preserve request order).
-    """
-    if room is None or not getattr(room, "npcs", None):
-        return []
-    in_room = list(room.npcs)
-    resolved: list[str] = []
-    used: set[str] = set()
-    for req in requested:
-        rlow = req.lower()
-        # exact
-        exact = next((n for n in in_room if n.lower() == rlow and n not in used), None)
-        if exact:
-            resolved.append(exact)
-            used.add(exact)
-            continue
-        # startswith
-        sw = next((n for n in in_room if n.lower().startswith(rlow) and n not in used), None)
-        if sw:
-            resolved.append(sw)
-            used.add(sw)
-            continue
-        # substring
-        sub = next((n for n in in_room if rlow in n.lower() and n not in used), None)
-        if sub:
-            resolved.append(sub)
-            used.add(sub)
-            continue
-    return resolved
+    return _resolve_npcs_in_room_fuzzy(room, requested)
 
 
 def _resolve_player_in_room(w: World, room: Room | None, requested: str) -> tuple[str | None, str | None]:
-    """Resolve a player in the given room by display name.
-    Returns (sid, name) or (None, None).
-    Strategy: case-insensitive exact, then startswith, then substring. Includes self.
-    """
-    if room is None:
-        return None, None
-    # Build (sid, name) list
-    entries: list[tuple[str, str]] = []
-    for psid in list(room.players):
-        try:
-            p = w.players.get(psid)
-            if p and p.sheet and p.sheet.display_name:
-                entries.append((psid, p.sheet.display_name))
-        except Exception:
-            continue
-    target = (requested or "").strip()
-    if not target:
-        return None, None
-    tlow = target.lower()
-
-    # exact
-    for sid2, name in entries:
-        if name.lower() == tlow:
-            return sid2, name
-    # startswith
-    for sid2, name in entries:
-        if name.lower().startswith(tlow):
-            return sid2, name
-    # substring
-    for sid2, name in entries:
-        if tlow in name.lower():
-            return sid2, name
+    ok, _err, sid_res, name_res = _resolve_player_sid_in_room(w, room, requested)
+    if ok and sid_res and name_res:
+        return sid_res, name_res
     return None, None
 
 def _ensure_npc_sheet(npc_name: str) -> CharacterSheet:
@@ -969,6 +907,7 @@ def handle_message(data):
                     # find the index of " at " regardless of starting with 'look' or 'l'
                     at_idx = lower_parts.lower().find(" at ")
                     name_raw = lower_parts[at_idx + 4:].strip() if at_idx != -1 else ""
+                    name_raw = _strip_quotes(name_raw)
                 except Exception:
                     name_raw = ""
                 if not name_raw:
@@ -1154,7 +1093,7 @@ def handle_command(sid: str | None, text: str) -> None:
             if len(args) < 2:
                 emit('message', {'type': 'error', 'content': 'Usage: /auth promote <name>'})
                 return
-            target_name = " ".join(args[1:]).strip()
+            target_name = _strip_quotes(" ".join(args[1:]).strip())
             ok, err, emits2 = promote_user(world, sessions, admins, target_name, STATE_PATH)
             if err:
                 emit('message', {'type': 'error', 'content': err})
@@ -1177,7 +1116,7 @@ def handle_command(sid: str | None, text: str) -> None:
             if len(args) < 2:
                 emit('message', {'type': 'error', 'content': 'Usage: /auth demote <name>'})
                 return
-            target_name = " ".join(args[1:]).strip()
+            target_name = _strip_quotes(" ".join(args[1:]).strip())
             ok, err, emits2 = demote_user(world, sessions, admins, target_name, STATE_PATH)
             if err:
                 emit('message', {'type': 'error', 'content': err})
@@ -1194,6 +1133,8 @@ def handle_command(sid: str | None, text: str) -> None:
             except Exception:
                 emit('message', {'type': 'error', 'content': 'Usage: /auth create <display_name> | <password> | <description>'})
                 return
+            display_name = _strip_quotes(display_name)
+            password = _strip_quotes(password)
             if len(display_name) < 2 or len(display_name) > 32:
                 emit('message', {'type': 'error', 'content': 'Display name must be 2-32 characters.'})
                 return
@@ -1232,6 +1173,8 @@ def handle_command(sid: str | None, text: str) -> None:
             except Exception:
                 emit('message', {'type': 'error', 'content': 'Usage: /auth login <display_name> | <password>'})
                 return
+            display_name = _strip_quotes(display_name)
+            password = _strip_quotes(password)
             ok, err, emits2, broadcasts2 = login_existing(world, sid, display_name, password, sessions, admins)
             if not ok:
                 emit('message', {'type': 'error', 'content': err or 'Invalid name or password.'})
@@ -1328,12 +1271,12 @@ def handle_command(sid: str | None, text: str) -> None:
         if not args:
             emit('message', {'type': 'error', 'content': 'Usage: /kick <playerName>'})
             return
-        target_name = " ".join(args)
-        # Find player by name (case-insensitive)
-        target_sid = find_player_sid_by_name(world, target_name)
+        target_name = _strip_quotes(" ".join(args))
+        # Fuzzy resolve player by display name
+        okp, perr, target_sid, _resolved_name = _resolve_player_sid_global(world, target_name)
 
-        if target_sid is None:
-            emit('message', {'type': 'error', 'content': f"Player '{target_name}' not found."})
+        if not okp or target_sid is None:
+            emit('message', {'type': 'error', 'content': perr or f"Player '{target_name}' not found."})
             return
 
         if target_sid == sid:
@@ -1365,24 +1308,24 @@ def handle_command(sid: str | None, text: str) -> None:
         if '|' in " ".join(args):
             try:
                 joined = " ".join(args)
-                player_name, target_room = [p.strip() for p in joined.split('|', 1)]
+                player_name, target_room = [ _strip_quotes(p.strip()) for p in joined.split('|', 1) ]
             except Exception:
                 emit('message', {'type': 'error', 'content': 'Usage: /teleport <playerName> | <room_id>'})
                 return
-            # Lookup player by name
-            tsid = find_player_sid_by_name(world, player_name)
-            if not tsid:
-                emit('message', {'type': 'error', 'content': f"Player '{player_name}' not found."})
+            # Fuzzy resolve player by name
+            okp, perr, tsid, _pname = _resolve_player_sid_global(world, player_name)
+            if not okp or not tsid:
+                emit('message', {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
                 return
             target_sid = tsid
         else:
             # Self teleport with one argument
-            target_room = " ".join(args).strip()
+            target_room = _strip_quotes(" ".join(args).strip())
         if not target_room:
             emit('message', {'type': 'error', 'content': 'Target room id required.'})
             return
         # Resolve room id fuzzily
-        rok, rerr, resolved = _resolve_room_id_fuzzy(target_room)
+        rok, rerr, resolved = _resolve_room_id_fuzzy(sid, target_room)
         if not rok or not resolved:
             emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
             return
@@ -1407,29 +1350,26 @@ def handle_command(sid: str | None, text: str) -> None:
             emit('message', {'type': 'system', 'content': 'Teleport complete.'})
         return
 
-    # /bring (admin): bring a player to a specified room
+    # /bring (admin): bring a player to your current room
     if cmd == 'bring':
         if sid is None:
             emit('message', {'type': 'error', 'content': 'Not connected.'})
             return
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName> | <room_id>'})
+            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName>'})
             return
-        try:
-            joined = " ".join(args)
-            player_name, target_room = [p.strip() for p in joined.split('|', 1)]
-        except Exception:
-            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName> | <room_id>'})
+        # Support legacy syntax but ignore room id; always use admin's current room
+        joined = " ".join(args)
+        player_name = _strip_quotes(joined.split('|', 1)[0].strip())
+        okp, perr, tsid, _pname = _resolve_player_sid_global(world, player_name)
+        if not okp or not tsid:
+            emit('message', {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
             return
-        tsid = find_player_sid_by_name(world, player_name)
-        if not tsid:
-            emit('message', {'type': 'error', 'content': f"Player '{player_name}' not found."})
+        okh, erh, here_room = _normalize_room_input(sid, 'here')
+        if not okh or not here_room:
+            emit('message', {'type': 'error', 'content': erh or 'You are nowhere.'})
             return
-        rok, rerr, resolved = _resolve_room_id_fuzzy(target_room)
-        if not rok or not resolved:
-            emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
-            return
-        ok, err, emits2, broadcasts2 = teleport_player(world, tsid, resolved)
+        ok, err, emits2, broadcasts2 = teleport_player(world, tsid, here_room)
         if not ok:
             emit('message', {'type': 'error', 'content': err or 'Bring failed.'})
             return
@@ -1493,7 +1433,7 @@ def handle_command(sid: str | None, text: str) -> None:
 
     # /room commands (admin)
     if cmd == 'room':
-        handled, err, emits2 = handle_room_command(world, STATE_PATH, args)
+        handled, err, emits2 = handle_room_command(world, STATE_PATH, args, sid)
         if err:
             emit('message', {'type': 'error', 'content': err})
             return
@@ -1504,7 +1444,7 @@ def handle_command(sid: str | None, text: str) -> None:
 
     # /npc commands (admin)
     if cmd == 'npc':
-        handled, err, emits2 = handle_npc_command(world, STATE_PATH, args)
+        handled, err, emits2 = handle_npc_command(world, STATE_PATH, sid, args)
         if err:
             emit('message', {'type': 'error', 'content': err})
             return

@@ -7,6 +7,7 @@ emits (to send back to the acting player) and broadcasts (to notify others).
 from __future__ import annotations
 
 from typing import List, Tuple
+from id_parse_utils import resolve_door_name
 
 
 def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
@@ -34,16 +35,11 @@ def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None
         else:
             return False, 'Specify a door name: move through <door name>', emits, broadcasts
 
-    target = room.doors.get(name_in)
-    if not target:
-        # try case-insensitive
-        for dname, rid in room.doors.items():
-            if dname.lower() == name_in.lower():
-                target = rid
-                name_in = dname
-                break
-    if not target:
-        return False, f"No door named '{door_name}' here.", emits, broadcasts
+    ok_res, err_res, resolved_door = resolve_door_name(room, name_in)
+    if not ok_res or not resolved_door:
+        return False, (err_res or f"No door named '{door_name}' here."), emits, broadcasts
+    name_in = resolved_door
+    target = room.doors.get(resolved_door)
     if target not in world.rooms:
         return False, f"Door '{name_in}' is linked to unknown room '{target}'.", emits, broadcasts
 
