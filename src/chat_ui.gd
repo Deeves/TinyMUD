@@ -28,6 +28,7 @@ var current_font_size: int = 16
 var current_bg_color: Color = Color.BLACK
 var server_host: String = "127.0.0.1"
 var server_port: int = 5000
+var censor_passwords: bool = true
 
 # --- UX helpers ---
 var _last_sent_message: String = ""
@@ -36,6 +37,7 @@ const ACK_TIMEOUT_SEC := 1.2
 var _pending_ack := {}
 # Whether we're in interactive auth/login flow; echo inputs plainly
 var _in_auth_flow: bool = true
+var _expecting_password: bool = false
 # Keys used when populated:
 #  - 'original': String   (full text sent)
 #  - 'verb': String       (first token, lowercased)
@@ -55,6 +57,9 @@ func _ready():
 	# Server settings from options menu
 	if options_menu.has_signal("server_settings_applied"):
 		options_menu.server_settings_applied.connect(_on_server_settings_applied)
+		# Password censoring toggle
+		if options_menu.has_signal("password_censor_toggled"):
+			options_menu.password_censor_toggled.connect(_on_password_censor_toggled)
 
 	# Load settings and apply
 	_load_settings()
@@ -62,7 +67,7 @@ func _ready():
 	_apply_background(current_bg_color)
 	# Initialize options panel controls
 	if options_menu.has_method("set_initial_values"):
-		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port)
+		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port, censor_passwords)
 
 	input_box.text_submitted.connect(_on_text_submitted)
 	input_box.gui_input.connect(_on_input_box_gui_input)
@@ -84,6 +89,8 @@ func _on_connected():
 	# Namespace connected; nothing additional needed here for log ordering
 	pass
 	_in_auth_flow = true
+	_expecting_password = false
+	input_box.secret = false
 
 func _on_disconnected():
 	append_to_log("[color=red]Disconnected.[/color]")
@@ -122,6 +129,8 @@ func _on_event(event_name: String, data) -> void:
 				_in_auth_flow = true
 			elif c.find("enter password:") != -1:
 				_in_auth_flow = true
+				_expecting_password = true
+				input_box.secret = censor_passwords
 			elif c.find("enter a short character description") != -1:
 				_in_auth_flow = true
 			elif c.find("cancelled. type \"create\" or \"login\" to continue.") != -1:
@@ -143,8 +152,12 @@ func _on_event(event_name: String, data) -> void:
 				_in_auth_flow = true
 			elif c.find("world setup complete!") != -1:
 				_in_auth_flow = false
+				_expecting_password = false
+				input_box.secret = false
 			elif c.find("setup cancelled.") != -1:
 				_in_auth_flow = false
+				_expecting_password = false
+				input_box.secret = false
 		"player":
 			var pname = data.get("name", "Someone")
 			var ptext = data.get("content", "...")
@@ -161,6 +174,10 @@ func _on_event(event_name: String, data) -> void:
 func _on_text_submitted(player_text: String):
 	if player_text.is_empty():
 		return
+	# If we just entered a password, unmask after submission
+	if _expecting_password:
+		_expecting_password = false
+		input_box.secret = false
 	_last_sent_message = player_text
 	# Don't echo auth commands as speech
 	if player_text.begins_with("/"):
@@ -329,6 +346,7 @@ func _save_settings() -> void:
 	cfg.set_value(SETTINGS_SECTION, "bg_color", current_bg_color)
 	cfg.set_value(SETTINGS_SECTION, "server_host", server_host)
 	cfg.set_value(SETTINGS_SECTION, "server_port", server_port)
+	cfg.set_value(SETTINGS_SECTION, "censor_passwords", censor_passwords)
 	cfg.save(SETTINGS_PATH)
 
 func _load_settings() -> void:
@@ -345,6 +363,18 @@ func _load_settings() -> void:
 				current_bg_color = Color(col)
 		server_host = str(cfg.get_value(SETTINGS_SECTION, "server_host", server_host))
 		server_port = int(cfg.get_value(SETTINGS_SECTION, "server_port", server_port))
+		censor_passwords = bool(cfg.get_value(SETTINGS_SECTION, "censor_passwords", true))
+	else:
+		# Default on first run
+		censor_passwords = true
+	# Start unmasked until explicitly prompted for password
+	input_box.secret = false
+
+func _on_password_censor_toggled(enabled: bool) -> void:
+	censor_passwords = enabled
+	if _expecting_password:
+		input_box.secret = censor_passwords
+	_save_settings()
 
 func _connect_to_configured_server() -> void:
 	var url = "ws://%s:%d/socket.io/?EIO=4&transport=websocket" % [server_host, server_port]

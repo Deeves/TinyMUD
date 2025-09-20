@@ -42,6 +42,18 @@ text = "Background"
 layout_mode = 2
 size_flags_horizontal = 3
 
+[node name="PasswordHBox" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+
+[node name="PasswordLabel" type="Label" parent="VBox/PasswordHBox"]
+layout_mode = 2
+text = "Passwords"
+
+[node name="CensorPasswordsCheck" type="CheckBox" parent="VBox/PasswordHBox"]
+layout_mode = 2
+text = "Censor passwords"
+button_pressed = true
+
 [node name="ServerHBox" type="HBoxContainer" parent="VBox"]
 layout_mode = 2
 
