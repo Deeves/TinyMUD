@@ -29,6 +29,11 @@ var current_bg_color: Color = Color.BLACK
 var server_host: String = "127.0.0.1"
 var server_port: int = 5000
 var censor_passwords: bool = true
+var auto_reconnect: bool = false
+var _reconnect_timer: SceneTreeTimer
+var _reconnect_attempts: int = 0
+const RECONNECT_BASE_DELAY := 1.5
+const RECONNECT_MAX_DELAY := 10.0
 
 # --- UX helpers ---
 var _last_sent_message: String = ""
@@ -38,6 +43,8 @@ var _pending_ack := {}
 # Whether we're in interactive auth/login flow; echo inputs plainly
 var _in_auth_flow: bool = true
 var _expecting_password: bool = false
+# Track if we've printed anything yet to control inter-entry spacing
+var _has_logged_anything: bool = false
 # Keys used when populated:
 #  - 'original': String   (full text sent)
 #  - 'verb': String       (first token, lowercased)
@@ -60,6 +67,10 @@ func _ready():
 		# Password censoring toggle
 		if options_menu.has_signal("password_censor_toggled"):
 			options_menu.password_censor_toggled.connect(_on_password_censor_toggled)
+		if options_menu.has_signal("auto_reconnect_toggled"):
+			options_menu.auto_reconnect_toggled.connect(_on_auto_reconnect_toggled)
+		if options_menu.has_signal("reconnect_pressed"):
+			options_menu.reconnect_pressed.connect(_on_reconnect_pressed)
 
 	# Load settings and apply
 	_load_settings()
@@ -67,11 +78,32 @@ func _ready():
 	_apply_background(current_bg_color)
 	# Initialize options panel controls
 	if options_menu.has_method("set_initial_values"):
-		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port, censor_passwords)
+		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port, censor_passwords, auto_reconnect)
 
 	input_box.text_submitted.connect(_on_text_submitted)
 	input_box.gui_input.connect(_on_input_box_gui_input)
 	input_box.grab_focus()
+
+	# Ensure log readability and behavior
+	# - Enable BBCode (for [color] etc.)
+	# - Word wrap within viewport
+	# - Follow newest messages automatically
+	log_display.bbcode_enabled = true
+	log_display.autowrap_mode = TextServer.AUTOWRAP_WORD
+	log_display.scroll_following = true
+	# Avoid the log attempting to grow with content height if containers allow it
+	# (defaults are typically fine, this is just a safety)
+	if log_display.has_method("set_fit_content"):
+		log_display.fit_content = false
+
+	# Keep input from expanding to the full length of typed text
+	# and ensure it fills available width instead of growing past it
+	if input_box.has_method("set_expand_to_text_length"):
+		input_box.expand_to_text_length = false
+	input_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Make sure the caret is always visible while typing (if supported)
+	if input_box.has_method("set_caret_force_displayed"):
+		input_box.caret_force_displayed = true
 
 	add_child(sio)
 	sio.transport_opened.connect(_on_transport_opened)
@@ -87,13 +119,16 @@ func _on_transport_opened():
 
 func _on_connected():
 	# Namespace connected; nothing additional needed here for log ordering
-	pass
+	# Reset reconnect backoff when connected
+	_reconnect_attempts = 0
+	_reconnect_timer = null
 	_in_auth_flow = true
 	_expecting_password = false
 	input_box.secret = false
 
 func _on_disconnected():
 	append_to_log("[color=red]Disconnected.[/color]")
+	_schedule_reconnect()
 
 func _on_event(event_name: String, data) -> void:
 	if event_name != "message":
@@ -191,6 +226,7 @@ func _on_text_submitted(player_text: String):
 				"[b]Basics[/b]: look | /rename <new> | /describe <text> | /sheet",
 				"[b]Admin[/b]: /teleport <room_id>  |  /teleport <player> | <room_id>",
 				"         /bring <player> | <room_id>  |  /kick <player>",
+				"[b]Network[/b]: /reconnect — retry connection now",
 				"Note: room ids accept fuzzy matches (prefix/substring).",
 			]
 			for l in lines:
@@ -209,6 +245,12 @@ func _on_text_submitted(player_text: String):
 			append_to_log(player_text)
 		else:
 			append_to_log("[color=gray]" + player_text + "[/color]")
+		# Client-side /reconnect command
+		if player_text.strip_edges().to_lower() == "/reconnect":
+			_manual_reconnect()
+			input_box.clear()
+			input_box.grab_focus()
+			return
 	else:
 		# During interactive auth/login, echo raw with no special coloring
 		if _in_auth_flow:
@@ -232,7 +274,16 @@ func _on_input_box_gui_input(event: InputEvent) -> void:
 				accept_event()
 
 func append_to_log(text: String):
-	log_display.append_text("\n" + text)
+	# Insert a blank line between entries for readability,
+	# but avoid a leading blank line for the very first entry
+	if _has_logged_anything:
+		log_display.append_text("\n\n" + text)
+	else:
+		log_display.append_text(text)
+		_has_logged_anything = true
+	# Extra guard to keep view at the bottom even if follow timing races
+	if log_display.get_line_count() > 0:
+		log_display.scroll_to_line(log_display.get_line_count() - 1)
 
 # --- Ack/Confirm Helpers ---
 func _begin_ack_wait(text: String) -> void:
@@ -332,6 +383,12 @@ func _apply_font_size(p_size: int) -> void:
 	# Labels (for options labels)
 	local_theme.set_font("font", "Label", base_font)
 	local_theme.set_font_size("font_size", "Label", p_size)
+	# SpinBox (value editor + arrows)
+	local_theme.set_font("font", "SpinBox", base_font)
+	local_theme.set_font_size("font_size", "SpinBox", p_size)
+	# CheckBox
+	local_theme.set_font("font", "CheckBox", base_font)
+	local_theme.set_font_size("font_size", "CheckBox", p_size)
 	# Apply to this subtree only
 	self.theme = local_theme
 
@@ -347,6 +404,7 @@ func _save_settings() -> void:
 	cfg.set_value(SETTINGS_SECTION, "server_host", server_host)
 	cfg.set_value(SETTINGS_SECTION, "server_port", server_port)
 	cfg.set_value(SETTINGS_SECTION, "censor_passwords", censor_passwords)
+	cfg.set_value(SETTINGS_SECTION, "auto_reconnect", auto_reconnect)
 	cfg.save(SETTINGS_PATH)
 
 func _load_settings() -> void:
@@ -364,9 +422,11 @@ func _load_settings() -> void:
 		server_host = str(cfg.get_value(SETTINGS_SECTION, "server_host", server_host))
 		server_port = int(cfg.get_value(SETTINGS_SECTION, "server_port", server_port))
 		censor_passwords = bool(cfg.get_value(SETTINGS_SECTION, "censor_passwords", true))
+		auto_reconnect = bool(cfg.get_value(SETTINGS_SECTION, "auto_reconnect", false))
 	else:
 		# Default on first run
 		censor_passwords = true
+		auto_reconnect = false
 	# Start unmasked until explicitly prompted for password
 	input_box.secret = false
 
@@ -376,10 +436,48 @@ func _on_password_censor_toggled(enabled: bool) -> void:
 		input_box.secret = censor_passwords
 	_save_settings()
 
+func _on_auto_reconnect_toggled(enabled: bool) -> void:
+	auto_reconnect = enabled
+	_save_settings()
+	if auto_reconnect and not sio.is_open():
+		_schedule_reconnect(true)
+
+func _on_reconnect_pressed() -> void:
+	_manual_reconnect()
+
 func _connect_to_configured_server() -> void:
 	var url = "ws://%s:%d/socket.io/?EIO=4&transport=websocket" % [server_host, server_port]
 	append_to_log("[color=gray]Connecting to %s:%d...[/color]" % [server_host, server_port])
 	sio.connect_to_server(url)
+
+func _schedule_reconnect(immediate: bool = false) -> void:
+	if not auto_reconnect:
+		return
+	if sio.is_open():
+		return
+	# Exponential backoff with cap
+	if immediate:
+		_reconnect_attempts = 0
+	var delay: float = min(float(RECONNECT_BASE_DELAY * pow(2.0, float(_reconnect_attempts))), RECONNECT_MAX_DELAY)
+	_reconnect_attempts = min(_reconnect_attempts + 1, 10)
+	if _reconnect_timer:
+		# cancel previous; creating a new timer is enough
+		pass
+	_reconnect_timer = get_tree().create_timer(delay)
+	_reconnect_timer.timeout.connect(Callable(self, "_do_reconnect_attempt"))
+	append_to_log("[color=gray]Reconnecting in %.1f s…[/color]" % delay)
+
+func _do_reconnect_attempt() -> void:
+	if sio.is_open():
+		return
+	append_to_log("[color=gray]Reconnecting…[/color]")
+	_connect_to_configured_server()
+
+func _manual_reconnect() -> void:
+	append_to_log("[color=gray]Manual reconnect requested.[/color]")
+	sio.close()
+	_reconnect_attempts = 0
+	_connect_to_configured_server()
 
 func _on_server_settings_applied(host: String, port: int) -> void:
 	server_host = host

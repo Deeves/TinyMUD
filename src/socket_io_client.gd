@@ -115,3 +115,6 @@ func close(code: int = 1000, reason: String = "") -> void:
 	socket.close(code, reason)
 	_engine_open = false
 	set_process(false)
+
+func is_open() -> bool:
+	return _is_open
