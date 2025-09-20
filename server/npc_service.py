@@ -1,7 +1,11 @@
 """NPC admin operations for /npc commands.
 
+Terminology:
+- "room name" (user input) is fuzzy-resolved to a stable internal room id.
+- room id (internal) is the key in world.rooms and used for storage.
+
 Supports:
-    - /npc add <room_id> | <npc name> | <npc description>
+    - /npc add <room name> | <npc name> | <npc description>
     - /npc remove <npc name>  (removes from the admin's current room)
 
 Backward compatibility:
@@ -47,18 +51,18 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
     sub_args = args[1:]
 
     if sub == 'add':
-        # New syntax: /npc add <room_id> | <npc name> | <npc description>
+    # New syntax (user-facing room name): /npc add <room name> | <npc name> | <npc description>
         parts_joined = " ".join(sub_args)
         if '|' in parts_joined:
             try:
                 room_in, name_in, desc_in = _parse_pipe_parts(parts_joined, expected=3)
             except Exception:
-                return True, 'Usage: /npc add <room_id> | <npc name> | <npc description>', emits
+                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
             room_in = _strip_quotes(room_in)
             name_in = _strip_quotes(name_in)
             desc_in = desc_in.strip()
             if not room_in or not name_in:
-                return True, 'Usage: /npc add <room_id> | <npc name> | <npc description>', emits
+                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
             okn, errn, norm = _normalize_room_input(world, sid, room_in)
             if not okn:
                 return True, errn, emits
@@ -90,7 +94,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
 
         # Legacy syntax fallback: /npc add <room_id> <npc name...>
         if len(sub_args) < 2:
-            return True, 'Usage: /npc add <room_id> | <npc name> | <npc description>', emits
+            return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
         room_id = _strip_quotes(sub_args[0])
         npc_name = _strip_quotes(" ".join(sub_args[1:]).strip())
         okn, errn, norm = _normalize_room_input(world, sid, room_id)

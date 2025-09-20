@@ -172,6 +172,8 @@ class Room:
     players: Set[str] = field(default_factory=set)  # set of player sids
     npcs: Set[str] = field(default_factory=set)     # set of npc names
     # Doors are named connectors within a room that lead to another room id.
+    # NOTE: In code and persistence we use stable room ids (machine identifiers).
+    # Players type human-readable room names (fuzzy matched) which we resolve to these ids.
     # key: door name shown to players (e.g., "oak door", "north door"). value: target room id
     doors: Dict[str, str] = field(default_factory=dict)
     # Stairs: support up/down links separately (either may be absent)
@@ -282,7 +284,8 @@ class World:
         self.world_name: Optional[str] = None
         self.world_description: Optional[str] = None
         self.world_conflict: Optional[str] = None
-    # Starting room id for new players (set by setup wizard)
+        # Starting room id for new players (set by setup wizard)
+        # User-facing commands accept a "room name" which is fuzzy-resolved to this id.
         self.start_room_id: Optional[str] = None
         # Once the first admin finishes setup
         self.setup_complete: bool = False

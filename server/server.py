@@ -125,8 +125,8 @@ def _print_command_help() -> None:
     "  /auth list_admins                   - list admin users",
         "  /kick <playerName>                  - disconnect a player",
     "  /setup                              - start world setup (create first room & NPC)",
-    "  /teleport <room_id>                 - teleport yourself to a room (fuzzy; 'here' allowed)",
-    "  /teleport <player> | <room_id>      - teleport another player (fuzzy; 'here' = your room)",
+    "  /teleport <room name>               - teleport yourself to a room (fuzzy; 'here' allowed)",
+    "  /teleport <player> | <room name>    - teleport another player (fuzzy; 'here' = your room)",
     "  /bring <player>                     - bring a player to your current room",
         "  /purge                              - reset world to factory default (confirmation required)",
     "  /worldstate                         - print the redacted contents of world_state.json",
@@ -135,15 +135,15 @@ def _print_command_help() -> None:
     "Room management:",
     "  /room create <id> | <description>   - create a new room",
     "  /room setdesc <id> | <description>  - update a room's description",
-    "  /room adddoor <room_id> | <door name> | <target_room_id>",
-    "  /room removedoor <room_id> | <door name>",
+    "  /room adddoor <room name> | <door name> | <target room name>",
+    "  /room removedoor <room name> | <door name>",
     "  /room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>",
-    "  /room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->",
+    "  /room setstairs <room name> | <up room name or -> | <down room name or ->",
     "  /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>",
     "  /room linkstairs <room_a> | <up|down> | <room_b>",
         "",
         "NPC management:",
-        "  /npc add <room_id> | <npc name> | <desc>  - add an NPC to a room (and set description)",
+    "  /npc add <room name> | <npc name> | <desc>  - add an NPC to a room (and set description)",
         "  /npc remove <npc name>                    - remove an NPC from your current room",
         "  /npc setdesc <npc name> | <desc>          - set an NPC's description",
     "  /npc setrelation <name> | <relationship> | <target> [| mutual] - link two entities; optional mutual makes it bidirectional",
@@ -200,8 +200,8 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/auth demote <name>                              — revoke a user's admin rights")
         lines.append("/kick <playerName>                               — disconnect a player")
         lines.append("/setup                                           — start world setup (create first room & NPC)")
-        lines.append("/teleport <room_id>                              — teleport yourself (fuzzy; 'here' allowed)")
-        lines.append("/teleport <player> | <room_id>                   — teleport another player (fuzzy; 'here' = your room)")
+        lines.append("/teleport <room name>                            — teleport yourself (fuzzy; 'here' allowed)")
+        lines.append("/teleport <player> | <room name>                 — teleport another player (fuzzy; 'here' = your room)")
         lines.append("/bring <player>                                   — bring a player to your current room")
         lines.append("/purge                                           — reset world to factory defaults (confirm)")
         lines.append("/worldstate                                      — print redacted world_state.json")
@@ -210,15 +210,15 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("[b]Room management[/b]")
         lines.append("/room create <id> | <description>                — create a new room")
         lines.append("/room setdesc <id> | <description>               — update a room's description")
-        lines.append("/room adddoor <room_id> | <door name> | <target_room_id>")
-        lines.append("/room removedoor <room_id> | <door name>")
+        lines.append("/room adddoor <room name> | <door name> | <target room name>")
+        lines.append("/room removedoor <room name> | <door name>")
         lines.append("/room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>")
-        lines.append("/room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->")
+        lines.append("/room setstairs <room name> | <up room name or -> | <down room name or ->")
         lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
         lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
         lines.append("")
     lines.append("[b]NPC management[/b]")
-    lines.append("/npc add <room_id> | <npc name> | <desc>         — add an NPC to a room and set description")
+    lines.append("/npc add <room name> | <npc name> | <desc>       — add an NPC to a room and set description")
     lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
     lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
     lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")

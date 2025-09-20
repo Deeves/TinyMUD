@@ -2,6 +2,10 @@
 
 All functions return (handled: bool, error: str | None, emits: list[dict]).
 They are pure of Flask/SocketIO and only touch the world model and save file.
+
+Terminology:
+- "room name" (user input): human-friendly name the admin types; we fuzzy-resolve it.
+- room id (internal): stable identifier string used as keys in world.rooms and persisted.
 """
 
 from __future__ import annotations
@@ -101,7 +105,8 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
             room_id, rest = _parse_pipe_parts(parts_joined, expected=2)
             door_name, target_room = _parse_pipe_parts(rest, expected=2)
         except Exception:
-            return True, 'Usage: /room adddoor <room_id> | <door name> | <target_room_id>', emits
+            # Note: usage mentions user-facing room names; internally we resolve to ids
+            return True, 'Usage: /room adddoor <room name> | <door name> | <target room name>', emits
         room_id = _strip_quotes(room_id)
         door_name = _strip_quotes(door_name)
         target_room = _strip_quotes(target_room)
@@ -165,7 +170,7 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
             parts_joined = " ".join(sub_args)
             room_id, door_name = _parse_pipe_parts(parts_joined, expected=2)
         except Exception:
-            return True, 'Usage: /room removedoor <room_id> | <door name>', emits
+            return True, 'Usage: /room removedoor <room name> | <door name>', emits
         room_id = _strip_quotes(room_id)
         door_name = _strip_quotes(door_name)
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
@@ -197,7 +202,7 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
             room_id, rest = _parse_pipe_parts(parts_joined, expected=2)
             up_str, down_str = _parse_pipe_parts(rest, expected=2)
         except Exception:
-            return True, 'Usage: /room setstairs <room_id> | <up_room_id or -> | <down_room_id or ->', emits
+            return True, 'Usage: /room setstairs <room name> | <up room name or -> | <down room name or ->', emits
         room_id = _strip_quotes(room_id)
         up_str = _strip_quotes(up_str)
         down_str = _strip_quotes(down_str)

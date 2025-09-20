@@ -62,8 +62,8 @@ The first account ever created becomes an admin automatically. Admins can kick u
   - `/purge` — reset and wipe persisted world_state.json (asks for Y/N)
   - `/room create <id> | <description>`
   - `/room setdesc <id> | <description>`
-  - `/npc add <room_id> <npc name...>`
-  - `/npc remove <room_id> <npc name...>`
+  - `/npc add <room name> <npc name...>`
+  - `/npc remove <room name> <npc name...>`
   - `/npc setdesc <npc name> | <description>`
   - `/auth promote <name>` / `/auth demote <name>` / `/auth list_admins`
 
@@ -88,3 +88,14 @@ The first account ever created becomes an admin automatically. Admins can kick u
 ## Where the AI fits
 
 If a Gemini API key is configured, the server builds a prompt using both the player’s and NPC’s character sheets and asks Gemini to reply. Without a key, a friendly fallback reply is sent so the game remains playable offline.
+
+## Glossary (terminology)
+
+- Room name (user input): Human-friendly string admins/players type in commands. We fuzzy-resolve these (exact, case-insensitive exact, unique prefix, unique substring) to a concrete room id.
+- Room id (internal): Stable identifier string used as the key in `world.rooms` and persisted in `world_state.json`. Doors and stairs store target room ids.
+- Door name: Human-facing label for a connector inside a room (e.g., "oak door", "north door"). Each door name maps to a target room id and also has a stable `door_id` UUID for persistence.
+- Stairs: Optional up/down connectors; each direction stores a target room id and has its own stable UUID.
+- Player display name: Human-friendly name shown in chat. Players are addressed by display name in commands, resolved fuzzily.
+- Player SID: Ephemeral socket connection id for the current session.
+- Player/User id: Stable UUID stored on the server; not typed by users.
+- NPC name: Human-facing name used in chat and commands; internally each NPC also has a stable UUID (`npc_ids`).

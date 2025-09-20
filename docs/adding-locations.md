@@ -49,7 +49,7 @@ Now typing `go tavern` will move the player and describe the new room.
 
 ## Doors
 
-Use `/room adddoor <room_id> | <door name> | <target_room_id>` to add a door in a room that leads to another room. Remove a door with `/room removedoor <room_id> | <door name>`.
+Use `/room adddoor <room name> | <door name> | <target room name>` to add a door in a room that leads to another room. Remove a door with `/room removedoor <room name> | <door name>`.
 
 When you add a door and the target room already exists, a matching door is automatically created in the target room that links back to the source. If the same door name is already in use in the target room and points somewhere else, a readable unique variant like `<door name> (to <source_room_id>)`, with a numeric suffix if needed, will be used on the target side.
 

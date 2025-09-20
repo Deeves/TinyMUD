@@ -118,7 +118,7 @@ Please also read CONTRIBUTING.md for style and PR tips.
   - `/kick <playerName>` — disconnect a player
   - `/room create <id> | <description>`
   - `/room setdesc <id> | <description>`
-  - `/npc add <room_id> <npc name...>` / `/npc remove <room_id> <npc name...>` / `/npc setdesc <npc name> | <description>`
+  - `/npc add <room name> <npc name...>` / `/npc remove <room name> <npc name...>` / `/npc setdesc <npc name> | <description>`
   - `/auth promote <name>` / `/auth demote <name>` / `/auth list_admins`
 
 ## Troubleshooting

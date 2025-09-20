@@ -224,10 +224,10 @@ func _on_text_submitted(player_text: String):
 				"Type plain text to chat. Use 'say <text>' for NPC replies.",
 				"[b]Auth[/b]: /auth create <name> | <password> | <description> | /auth login <name> | <password>",
 				"[b]Basics[/b]: look | /rename <new> | /describe <text> | /sheet",
-				"[b]Admin[/b]: /teleport <room_id>  |  /teleport <player> | <room_id>",
-				"         /bring <player> | <room_id>  |  /kick <player>",
+				"[b]Admin[/b]: /teleport <room name>  |  /teleport <player> | <room name>",
+				"         /bring <player>  |  /kick <player>",
 				"[b]Network[/b]: /reconnect — retry connection now",
-				"Note: room ids accept fuzzy matches (prefix/substring).",
+				"Note: room names accept fuzzy matches (prefix/substring).",
 			]
 			for l in lines:
 				append_to_log(l)

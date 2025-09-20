@@ -93,6 +93,13 @@ def fuzzy_resolve(typed: str, candidates: Iterable[str]) -> Tuple[bool, Optional
 # ----- Entity-specific resolvers -----
 
 def resolve_room_id(world, typed: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Resolve a user-typed room name to an internal room id.
+
+    The server exposes "room names" to users for readability and accepts fuzzy
+    matches (exact, ci-exact, unique prefix, unique substring). Internally, the
+    world is keyed by stable room ids. This function bridges the two.
+    Returns (ok, err, room_id) where room_id is the internal identifier.
+    """
     return fuzzy_resolve(strip_quotes(typed), world.rooms.keys())
 
 
