@@ -57,7 +57,7 @@ def _suggest_room_ids(world, typed_id: str) -> list[str]:
 def handle_room_command(world, state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
     emits: List[dict] = []
     if not args:
-        return True, 'Usage: /room <create|setdesc|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits
+        return True, 'Usage: /room <create|setdesc|rename|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -97,6 +97,84 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
         room.description = desc
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Room '{room_id_res}' description updated."})
+        return True, None, emits
+
+    if sub == 'rename':
+        # /room rename <room name> | <new room name>
+        try:
+            parts_joined = " ".join(sub_args)
+            src_in, new_in = _parse_pipe_parts(parts_joined, expected=2)
+        except Exception:
+            return True, 'Usage: /room rename <room name> | <new room name>', emits
+        src_in = _strip_quotes(src_in)
+        new_id = _strip_quotes(new_in)
+        if not src_in or not new_id:
+            return True, 'Usage: /room rename <room name> | <new room name>', emits
+        # Normalize 'here' for source
+        okn, errn, norm = _normalize_room_input(world, sid, src_in)
+        if not okn:
+            return True, errn, emits
+        val = norm if isinstance(norm, str) else src_in
+        rok, rerr, old_id = _resolve_room_id(world, val)
+        if not rok or not old_id:
+            # Provide gentle suggestions if possible
+            suggestions = _suggest_room_ids(world, val)
+            if suggestions:
+                return True, (rerr or f"Room '{src_in}' not found.") + ' Did you mean: ' + ", ".join(suggestions[:10]) + '?', emits
+            return True, (rerr or f"Room '{src_in}' not found."), emits
+        if new_id == old_id:
+            return True, 'New room id is the same as current.', emits
+        if not new_id:
+            return True, 'New room id cannot be empty.', emits
+        if new_id in world.rooms:
+            return True, f"Room '{new_id}' already exists.", emits
+
+        # Perform rename: move Room object to new key and update its id
+        room_obj = world.rooms.get(old_id)
+        if not room_obj:
+            return True, f"Room '{old_id}' not found.", emits
+        # Update references in other structures first, then remap key
+        # 1) Update all door targets and stairs in all rooms
+        for r in list(world.rooms.values()):
+            # Doors
+            try:
+                for dname, target in list((r.doors or {}).items()):
+                    if target == old_id:
+                        r.doors[dname] = new_id
+            except Exception:
+                pass
+            # Stairs
+            try:
+                if getattr(r, 'stairs_up_to', None) == old_id:
+                    r.stairs_up_to = new_id
+                if getattr(r, 'stairs_down_to', None) == old_id:
+                    r.stairs_down_to = new_id
+            except Exception:
+                pass
+        # 2) Update players currently in the room
+        try:
+            for psid, p in list(getattr(world, 'players', {}).items()):
+                if getattr(p, 'room_id', None) == old_id:
+                    p.room_id = new_id
+        except Exception:
+            pass
+        # 3) Update world.start_room_id if needed
+        try:
+            if getattr(world, 'start_room_id', None) == old_id:
+                world.start_room_id = new_id
+        except Exception:
+            pass
+        # 4) Remap the world.rooms key and update the room object's id
+        try:
+            # Preserve current players set on the object; just change its id field
+            world.rooms.pop(old_id, None)
+            room_obj.id = new_id
+            world.rooms[new_id] = room_obj
+        except Exception:
+            return True, 'Internal error while renaming room.', emits
+
+        _save_silent(world, state_path)
+        emits.append({'type': 'system', 'content': f"Room '{old_id}' renamed to '{new_id}'."})
         return True, None, emits
 
     if sub == 'adddoor':

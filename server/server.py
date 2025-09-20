@@ -135,6 +135,7 @@ def _print_command_help() -> None:
     "Room management:",
     "  /room create <id> | <description>   - create a new room",
     "  /room setdesc <id> | <description>  - update a room's description",
+    "  /room rename <room name> | <new room name>",
     "  /room adddoor <room name> | <door name> | <target room name>",
     "  /room removedoor <room name> | <door name>",
     "  /room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>",
@@ -210,6 +211,7 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("[b]Room management[/b]")
         lines.append("/room create <id> | <description>                — create a new room")
         lines.append("/room setdesc <id> | <description>               — update a room's description")
+        lines.append("/room rename <room name> | <new room name>       — change a room's internal id (updates links)")
         lines.append("/room adddoor <room name> | <door name> | <target room name>")
         lines.append("/room removedoor <room name> | <door name>")
         lines.append("/room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>")

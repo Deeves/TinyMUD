@@ -168,6 +168,33 @@ def test_room_adddoor_suggestions(tmpfile):
     assert_true(w.rooms['alpha'].doors.get('mystery door') == 'gamma', 'one-way door to missing target not stored')
 
 
+def test_room_rename(tmpfile):
+    from world import Room
+    w = World()
+    # Create rooms and links
+    w.rooms['alpha'] = Room(id='alpha', description='A')
+    w.rooms['beta'] = Room(id='beta', description='B')
+    w.rooms['alpha'].doors['oak door'] = 'beta'
+    w.rooms['beta'].stairs_up_to = 'alpha'
+    # Player in alpha and start room set
+    w.start_room_id = 'alpha'
+    sid = 'sidZ'
+    w.add_player(sid, name='Zed', room_id='alpha')
+    # Rename alpha -> town_square
+    handled, err, emits = handle_room_command(w, tmpfile, ['rename', 'alpha|town_square'])
+    assert_true(handled and not err, f"rename failed: {err}")
+    # New key exists, old removed
+    assert_true('town_square' in w.rooms and 'alpha' not in w.rooms, 'rooms mapping not updated')
+    # Room object's id updated
+    assert_true(w.rooms['town_square'].id == 'town_square', 'room.id not updated')
+    # Door target updated
+    assert_true(w.rooms['beta'].stairs_up_to == 'town_square', 'stairs reference not updated')
+    # Player location updated
+    assert_true(w.players[sid].room_id == 'town_square', 'player room_id not updated')
+    # Start room updated
+    assert_true(w.start_room_id == 'town_square', 'start_room_id not updated')
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         tmpfile = os.path.join(d, 'world_state.json')
@@ -176,6 +203,7 @@ def main():
         test_lockdoor(tmpfile)
         test_purge(tmpfile)
         test_room_adddoor_suggestions(tmpfile)
+        test_room_rename(tmpfile)
         test_teleport(tmpfile)
         # Redaction test: ensure passwords get masked in nested structures
         sample = {
