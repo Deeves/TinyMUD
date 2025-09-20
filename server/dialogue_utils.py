@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Iterable
 
 
 def split_targets(targets_part: str) -> List[str]:
@@ -77,3 +77,152 @@ def parse_say(text: str) -> Tuple[bool, List[str] | None, str | None]:
 
     # say <message>
     return True, None, after.strip() if after.strip() else None
+
+
+def parse_tell(text: str) -> Tuple[bool, str | None, str | None]:
+    """Parse variations of the 'tell' command.
+
+    Supported forms:
+    - tell <name> <message>                  (single-word name)
+    - tell <name>: <message>
+    - tell <name> -- <message>
+    - tell "Multi Word Name" <message>
+    - tell 'Multi Word Name': <message>
+
+    Returns: (is_tell, target or None, message or None)
+    - is_tell: whether input begins with 'tell'
+    - target: resolved target string when present
+    - message: extracted message content if present
+    """
+    if not isinstance(text, str):
+        return False, None, None
+    stripped = text.strip()
+    if not stripped.lower().startswith("tell"):
+        return False, None, None
+
+    after = stripped[4:].lstrip()  # remove 'tell'
+    if not after:
+        return True, None, None
+
+    # Quoted name first
+    if after[:1] in ('"', "'"):
+        q = after[0]
+        try:
+            end_idx = after.find(q, 1)
+        except Exception:
+            end_idx = -1
+        if end_idx != -1:
+            target = after[1:end_idx].strip()
+            rest = after[end_idx + 1 :].lstrip()
+            # Optional separators
+            if rest.startswith(":" ):
+                rest = rest[1:].lstrip()
+            elif rest.startswith("--"):
+                rest = rest[2:].lstrip()
+            msg = rest.strip() if rest else None
+            return True, target if target else None, msg
+        # If quote not closed, fall through to generic parsing
+
+    # Unquoted: support <name>: <message> or <name> -- <message>
+    # Prefer separators to allow multi-word names without quotes
+    if ":" in after:
+        left, right = after.split(":", 1)
+        target = left.strip().strip('"').strip("'")
+        msg = right.strip()
+        return True, (target or None), (msg or None)
+    if "--" in after:
+        left, right = after.split("--", 1)
+        target = left.strip().strip('"').strip("'")
+        msg = right.strip()
+        return True, (target or None), (msg or None)
+
+    # Fallback: first token is the name, remainder is message
+    parts = after.split(None, 1)
+    if len(parts) == 1:
+        # 'tell Bob' with no message
+        return True, parts[0].strip(), None
+    target, msg = parts[0].strip(), parts[1].strip()
+    return True, (target or None), (msg or None)
+
+
+def parse_whisper(text: str) -> Tuple[bool, str | None, str | None]:
+    """Parse variations of the 'whisper' command.
+
+    Supported forms:
+    - whisper <name> <message>
+    - whisper <name>: <message>
+    - whisper <name> -- <message>
+    - whisper "Multi Word Name" <message>
+    - whisper 'Multi Word Name': <message>
+
+    Returns: (is_whisper, target or None, message or None)
+    """
+    if not isinstance(text, str):
+        return False, None, None
+    stripped = text.strip()
+    if not stripped.lower().startswith("whisper"):
+        return False, None, None
+
+    after = stripped[7:].lstrip()  # remove 'whisper'
+    if not after:
+        return True, None, None
+
+    # Quoted name first
+    if after[:1] in ('"', "'"):
+        q = after[0]
+        try:
+            end_idx = after.find(q, 1)
+        except Exception:
+            end_idx = -1
+        if end_idx != -1:
+            target = after[1:end_idx].strip()
+            rest = after[end_idx + 1 :].lstrip()
+            # Optional separators
+            if rest.startswith(":" ):
+                rest = rest[1:].lstrip()
+            elif rest.startswith("--"):
+                rest = rest[2:].lstrip()
+            msg = rest.strip() if rest else None
+            return True, target if target else None, msg
+        # Fall through
+
+    # Unquoted: support <name>: <message> or <name> -- <message>
+    if ":" in after:
+        left, right = after.split(":", 1)
+        target = left.strip().strip('"').strip("'")
+        msg = right.strip()
+        return True, (target or None), (msg or None)
+    if "--" in after:
+        left, right = after.split("--", 1)
+        target = left.strip().strip('"').strip("'")
+        msg = right.strip()
+        return True, (target or None), (msg or None)
+
+    # Fallback: first token is the name, remainder is message
+    parts = after.split(None, 1)
+    if len(parts) == 1:
+        return True, parts[0].strip(), None
+    target, msg = parts[0].strip(), parts[1].strip()
+    return True, (target or None), (msg or None)
+
+
+def extract_npc_mentions(text: str, npc_names: Iterable[str]) -> List[str]:
+    """Return a list of NPC names that are mentioned in the given text.
+
+    Matching is case-insensitive and uses word boundaries at the start and end
+    of the NPC name to avoid substring false positives (e.g., 'Al' in 'Alice').
+    The returned list preserves the order they appear in npc_names and is unique.
+    """
+    if not isinstance(text, str) or not text:
+        return []
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for name in npc_names:
+        if not isinstance(name, str) or not name:
+            continue
+        pattern = r"\b" + re.escape(name) + r"\b"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            if name not in seen:
+                seen.add(name)
+                mentions.append(name)
+    return mentions

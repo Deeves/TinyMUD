@@ -22,9 +22,70 @@ from admin_service import (
     prepare_purge_snapshot_sids,
     execute_purge,
 )
-from dialogue_utils import parse_say, split_targets
+from dialogue_utils import parse_say, split_targets, parse_tell, parse_whisper, extract_npc_mentions
 from room_service import handle_room_command
 from security_utils import redact_sensitive
+from npc_service import handle_npc_command as handle_npc_cmd
+
+
+def test_familygen_offline_fallback(tmpfile):
+    # Ensure no API key so familygen uses offline fallback
+    os.environ.pop('GEMINI_API_KEY', None)
+    os.environ.pop('GOOGLE_API_KEY', None)
+
+    from world import World, Room, CharacterSheet
+    w = World()
+    # Create a room and a target NPC
+    w.rooms['start'] = Room(id='start', description='Start room')
+    target_name = 'Edda Greywater'
+    # Create a target NPC sheet so the prompt can reference description
+    w.npc_sheets[target_name] = CharacterSheet(display_name=target_name, description='A salty sailor with a quick wit.')
+
+    # Execute familygen
+    handled, err, emits = handle_npc_cmd(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
+    assert_true(handled and err is None, f"familygen offline failed: {err}")
+    # Verify a new NPC was created and placed in room with a description
+    new_names = [n for n in w.npc_sheets.keys() if n != target_name]
+    assert_true(len(new_names) >= 1, 'no new NPC created')
+    new_name = sorted(new_names)[0]
+    assert_true(new_name in w.rooms['start'].npcs, 'new NPC not placed in room')
+    desc = w.npc_sheets[new_name].description
+    assert_true(isinstance(desc, str) and len(desc) > 0, 'new NPC description missing')
+    # Mutual relationship should be set
+    tgt_id = w.get_or_create_npc_id(target_name)
+    new_id = w.get_or_create_npc_id(new_name)
+    rels = w.relationships or {}
+    assert_true(rels.get(tgt_id, {}).get(new_id) == 'sister', 'relationship A→B missing')
+    assert_true(rels.get(new_id, {}).get(tgt_id) == 'sister', 'relationship B→A missing')
+
+
+def test_familygen_json_parsing(tmpfile):
+    # Patch npc_service to return a fake model emitting JSON
+    import npc_service as ns
+    from world import World, Room, CharacterSheet
+
+    class FakeResp:
+        def __init__(self, text):
+            self.text = text
+
+    class FakeModel:
+        def generate_content(self, prompt, safety_settings=None):
+            # Include markdown fences and a trailing comma to exercise parser
+            return FakeResp('''```json\n{\n  "name": "Maris Greywater",\n  "description": "A quiet navigator who keeps the charts close and the crew closer.",\n}\n```''')
+
+    orig_get = getattr(ns, '_get_gemini_model')
+    ns._get_gemini_model = lambda: FakeModel()
+    try:
+        w = World()
+        w.rooms['start'] = Room(id='start', description='Start room')
+        w.npc_sheets['Edda Greywater'] = CharacterSheet(display_name='Edda Greywater', description='A salty sailor with a quick wit.')
+        handled, err, emits = ns.handle_npc_command(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
+        assert_true(handled and err is None, f"familygen (json) failed: {err}")
+        # Verify specific parsed name and desc used (not fallback)
+        assert_true('Maris Greywater' in w.npc_sheets, 'parsed JSON name not used')
+        assert_true('A quiet navigator who keeps the charts' in w.npc_sheets['Maris Greywater'].description, 'parsed JSON description not used')
+    finally:
+        ns._get_gemini_model = orig_get
 
 
 def assert_true(cond, msg):
@@ -205,6 +266,8 @@ def main():
         test_room_adddoor_suggestions(tmpfile)
         test_room_rename(tmpfile)
         test_teleport(tmpfile)
+        test_familygen_offline_fallback(tmpfile)
+        test_familygen_json_parsing(tmpfile)
         # Redaction test: ensure passwords get masked in nested structures
         sample = {
             "users": {
@@ -236,6 +299,26 @@ def main():
         # 5) split_targets edge trimming and dedupe
         split = split_targets(' Innkeeper ,  Innkeeper and  Gate Guard ')
         assert_true(split == ['Innkeeper', 'Gate Guard'], 'split_targets dedupe/trim failed')
+
+        # 6) tell parsing basics
+        is_tell, tgt, msg = parse_tell('tell Bob Hello there')
+        assert_true(is_tell and tgt == 'Bob' and msg == 'Hello there', 'tell basic failed')
+        is_tell2, tgt2, msg2 = parse_tell('tell "Gate Guard": Open up!')
+        assert_true(is_tell2 and tgt2 == 'Gate Guard' and msg2 == 'Open up!', 'tell quoted with colon failed')
+        is_tell3, tgt3, msg3 = parse_tell("tell 'Innkeeper' -- We seek a room")
+        assert_true(is_tell3 and tgt3 == 'Innkeeper' and msg3 == 'We seek a room', 'tell quoted with -- failed')
+
+        # 6b) whisper parsing basics (same shapes as tell)
+        is_whisper, wtgt, wmsg = parse_whisper('whisper Bob Hello there')
+        assert_true(is_whisper and wtgt == 'Bob' and wmsg == 'Hello there', 'whisper basic failed')
+        is_whisper2, wtgt2, wmsg2 = parse_whisper('whisper "Gate Guard": Open up!')
+        assert_true(is_whisper2 and wtgt2 == 'Gate Guard' and wmsg2 == 'Open up!', 'whisper quoted with colon failed')
+        is_whisper3, wtgt3, wmsg3 = parse_whisper("whisper 'Innkeeper' -- We seek a room")
+        assert_true(is_whisper3 and wtgt3 == 'Innkeeper' and wmsg3 == 'We seek a room', 'whisper quoted with -- failed')
+
+        # 7) npc mention extraction
+        mentions = extract_npc_mentions('Innkeeper, please tell the Gate Guard to relax.', ['Gate Guard', 'Innkeeper', 'Thief'])
+        assert_true(mentions == ['Gate Guard', 'Innkeeper'] or mentions == ['Innkeeper', 'Gate Guard'], 'mention detection failed')
     print('Service tests: PASS')
 
 

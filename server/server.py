@@ -38,7 +38,13 @@ try:
     load_dotenv()
 except Exception:
     pass
-from dialogue_utils import parse_say as _parse_say, split_targets as _split_targets
+from dialogue_utils import (
+    parse_say as _parse_say,
+    split_targets as _split_targets,
+    parse_tell as _parse_tell,
+    parse_whisper as _parse_whisper,
+    extract_npc_mentions as _extract_npc_mentions,
+)
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
     resolve_room_id as _resolve_room_id_generic,
@@ -111,8 +117,10 @@ def _print_command_help() -> None:
         "  look at <name>                       - inspect a Player or NPC in the room",
     "  move through <door name>             - go via a named door in the room",
     "  move up stairs | move down stairs    - use stairs, if present",
-        "  say <message>                        - say something; anyone present may respond",
-        "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
+    "  say <message>                        - say something; anyone present may respond",
+    "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
+    "  tell <Player or NPC> <message>       - speak directly to one person/NPC (room hears it)",
+    "  whisper <Player or NPC> <message>    - private message; NPC always replies; not broadcast",
     "  roll <dice> [| Private]             - roll dice publicly or privately",
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
@@ -148,6 +156,7 @@ def _print_command_help() -> None:
         "  /npc remove <npc name>                    - remove an NPC from your current room",
         "  /npc setdesc <npc name> | <desc>          - set an NPC's description",
     "  /npc setrelation <name> | <relationship> | <target> [| mutual] - link two entities; optional mutual makes it bidirectional",
+    "  /npc familygen <room name> | <target npc> | <relationship>  - [Experimental] AI-generate a related NPC, set mutual link, place in room",
     "  /npc removerelations <name> | <target>    - remove any relationships in both directions",
         "======================================\n",
     ]
@@ -187,6 +196,8 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("move up stairs | move down stairs                — use stairs, if present")
     lines.append("say <message>                                    — say something; anyone present may respond")
     lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
+    lines.append("tell <Player or NPC> <message>                   — speak directly to one person/NPC (room hears it)")
+    lines.append("whisper <Player or NPC> <message>                — private message; NPC always replies; not broadcast")
     lines.append("roll <dice> [| Private]                         — roll dice publicly or privately")
     lines.append("/rename <new name>                               — change your display name")
     lines.append("/describe <text>                                 — update your character description")
@@ -224,6 +235,7 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
     lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
     lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")
+    lines.append("/npc familygen <room name> | <target npc> | <relationship>    — [Experimental] AI-generate a related NPC, set mutual link, place in room")
     lines.append("/npc removerelations <name> | <target>           — remove any relationships in both directions")
 
     return "\n".join(lines)
@@ -453,8 +465,13 @@ def _ensure_npc_sheet(npc_name: str) -> CharacterSheet:
     return npc_sheet
 
 
-def _send_npc_reply(npc_name: str, player_message: str, sid: str | None) -> None:
-    """Generate and send an NPC reply, broadcasting to the room. Works offline with a fallback."""
+def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, private_to_sender_only: bool = False) -> None:
+    """Generate and send an NPC reply.
+
+    By default, echoes to the sender and broadcasts to the room (excluding the sender).
+    If private_to_sender_only=True, only the sender receives the reply (no room broadcast).
+    Works offline with a fallback when AI is not configured.
+    """
     # Ensure sheet exists
     npc_sheet = _ensure_npc_sheet(npc_name)
 
@@ -532,7 +549,7 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None) -> None
             'content': f"[i]{npc_name} considers your words.[/i] 'I hear you, {player_name}. Try 'look' to survey your surroundings.'"
         }
         emit('message', npc_payload)
-        if sid and sid in world.players:
+        if (not private_to_sender_only) and sid and sid in world.players:
             player_obj = world.players.get(sid)
             if player_obj:
                 broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
@@ -578,7 +595,7 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None) -> None
             'content': content_text
         }
         emit('message', npc_payload)
-        if sid and sid in world.players:
+        if (not private_to_sender_only) and sid and sid in world.players:
             player_obj = world.players.get(sid)
             if player_obj:
                 broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
@@ -1141,7 +1158,7 @@ def handle_message(data):
                 }, exclude_sid=sid)
             return
 
-        # --- SAY command handling (targets + AI replies) ---
+    # --- SAY command handling (targets + AI replies) ---
         is_say, targets, say_msg = _parse_say(player_message)
         if is_say:
             if sid not in world.players:
@@ -1174,17 +1191,166 @@ def handle_message(data):
                 # Group conversation: each targeted NPC replies
                 for npc_name in resolved:
                     _send_npc_reply(npc_name, say_msg, sid)
+                # Non-targeted NPCs that are mentioned by name have a 33% chance to comment
+                if room and getattr(room, 'npcs', None):
+                    others = [n for n in list(room.npcs) if n not in set(resolved)]
+                    try:
+                        mentioned = _extract_npc_mentions(say_msg, others)
+                    except Exception:
+                        mentioned = []
+                    for nm in mentioned:
+                        try:
+                            pct3 = dice_roll('d%').total
+                        except Exception:
+                            pct3 = random.randint(1, 100)
+                        if pct3 <= 33:
+                            _send_npc_reply(nm, say_msg, sid)
                 return
 
-            # No specific target: anyone may respond (pick a random NPC, if any)
+            # No specific target: NPCs have a 33% chance to chime in to a room broadcast
             if room and getattr(room, 'npcs', None):
                 try:
-                    npc_name = random.choice(list(room.npcs))
+                    pct = dice_roll('d%').total
                 except Exception:
-                    npc_name = next(iter(room.npcs))
-                _send_npc_reply(npc_name, say_msg, sid)
+                    # Fallback RNG if dice parser fails for any reason
+                    pct = random.randint(1, 100)
+                if pct <= 33:
+                    try:
+                        npc_name = random.choice(list(room.npcs))
+                    except Exception:
+                        npc_name = next(iter(room.npcs))
+                    _send_npc_reply(npc_name, say_msg, sid)
+                else:
+                    # Even if no random chime, if the message mentions an NPC by name,
+                    # non-targeted mentioned NPCs have a 33% chance to comment.
+                    try:
+                        mentioned = _extract_npc_mentions(say_msg, list(room.npcs))
+                    except Exception:
+                        mentioned = []
+                    for npc_name in mentioned:
+                        try:
+                            pct2 = dice_roll('d%').total
+                        except Exception:
+                            pct2 = random.randint(1, 100)
+                        if pct2 <= 33:
+                            _send_npc_reply(npc_name, say_msg, sid)
+                # Either way, don't force a reply; return to avoid duplicate handling
                 return
             # No NPCs present; stay quiet during early world without default NPC
+            return
+
+        # --- TELL command handling ---
+        is_tell, tell_target_raw, tell_msg = _parse_tell(player_message)
+        if is_tell:
+            if sid not in world.players:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first to speak.'})
+                return
+            if sid in world_setup_sessions:
+                emit('message', {'type': 'system', 'content': tell_msg or ''})
+                return
+            if not tell_target_raw:
+                emit('message', {'type': 'error', 'content': "Usage: tell <Player or NPC> <message>"})
+                return
+            if not tell_msg:
+                emit('message', {'type': 'error', 'content': 'What do you say? Add a message after the name.'})
+                return
+            player_obj = world.players.get(sid)
+            room = world.rooms.get(player_obj.room_id) if player_obj else None
+            # Resolve player in room first (excluding self allowed)
+            psid, pname = _resolve_player_in_room(world, room, tell_target_raw)
+            target_is_player = bool(psid and pname)
+            target_is_npc = False
+            npc_name_resolved = None
+            if not target_is_player and room:
+                npcs = _resolve_npcs_in_room(room, [tell_target_raw])
+                if npcs:
+                    target_is_npc = True
+                    npc_name_resolved = npcs[0]
+
+            if not target_is_player and not target_is_npc:
+                emit('message', {'type': 'system', 'content': f"You don't see '{tell_target_raw}' here."})
+                return
+
+            # Broadcast the player's tell to the room (everyone hears it)
+            if player_obj:
+                payload = {
+                    'type': 'player',
+                    'name': player_obj.sheet.display_name,
+                    'content': tell_msg,
+                }
+                broadcast_to_room(player_obj.room_id, payload, exclude_sid=sid)
+
+            # If target is a player, just deliver the line (room heard already)
+            if target_is_player and psid:
+                # Optionally, we could emit a direct notification; for now, room broadcast suffices.
+                return
+
+            # If target is an NPC, NPC always replies back
+            if target_is_npc and npc_name_resolved:
+                _send_npc_reply(npc_name_resolved, tell_msg, sid)
+
+                # Other NPCs whose names are mentioned (but not targeted) roll 33% chance to comment
+                if room and getattr(room, 'npcs', None):
+                    others = [n for n in list(room.npcs) if n != npc_name_resolved]
+                    try:
+                        mentioned = _extract_npc_mentions(tell_msg, others)
+                    except Exception:
+                        mentioned = []
+                    for nm in mentioned:
+                        try:
+                            pct3 = dice_roll('d%').total
+                        except Exception:
+                            pct3 = random.randint(1, 100)
+                        if pct3 <= 33:
+                            _send_npc_reply(nm, tell_msg, sid)
+                return
+
+        # --- WHISPER command handling (private, NPC always replies privately) ---
+        is_whisper, whisper_target_raw, whisper_msg = _parse_whisper(player_message)
+        if is_whisper:
+            if sid not in world.players:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first to speak.'})
+                return
+            if sid in world_setup_sessions:
+                # Keep setup wizard quiet
+                emit('message', {'type': 'system', 'content': whisper_msg or ''})
+                return
+            if not whisper_target_raw:
+                emit('message', {'type': 'error', 'content': "Usage: whisper <Player or NPC> <message>"})
+                return
+            if not whisper_msg:
+                emit('message', {'type': 'error', 'content': 'What do you whisper? Add a message after the name.'})
+                return
+            player_obj = world.players.get(sid)
+            room = world.rooms.get(player_obj.room_id) if player_obj else None
+            # Try player in room first
+            psid, pname = _resolve_player_in_room(world, room, whisper_target_raw)
+            if psid and pname:
+                # Tell sender
+                emit('message', {'type': 'system', 'content': f"You whisper to {pname}: {whisper_msg}"})
+                # Tell receiver privately
+                try:
+                    sender_name = player_obj.sheet.display_name if player_obj else 'Someone'
+                    socketio.emit('message', {
+                        'type': 'system',
+                        'content': f"{sender_name} whispers to you: {whisper_msg}"
+                    }, to=psid)
+                except Exception:
+                    pass
+                return
+            # Try NPC in room
+            npc_name_resolved = None
+            if room:
+                npcs = _resolve_npcs_in_room(room, [whisper_target_raw])
+                if npcs:
+                    npc_name_resolved = npcs[0]
+            if npc_name_resolved:
+                # Tell sender
+                emit('message', {'type': 'system', 'content': f"You whisper to {npc_name_resolved}: {whisper_msg}"})
+                # NPC always replies privately to the sender
+                _send_npc_reply(npc_name_resolved, whisper_msg, sid, private_to_sender_only=True)
+                return
+            emit('message', {'type': 'system', 'content': f"You don't see '{whisper_target_raw}' here."})
             return
 
         # For ordinary chat (non-command, non-look)

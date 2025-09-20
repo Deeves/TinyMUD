@@ -19,6 +19,9 @@ Backward compatibility:
 from __future__ import annotations
 
 from typing import Dict, List, Tuple, Optional
+import os
+import json
+import re
 
 from world import CharacterSheet
 from id_parse_utils import (
@@ -27,6 +30,97 @@ from id_parse_utils import (
     resolve_room_id as _resolve_room_id,
     resolve_npcs_in_room as _resolve_npcs_in_room,
 )
+
+# Optional Gemini support (AI-assisted NPC generation)
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:
+    genai = None  # type: ignore
+
+# Safety categories (optional; depend on SDK version)
+try:
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+except Exception:  # pragma: no cover - optional at runtime
+    HarmCategory = None  # type: ignore
+    HarmBlockThreshold = None  # type: ignore
+
+_GEN_MODEL = None  # lazy-initialized Gemini model
+
+
+def _get_gemini_model():
+    """Return a singleton GenerativeModel if configured; else None.
+
+    Reads the API key from GEMINI_API_KEY or GOOGLE_API_KEY.
+    Uses the lightweight flash model for speed. Mirrors server.py defaults.
+    """
+    global _GEN_MODEL
+    if _GEN_MODEL is not None:
+        return _GEN_MODEL
+    if genai is None:
+        return None
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+        _GEN_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite')  # type: ignore[attr-defined]
+        return _GEN_MODEL
+    except Exception:
+        return None
+
+
+def _safety_settings_for_level(level: str | None):
+    """Build Gemini safety settings list based on world.safety_level.
+
+    If SDK enums aren't available, return None to use defaults.
+    """
+    if HarmCategory is None or HarmBlockThreshold is None:
+        return None
+    lvl = (level or 'G').upper()
+
+    def mk(threshold):
+        cats = []
+        for nm in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUAL', 'HARM_CATEGORY_SEXUAL_AND_MINORS', 'HARM_CATEGORY_DANGEROUS_CONTENT']:
+            c = getattr(HarmCategory, nm, None)
+            if c is not None:
+                cats.append({'category': c, 'threshold': threshold})
+        return cats or None
+
+    if lvl == 'OFF':
+        return mk(HarmBlockThreshold.BLOCK_NONE)
+    if lvl == 'R':
+        return mk(getattr(HarmBlockThreshold, 'BLOCK_ONLY_HIGH', HarmBlockThreshold.BLOCK_NONE))
+    if lvl in ('PG-13', 'PG13', 'PG'):
+        return mk(getattr(HarmBlockThreshold, 'BLOCK_MEDIUM_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
+    return mk(getattr(HarmBlockThreshold, 'BLOCK_LOW_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Best-effort extraction of a single JSON object from model text.
+
+    Accepts raw JSON or text with code fences. Returns dict or None.
+    """
+    if not text:
+        return None
+    # Strip Markdown code fences if present
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1)
+    # Find the first {...} block
+    start = text.find('{')
+    end = text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start:end+1]
+    try:
+        return json.loads(snippet)
+    except Exception:
+        # Try to relax trailing commas and similar minor issues (very light touch)
+        try:
+            snippet2 = re.sub(r",\s*([}\]])", r"\1", snippet)
+            return json.loads(snippet2)
+        except Exception:
+            return None
 
 
 def _normalize_room_input(world, sid: str | None, typed: str) -> tuple[bool, str | None, str | None]:
@@ -45,7 +139,7 @@ def _normalize_room_input(world, sid: str | None, typed: str) -> tuple[bool, str
 def handle_npc_command(world, state_path: str, sid: str | None, args: list[str]) -> Tuple[bool, str | None, List[dict]]:
     emits: List[dict] = []
     if not args:
-        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations> ...', emits
+        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations|familygen> ...', emits
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -116,6 +210,139 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"NPC '{npc_name}' added to room '{room_res}'."})
+        return True, None, emits
+
+    if sub == 'familygen':
+        # /npc familygen <room name> | <target npc name> | <relationship>
+        try:
+            parts_joined = " ".join(sub_args)
+            room_in, target_in, rel_in = _parse_pipe_parts(parts_joined, expected=3)
+        except Exception:
+            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits
+
+        room_in = _strip_quotes(room_in)
+        target_name = _strip_quotes(target_in)
+        relationship = rel_in.strip()
+        if not room_in or not target_name or not relationship:
+            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits
+
+        # Resolve room (support 'here')
+        okn, errn, norm = _normalize_room_input(world, sid, room_in)
+        if not okn:
+            return True, errn, emits
+        val = norm if isinstance(norm, str) else room_in
+        rok, rerr, room_res = _resolve_room_id(world, val)
+        if not rok or not room_res:
+            return True, (rerr or f"Room '{room_in}' not found."), emits
+        room = world.rooms.get(room_res)
+        if not room:
+            return True, f"Room '{room_res}' not found.", emits
+
+        # Ensure target NPC sheet exists (create if missing)
+        target_sheet = world.npc_sheets.get(target_name)
+        if target_sheet is None:
+            target_sheet = CharacterSheet(display_name=target_name, description=f"An NPC named {target_name}.")
+            world.npc_sheets[target_name] = target_sheet
+            try:
+                world.get_or_create_npc_id(target_name)
+            except Exception:
+                pass
+
+        # Build an AI prompt to generate the related NPC as JSON
+        world_name = getattr(world, 'world_name', None)
+        world_desc = getattr(world, 'world_description', None)
+        world_conflict = getattr(world, 'world_conflict', None)
+        world_context = []
+        if world_name:
+            world_context.append(f"Name: {world_name}")
+        if world_desc:
+            world_context.append(f"Description: {world_desc}")
+        if world_conflict:
+            world_context.append(f"Main Conflict: {world_conflict}")
+        wc_text = "\n".join(world_context)
+
+        prompt = (
+            "You are designing characters for a text-based roleplaying world.\n"
+            "Create ONE new NPC who has the following relationship to the target NPC.\n"
+            "Return ONLY a compact JSON object with keys: name, description. No markdown, no commentary.\n"
+            "Description should be 1-3 sentences, evocative but PG-13. Keep proper nouns consistent with the world.\n\n"
+            f"[World]\n{wc_text}\n\n" if wc_text else ""
+        ) + (
+            f"[Target NPC]\nName: {target_sheet.display_name}\nDescription: {target_sheet.description}\n\n"
+            f"[Relationship]\nThe new NPC is the target's: {relationship}.\n\n"
+            "Output JSON example: {\"name\":\"<unique name>\",\"description\":\"<1-3 sentences>\"}"
+        )
+
+        new_name: Optional[str] = None
+        new_desc: Optional[str] = None
+
+        model = _get_gemini_model()
+        if model is not None:
+            try:
+                safety = _safety_settings_for_level(getattr(world, 'safety_level', 'G'))
+                if safety is not None:
+                    ai_resp = model.generate_content(prompt, safety_settings=safety)
+                else:
+                    ai_resp = model.generate_content(prompt)
+                text = getattr(ai_resp, 'text', None) or str(ai_resp)
+                parsed = _extract_json_object(text)
+                if parsed and isinstance(parsed, dict):
+                    nm = str(parsed.get('name') or '').strip()
+                    ds = str(parsed.get('description') or '').strip()
+                    if nm:
+                        new_name = nm
+                    if ds:
+                        new_desc = ds
+            except Exception:
+                # Fall back to offline path below
+                pass
+
+        if not new_name:
+            # Offline fallback: simple synthesized name/desc
+            base = target_sheet.display_name
+            new_name = f"{base}'s {relationship.title()}"
+        if not new_desc:
+            new_desc = f"A character closely connected to {target_sheet.display_name} as their {relationship}."
+
+        # Ensure uniqueness of NPC name in this world
+        existing = set(getattr(world, 'npc_sheets', {}).keys())
+        if new_name in existing:
+            suffix = 2
+            base = new_name
+            while new_name in existing and suffix < 100:
+                new_name = f"{base} {suffix}"
+                suffix += 1
+
+        # Create the NPC sheet and place into room
+        sheet = CharacterSheet(display_name=new_name, description=new_desc)
+        world.npc_sheets[new_name] = sheet
+        room.npcs.add(new_name)
+        # Ensure ids and set mutual relationship
+        try:
+            tgt_id = world.get_or_create_npc_id(target_sheet.display_name)
+        except Exception:
+            tgt_id = None
+        try:
+            new_id = world.get_or_create_npc_id(new_name)
+        except Exception:
+            new_id = None
+        rels: Dict[str, Dict[str, str]] = getattr(world, 'relationships', {})
+        if tgt_id and new_id:
+            if tgt_id not in rels:
+                rels[tgt_id] = {}
+            if new_id not in rels:
+                rels[new_id] = {}
+            rels[tgt_id][new_id] = relationship
+            rels[new_id][tgt_id] = relationship
+            world.relationships = rels
+
+        _save_silent(world, state_path)
+
+        emits.append({'type': 'system', 'content': (
+            f"[b][Experimental][/b] Generated related NPC: [b]{new_name}[/b] — placed in room '{room_res}'.\n"
+            f"Relationship: {target_sheet.display_name} ⇄ {new_name} as [{relationship}]\n"
+            f"Description: {new_desc}"
+        )})
         return True, None, emits
 
     if sub == 'remove':
