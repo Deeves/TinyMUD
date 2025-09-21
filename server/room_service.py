@@ -10,10 +10,12 @@ Terminology:
 
 from __future__ import annotations
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
 import uuid
 
 from world import Room
+if TYPE_CHECKING:
+    from world import World
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
     parse_pipe_parts as _parse_pipe_parts,
@@ -54,7 +56,16 @@ def _suggest_room_ids(world, typed_id: str) -> list[str]:
         return []
 
 
-def handle_room_command(world, state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
+def handle_room_command(world: "World", state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
+    """Parse and execute /room admin operations.
+
+    Contract:
+    - Inputs: world (World), state_path (str), args (list[str]), sid optional
+    - Returns: (handled, error, emits)
+    - Errors: Non-fatal; never raises. Returns handled=True for known subcommands, False otherwise.
+    """
+    assert isinstance(state_path, str) and state_path != "", "state_path must be non-empty"
+    assert isinstance(args, list), "args must be a list of strings"
     emits: List[dict] = []
     if not args:
         return True, 'Usage: /room <create|setdesc|rename|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits
@@ -94,6 +105,8 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
         if not rok or not room_id_res:
             return True, (rerr or f"Room '{room_id}' not found."), emits
         room = world.rooms.get(room_id_res)
+        if room is None:
+            return True, f"Room '{room_id_res}' not found.", emits
         room.description = desc
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Room '{room_id_res}' description updated."})
@@ -200,6 +213,8 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
         if not rok or not room_id_res:
             return True, (rerr or f"Room '{room_id}' not found."), emits
         room = world.rooms.get(room_id_res)
+        if room is None:
+            return True, f"Room '{room_id_res}' not found.", emits
         target_room = norm_dst
         if not target_room:
             return True, 'Target room id cannot be empty.', emits
@@ -429,8 +444,11 @@ def handle_room_command(world, state_path: str, args: list[str], sid: str | None
         if sid is None or sid not in getattr(world, 'players', {}):
             return True, 'You must be in a room to lock a door. Please authenticate.', emits
         player = world.players.get(sid)
-        room = world.rooms.get(getattr(player, 'room_id', None))
-        if not room:
+        rid = getattr(player, 'room_id', None)
+        if not isinstance(rid, str) or not rid:
+            return True, 'You are nowhere.', emits
+        room = world.rooms.get(rid)
+        if room is None:
             return True, 'You are nowhere.', emits
         parts_joined = " ".join(sub_args)
         try:

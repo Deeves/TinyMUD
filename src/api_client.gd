@@ -5,7 +5,7 @@ extends Node
 # and sends one message. Useful as a minimal example separate from the
 # full Chat UI. You can ignore this if you're using ChatUI.tscn.
 
-@onready var sio := preload("res://src/socket_io_client.gd").new()
+@onready var sio: Node = preload("res://src/socket_io_client.gd").new()
 
 func _ready() -> void:
 	add_child(sio)
@@ -23,7 +23,7 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	print("Socket.IO disconnected.")
 
-func _on_event(event_name: String, data) -> void:
+func _on_event(event_name: String, data: Variant) -> void:
 	if event_name == "message":
 		# Server emits: {'type': 'npc','name':'The Wizard','content': '...'}
 		print("NPC says:", data)

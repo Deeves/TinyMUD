@@ -300,7 +300,15 @@ class World:
         return None
 
     def add_player(self, sid: str, name: str | None = None, room_id: str | None = None, sheet: Optional[CharacterSheet] = None) -> Player:
-        """Register a new Player and place them into a room (default: 'start')."""
+        """Register a new Player and place them into a room (default: start or __void__).
+
+        Preconditions:
+        - sid must be non-empty
+        - If room_id is provided, it will be used as-is (may be __void__ if unknown)
+        Postconditions:
+        - Player exists in self.players and, if room exists, their sid is in room.players
+        """
+        assert isinstance(sid, str) and sid != "", "sid must be a non-empty string"
         if not room_id:
             # Prefer configured start room if present and exists, else a void
             start_id = self.start_room_id if (self.start_room_id and self.start_room_id in self.rooms) else None
@@ -318,6 +326,8 @@ class World:
         room = self.rooms.get(room_id)
         if room:
             room.players.add(sid)
+        # Postconditions
+        assert sid in self.players, "player not registered"
         return player
 
     def remove_player(self, sid: str) -> None:
@@ -330,7 +340,10 @@ class World:
             room.players.remove(sid)
 
     def move_player(self, sid: str, new_room_id: str) -> None:
-        """Move a Player to another room if it exists."""
+        """Move a Player to another room if it exists.
+
+        Preconditions: sid exists and new_room_id is a known room id.
+        """
         player = self.players.get(sid)
         if not player:
             return
@@ -474,6 +487,8 @@ class World:
         return self.npc_ids[npc_name]
 
     def create_user(self, display_name: str, password: str, description: str, is_admin: bool = False) -> User:
+        assert isinstance(display_name, str) and 2 <= len(display_name) <= 32, "display_name must be 2-32 chars"
+        assert isinstance(password, str) and len(password) >= 1, "password required"
         if self.get_user_by_display_name(display_name) is not None:
             raise ValueError("Display name already taken.")
         uid = str(uuid.uuid4())

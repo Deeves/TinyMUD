@@ -6,11 +6,23 @@ emits (to send back to the acting player) and broadcasts (to notify others).
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Tuple, TYPE_CHECKING
 from id_parse_utils import resolve_door_name
 
+if TYPE_CHECKING:  # import only for typing to avoid runtime cycles
+    from world import World, Room
 
-def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+
+def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+    """Move through a named door in the player's current room.
+
+    Contract:
+    - Inputs: world (World), sid (str), door_name (str)
+    - Output: (ok, err, emits, broadcasts)
+    - Errors: returns (False, message, [], []) on invalid player/room/door
+    """
+    assert isinstance(sid, str) and sid != "", "sid must be a non-empty string"
+    assert isinstance(door_name, str), "door_name must be a string"
     emits: List[dict] = []
     broadcasts: List[Tuple[str, dict]] = []
 
@@ -52,11 +64,13 @@ def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None
             actor_uid = None
             try:
                 # world.users is keyed by user_id, but we need mapping from sid. Server session map isn't available here, so fall back:
-                # Find a user whose sheet object is the same instance as player's sheet.
-                for uid, user in getattr(world, 'users', {}).items():
-                    if user.sheet is world.players.get(sid).sheet:
-                        actor_uid = uid
-                        break
+                # Find a user whose sheet object is the same instance as the player's sheet.
+                player_ref = world.players.get(sid)
+                if player_ref:
+                    for uid, user in getattr(world, 'users', {}).items():
+                        if user.sheet is player_ref.sheet:
+                            actor_uid = uid
+                            break
             except Exception:
                 actor_uid = None
             # If we couldn't resolve, deny by default to be safe
@@ -95,7 +109,7 @@ def move_through_door(world, sid: str, door_name: str) -> Tuple[bool, str | None
     return True, None, emits, broadcasts
 
 
-def move_stairs(world, sid: str, direction: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+def move_stairs(world: "World", sid: str, direction: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     """Move up or down stairs. direction is 'up' or 'down'."""
     emits: List[dict] = []
     broadcasts: List[Tuple[str, dict]] = []
@@ -134,7 +148,7 @@ def move_stairs(world, sid: str, direction: str) -> Tuple[bool, str | None, List
     return False, "Direction must be 'up' or 'down'.", emits, broadcasts
 
 
-def teleport_player(world, sid: str, target_room_id: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+def teleport_player(world: "World", sid: str, target_room_id: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     """Teleport a player to a specific room id without requiring a door.
 
     Returns (ok, err, emits, broadcasts) where:

@@ -21,10 +21,10 @@ signal disconnected
 signal event_received(event_name, data)
 signal transport_opened
 
-var socket := WebSocketPeer.new()
-var _is_open := false
-var _sid := ""
-var _engine_open := false
+var socket: WebSocketPeer = WebSocketPeer.new()
+var _is_open: bool = false
+var _sid: String = ""
+var _engine_open: bool = false
 
 func connect_to_server(url: String) -> void:
 	# Example url: ws://127.0.0.1:5000/socket.io/?EIO=4&transport=websocket
@@ -104,7 +104,7 @@ func _handle_engineio_message(msg: String) -> void:
 			# Unhandled frame types
 			pass
 
-func emit(event_name: String, data) -> void:
+func emit(event_name: String, data: Variant) -> void:
 	if !_is_open:
 		push_warning("Socket.IO not open; cannot emit event.")
 		return

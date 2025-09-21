@@ -11,15 +11,15 @@ extends Control
 # - Add more options in OptionsMenu.tscn/options_menu.gd
 
 # --- UI Node References ---
-@onready var log_display = $RichTextLabel
-@onready var input_box = $LineEdit
+@onready var log_display: RichTextLabel = $RichTextLabel
+@onready var input_box: LineEdit = $LineEdit
 @onready var background_rect: ColorRect = $Background
 @onready var options_button: Button = $OptionsButton
 var options_menu_scene: PackedScene = preload("res://OptionsMenu.tscn")
 var options_menu: Panel
 
 # --- Socket.IO helper over WebSocketPeer ---
-@onready var sio := preload("res://src/socket_io_client.gd").new()
+@onready var sio: Node = preload("res://src/socket_io_client.gd").new()
 
 # --- Settings ---
 const SETTINGS_PATH := "user://settings.cfg"
@@ -39,7 +39,7 @@ const RECONNECT_MAX_DELAY := 10.0
 var _last_sent_message: String = ""
 const ACK_TIMEOUT_SEC := 1.2
 # Pending acknowledgement state for last non-slash input
-var _pending_ack := {}
+var _pending_ack: Dictionary = {}
 # Whether we're in interactive auth/login flow; echo inputs plainly
 var _in_auth_flow: bool = true
 var _expecting_password: bool = false
@@ -130,7 +130,7 @@ func _on_disconnected():
 	append_to_log("[color=red]Disconnected.[/color]")
 	_schedule_reconnect()
 
-func _on_event(event_name: String, data) -> void:
+func _on_event(event_name: String, data: Variant) -> void:
 	if event_name != "message":
 		return
 	# If we were waiting for a server acknowledgement, confirm once on first message back
@@ -151,60 +151,64 @@ func _on_event(event_name: String, data) -> void:
 		return
 	match data["type"]:
 		"system":
-			append_to_log("[color=green]%s[/color]" % data.get("content", ""))
-			# Track auth flow state based on server guidance
-			var c := String(data.get("content", "")).to_lower()
-			if c.find("welcome back,") != -1 or c.find("character created. welcome,") != -1:
-				_in_auth_flow = false
-			elif c.find("type \"create\" to forge a new character or \"login\" to sign in") != -1:
-				_in_auth_flow = true
-			elif c.find("login selected. enter your display name:") != -1:
-				_in_auth_flow = true
-			elif c.find("creation selected. choose a display name") != -1:
-				_in_auth_flow = true
-			elif c.find("enter password:") != -1:
-				_in_auth_flow = true
-				_expecting_password = true
-				input_box.secret = censor_passwords
-			elif c.find("enter a short character description") != -1:
-				_in_auth_flow = true
-			elif c.find("cancelled. type \"create\" or \"login\" to continue.") != -1:
-				_in_auth_flow = true
-			# Treat world setup wizard as an auth-like flow (plain local echo, no special color)
-			elif c.find("let's set up your world!") != -1:
-				_in_auth_flow = true
-			elif c.find("describe the world") != -1:
-				_in_auth_flow = true
-			elif c.find("describe the main conflict") != -1:
-				_in_auth_flow = true
-			elif c.find("create the starting room") != -1:
-				_in_auth_flow = true
-			elif c.find("enter a description for the starting room") != -1:
-				_in_auth_flow = true
-			elif c.find("create an npc") != -1:
-				_in_auth_flow = true
-			elif c.find("enter a short description for") != -1:
-				_in_auth_flow = true
-			elif c.find("world setup complete!") != -1:
-				_in_auth_flow = false
-				_expecting_password = false
-				input_box.secret = false
-			elif c.find("setup cancelled.") != -1:
-				_in_auth_flow = false
-				_expecting_password = false
-				input_box.secret = false
+			_handle_system_message(String(data.get("content", "")))
 		"player":
-			var pname = data.get("name", "Someone")
-			var ptext = data.get("content", "...")
-			append_to_log("[color=yellow]%s says:[/color] %s" % [pname, ptext])
+			_handle_player_message(String(data.get("name", "Someone")), String(data.get("content", "...")))
 		"npc":
-			var npc_name = data.get("name", "Someone")
-			var npc_content = data.get("content", "...")
-			append_to_log("[color=cyan]%s says:[/color] %s" % [npc_name, npc_content])
+			_handle_npc_message(String(data.get("name", "Someone")), String(data.get("content", "...")))
 		"error":
 			append_to_log("[color=red]Server Error: %s[/color]" % data.get("content", ""))
 		_:
 			append_to_log("[color=purple]Unknown message type: %s[/color]" % data["type"])
+
+func _handle_system_message(content: String) -> void:
+	append_to_log("[color=green]%s[/color]" % content)
+	var c := content.to_lower()
+	if c.find("welcome back,") != -1 or c.find("character created. welcome,") != -1:
+		_in_auth_flow = false
+	elif c.find("type \"create\" to forge a new character or \"login\" to sign in") != -1:
+		_in_auth_flow = true
+	elif c.find("login selected. enter your display name:") != -1:
+		_in_auth_flow = true
+	elif c.find("creation selected. choose a display name") != -1:
+		_in_auth_flow = true
+	elif c.find("enter password:") != -1:
+		_in_auth_flow = true
+		_expecting_password = true
+		input_box.secret = censor_passwords
+	elif c.find("enter a short character description") != -1:
+		_in_auth_flow = true
+	elif c.find("cancelled. type \"create\" or \"login\" to continue.") != -1:
+		_in_auth_flow = true
+	# Treat world setup wizard as an auth-like flow (plain local echo, no special color)
+	elif c.find("let's set up your world!") != -1:
+		_in_auth_flow = true
+	elif c.find("describe the world") != -1:
+		_in_auth_flow = true
+	elif c.find("describe the main conflict") != -1:
+		_in_auth_flow = true
+	elif c.find("create the starting room") != -1:
+		_in_auth_flow = true
+	elif c.find("enter a description for the starting room") != -1:
+		_in_auth_flow = true
+	elif c.find("create an npc") != -1:
+		_in_auth_flow = true
+	elif c.find("enter a short description for") != -1:
+		_in_auth_flow = true
+	elif c.find("world setup complete!") != -1:
+		_in_auth_flow = false
+		_expecting_password = false
+		input_box.secret = false
+	elif c.find("setup cancelled.") != -1:
+		_in_auth_flow = false
+		_expecting_password = false
+		input_box.secret = false
+
+func _handle_player_message(pname: String, text: String) -> void:
+	append_to_log("[color=yellow]%s says:[/color] %s" % [pname, text])
+
+func _handle_npc_message(npc_name: String, text: String) -> void:
+	append_to_log("[color=cyan]%s says:[/color] %s" % [npc_name, text])
 
 func _on_text_submitted(player_text: String):
 	if player_text.is_empty():
