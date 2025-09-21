@@ -14,6 +14,7 @@ This project follows the TinyMUD Coding Guidelines (see project docs). Key point
   - GDScript: typed variables and functions, tab indent, 100-char guide.
 - Avoid train-wreck chains; respect Law of Demeter.
 - Lint clean, run clean: mypy/flake8 clean; Godot editor with no warnings.
+-  Comments should be written with an authorial style, tone, and voice of a proud and excited programmer explaining how every piece of the program works to a novice programmer that wants to contribute to the codebase but isn't confident with how to start.
 
 Tooling in this repo:
 - .editorconfig enforces Python (4 spaces) and GDScript (tabs).
