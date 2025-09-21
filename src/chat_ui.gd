@@ -213,11 +213,14 @@ func _handle_npc_message(npc_name: String, text: String) -> void:
 func _on_text_submitted(player_text: String):
 	if player_text.is_empty():
 		return
-	# If we just entered a password, unmask after submission
+	# Track if this submission is a password entry from the interactive flow.
+	# We reset the masking immediately after, but we also use this flag to avoid logging/storing the raw text.
+	var was_password := _expecting_password
 	if _expecting_password:
 		_expecting_password = false
 		input_box.secret = false
-	_last_sent_message = player_text
+	# Don't keep passwords in client history recall either
+	_last_sent_message = "" if was_password else player_text
 	# Don't echo auth commands as speech
 	if player_text.begins_with("/"):
 		# Client-side /help: show quick tips without round-trip
@@ -244,9 +247,9 @@ func _on_text_submitted(player_text: String):
 			sio.close()
 			input_box.editable = false
 			return
-		# For /auth commands, echo with no special coloring
+		# For /auth commands, echo with no special coloring but sanitize any password
 		if player_text.strip_edges().to_lower().begins_with("/auth"):
-			append_to_log(player_text)
+			append_to_log(_sanitize_auth_echo(player_text))
 		else:
 			append_to_log("[color=gray]" + player_text + "[/color]")
 		# Client-side /reconnect command
@@ -256,9 +259,13 @@ func _on_text_submitted(player_text: String):
 			input_box.grab_focus()
 			return
 	else:
-		# During interactive auth/login, echo raw with no special coloring
+		# During interactive auth/login, NEVER echo raw passwords.
+		# If we just handled a password, show a friendly placeholder instead of the real text.
 		if _in_auth_flow:
-			append_to_log(player_text)
+			if was_password:
+				append_to_log("[password hidden]")
+			else:
+				append_to_log(player_text)
 		else:
 			# Do not locally echo. Wait for server acknowledgement and then confirm.
 			_begin_ack_wait(player_text)
@@ -266,6 +273,45 @@ func _on_text_submitted(player_text: String):
 	input_box.clear()
 	# Keep focus in the input for rapid consecutive messages
 	input_box.grab_focus()
+
+# --- Security helpers ---
+# Sanitize /auth command echos so no password is shown in the log.
+# Supports both pipe-delimited (recommended):
+#   /auth create <name> | <password> | <description>
+#   /auth login  <name> | <password>
+# and a minimal space-delimited fallback:
+#   /auth create <name> <password> <description...>
+#   /auth login  <name> <password>
+func _sanitize_auth_echo(text: String) -> String:
+	var raw := text
+	var trimmed := raw.strip_edges()
+	var lower := trimmed.to_lower()
+	if not lower.begins_with("/auth"):
+		return raw
+	var first_space := trimmed.find(" ")
+	if first_space == -1:
+		return raw
+	var head := trimmed.substr(0, first_space + 1) # includes trailing space
+	var rest := trimmed.substr(first_space + 1).strip_edges()
+
+	# Try pipe-delimited form first
+	if rest.find("|") != -1:
+		var segs := rest.split("|", false) # remove empty parts
+		# Normalize spacing around segments on reconstruction
+		for i in range(segs.size()):
+			segs[i] = String(segs[i]).strip_edges()
+		if segs.size() >= 2:
+			segs[1] = "[hidden]"  # mask password segment
+		var sanitized_rest := " | ".join(segs)
+		return head + sanitized_rest
+
+	# Space-delimited fallback: mask the 3rd token (action, name, password, ...)
+	var tokens := rest.split(" ", false)
+	if tokens.size() >= 3:
+		tokens[2] = "[hidden]"
+		return head + " ".join(tokens)
+
+	return raw
 
 func _on_input_box_gui_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
