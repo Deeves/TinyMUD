@@ -2036,6 +2036,32 @@ def handle_command(sid: str | None, text: str) -> None:
 
 # --- Run the Server ---
 if __name__ == '__main__':
+    # Support a maintenance flag to purge the server state from the CLI without logging in.
+    # Usage: python server.py -purge [--yes]
+    #        python server.py --purge [--yes]
+    argv = sys.argv[1:]
+    if any(a.lower() in ('-purge', '--purge') for a in argv):
+        # Ask for confirmation unless explicitly bypassed with -y/--yes
+        auto_yes = any(a.lower() in ('-y', '--yes') for a in argv)
+        if not auto_yes:
+            print("Are you sure you want to purge the world? This cannot be undone.")
+            try:
+                ans = input("Type 'Y' to confirm or 'N' to cancel: ")
+            except Exception:
+                print("No interactive input available; aborting purge. Use --yes to skip confirmation in non-interactive environments.")
+                sys.exit(1)
+            if not is_confirm_yes(ans):
+                print("Purge cancelled.")
+                sys.exit(0)
+        try:
+            # Delete the persisted world state and write factory defaults
+            _ = execute_purge(STATE_PATH)
+            print("World purged and reset to factory defaults.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Failed to purge world: {e}")
+            sys.exit(1)
+
     # Use a production-capable websocket server when available (eventlet).
     # Host/port can be overridden with PORT env var.
     port = int(os.getenv('PORT', '5000'))
