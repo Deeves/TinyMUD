@@ -21,16 +21,158 @@ from typing import Dict, Set, Optional, List
 
 
 @dataclass
-class Item:
-    name: str
-    tags: Set[str] = field(default_factory=set)  # e.g., {"one-hand"} or {"two-hand"}
+class Object:
+    """Generic game object.
+
+    Schema (all optional fields may be None):
+    - uuid: stable identifier
+    - display_name: human-friendly name (e.g., "Sword")
+    - description: flavor text
+    - object_tags: tags such as "weapon", "cutting damage", "one-hand", "Immovable", "Travel Point"
+    - material_tag: e.g., "bronze"
+    - value: integer numeric value (optional)
+    - loot_location_hint: an Object indicating where it can usually be found
+    - durability: remaining durability (integer)
+    - quality: e.g., "average"
+    - crafting_recipe: a list of Objects that represent inputs/stations (freeform objects ok)
+    - deconstruct_recipe: a list of Objects for salvage output
+
+    Travel/Linking (optional helpers for movement objects like doors/stairs):
+    - link_target_room_id: if this object acts as a travel point to a room
+    - link_to_object_uuid: if this object links to another Object (future use)
+    """
+
+    display_name: str
+    description: str = ""
+    object_tags: Set[str] = field(default_factory=lambda: {"one-hand"})
+    material_tag: Optional[str] = None
+    value: Optional[int] = None
+    loot_location_hint: Optional["Object"] = None
+    durability: Optional[int] = None
+    quality: Optional[str] = None
+    crafting_recipe: List["Object"] = field(default_factory=list)
+    deconstruct_recipe: List["Object"] = field(default_factory=list)
+    # Travel helpers
+    link_target_room_id: Optional[str] = None
+    link_to_object_uuid: Optional[str] = None
+    # Stable id
+    uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "tags": sorted(list(self.tags))}
+        return {
+            "uuid": self.uuid,
+            "display_name": self.display_name,
+            "description": self.description,
+            "object_tag": sorted(list(self.object_tags)),
+            "material_tag": self.material_tag,
+            "value": self.value,
+            "loot_location_hint": (self.loot_location_hint.to_dict() if self.loot_location_hint else None),
+            "durability": self.durability,
+            "quality": self.quality,
+            "crafting_recipe": [o.to_dict() for o in (self.crafting_recipe or [])],
+            "deconstruct_recipe": [o.to_dict() for o in (self.deconstruct_recipe or [])],
+            # Travel helpers (optional)
+            "link_target_room_id": self.link_target_room_id,
+            "link_to_object_uuid": self.link_to_object_uuid,
+        }
 
     @staticmethod
-    def from_dict(data: dict) -> "Item":
-        return Item(name=data.get("name", "Unnamed"), tags=set(data.get("tags", [])))
+    def from_dict(data: dict) -> "Object":
+        """Load from either the new Object schema or legacy Item schema.
+
+        Legacy Item shape: {"name": str, "tags": [str]}
+        New Object shape:  {"display_name": str, "object_tag": [str], ...}
+        Also accepts a few common misspellings from the request (e.g., 'druability', 'deconstruct_recpie').
+        """
+        if not isinstance(data, dict):
+            # Fall back to a minimal unnamed object
+            return Object(display_name=str(data))
+
+        # Small helpers to coerce inputs into Objects
+        def _to_object(maybe) -> "Object":
+            if isinstance(maybe, dict):
+                return Object.from_dict(maybe)
+            # Fallback: string or other -> simple object named after it
+            return Object(display_name=str(maybe) if maybe is not None else "Unnamed")
+
+        def _to_object_list(maybe_list) -> List["Object"]:
+            if maybe_list is None:
+                return []
+            if isinstance(maybe_list, (str, int)):
+                # Back-compat: single scalar -> single object
+                return [_to_object(maybe_list)]
+            if isinstance(maybe_list, list):
+                out: List[Object] = []
+                for el in maybe_list:
+                    if isinstance(el, dict) or isinstance(el, (str, int)):
+                        out.append(_to_object(el))
+                return out
+            # Unknown type -> empty list
+            return []
+
+        # Extract common name fields
+        display_name = data.get("display_name") or data.get("name") or "Unnamed"
+        # Tags under various keys
+        tags = set()
+        if isinstance(data.get("object_tag"), list):
+            tags = set(map(str, data.get("object_tag", [])))
+        elif isinstance(data.get("tags"), list):  # legacy
+            tags = set(map(str, data.get("tags", [])))
+        if not tags:
+            tags = {"one-hand"}
+
+        # Optional fields with typo back-compat
+        durability = data.get("durability")
+        if durability is None and "druability" in data:
+            durability = data.get("druability")
+        deconstruct_recipe = data.get("deconstruct_recipe")
+        if deconstruct_recipe is None and "deconstruct_recpie" in data:
+            deconstruct_recipe = data.get("deconstruct_recpie")
+
+        # Parse value: accept int or numeric string; otherwise None
+        raw_value = data.get("value")
+        ival: Optional[int] = None
+        try:
+            if isinstance(raw_value, int):
+                ival = raw_value
+            elif isinstance(raw_value, str):
+                # strip common formatting
+                s = raw_value.strip()
+                if s.isdigit() or (s.startswith('-') and s[1:].isdigit()):
+                    ival = int(s)
+        except Exception:
+            ival = None
+
+        # Loot location hint can be an embedded object or a string
+        llh_raw = data.get("loot_location_hint")
+        llh_obj = None
+        if llh_raw is not None:
+            llh_obj = _to_object(llh_raw)
+
+        # Crafting/deconstruct recipes as lists of Objects (accept legacy string)
+        craft_list = _to_object_list(data.get("crafting_recipe"))
+        decon_list = _to_object_list(data.get("deconstruct_recipe"))
+        # Back-compat for misspelled key
+        if not decon_list and "deconstruct_recpie" in data:
+            decon_list = _to_object_list(data.get("deconstruct_recpie"))
+
+        # Build object
+        obj = Object(
+            display_name=display_name,
+            description=str(data.get("description") or ""),
+            object_tags=tags,
+            material_tag=(str(data.get("material_tag")) if data.get("material_tag") is not None else None),
+            value=ival,
+            loot_location_hint=llh_obj,
+            durability=(int(durability) if isinstance(durability, (int, str)) and str(durability).isdigit() else None),
+            quality=(str(data.get("quality")) if data.get("quality") is not None else None),
+            crafting_recipe=craft_list,
+            deconstruct_recipe=decon_list,
+            link_target_room_id=(str(data.get("link_target_room_id")) if data.get("link_target_room_id") is not None else None),
+            link_to_object_uuid=(str(data.get("link_to_object_uuid")) if data.get("link_to_object_uuid") is not None else None),
+            uuid=str(data.get("uuid") or uuid.uuid4()),
+        )
+        return obj
 
 
 @dataclass
@@ -42,27 +184,31 @@ class Inventory:
     - slots 6-7: two large items (must have 'two-hand')
     """
 
-    slots: List[Optional[Item]] = field(default_factory=lambda: [None] * 8)
+    slots: List[Optional[Object]] = field(default_factory=lambda: [None] * 8)
 
-    def can_place(self, index: int, item: Item) -> bool:
+    def can_place(self, index: int, obj: Object) -> bool:
         if index < 0 or index >= 8:
+            return False
+        # Immovable objects (e.g., Doors, Stairs, fixed fixtures) cannot be placed anywhere
+        tags = obj.object_tags or set()
+        if 'Immovable' in tags or 'Travel Point' in tags:
             return False
         if index in (0, 1):
             # hands can hold either one-hand or two-hand items (conceptually one hand carrying a two-hand object is allowed here for simplicity)
             return True
         if 2 <= index <= 5:
-            return 'one-hand' in item.tags and 'two-hand' not in item.tags
+            return 'one-hand' in tags and 'two-hand' not in tags
         if 6 <= index <= 7:
-            return 'two-hand' in item.tags
+            return 'two-hand' in tags
         return False
 
-    def place(self, index: int, item: Item) -> bool:
-        if not self.can_place(index, item):
+    def place(self, index: int, obj: Object) -> bool:
+        if not self.can_place(index, obj):
             return False
-        self.slots[index] = item
+        self.slots[index] = obj
         return True
 
-    def remove(self, index: int) -> Optional[Item]:
+    def remove(self, index: int) -> Optional[Object]:
         if index < 0 or index >= 8:
             return None
         it = self.slots[index]
@@ -77,8 +223,8 @@ class Inventory:
             "Large Slot 1", "Large Slot 2",
         ]
         for idx, label in enumerate(labels):
-            item = self.slots[idx]
-            names.append(f"{label}: {item.name if item else '[empty]'}")
+            obj = self.slots[idx]
+            names.append(f"{label}: {obj.display_name if obj else '[empty]'}")
         return "\n".join(names)
 
     def to_dict(self) -> dict:
@@ -91,7 +237,7 @@ class Inventory:
         inv = Inventory()
         slots = data.get("slots")
         if isinstance(slots, list):
-            inv.slots = [Item.from_dict(s) if isinstance(s, dict) else None for s in slots][:8]
+            inv.slots = [Object.from_dict(s) if isinstance(s, dict) else None for s in slots][:8]
             # Ensure exactly 8 slots
             if len(inv.slots) < 8:
                 inv.slots.extend([None] * (8 - len(inv.slots)))
@@ -189,6 +335,8 @@ class Room:
     # New: optional door lock policies per door name
     # Schema: { door_name: { 'allow_ids': [entity_id,...], 'allow_rel': [ {'type': str, 'to': entity_id} ] } }
     door_locks: Dict[str, dict] = field(default_factory=dict)
+    # Objects physically present in the room (includes doors/stairs as Objects)
+    objects: Dict[str, Object] = field(default_factory=dict)  # key: object uuid -> Object
 
     def describe(self, world: "World", viewer_sid: str | None = None) -> str:
         """Return a short multi-line description for a player to read.
@@ -208,17 +356,60 @@ class Room:
             if names:
                 lines.append("Also present: " + ", ".join(sorted(names)))
 
-        # Exits (doors and stairs)
-        exit_bits: List[str] = []
-        if self.doors:
-            # Show door names
-            exit_bits.append("doors: " + ", ".join(sorted(self.doors.keys())))
-        if self.stairs_up_to:
-            exit_bits.append("stairs up")
-        if self.stairs_down_to:
-            exit_bits.append("stairs down")
-        if exit_bits:
-            lines.append("Exits: " + "; ".join(exit_bits))
+        # Travel Points category (doors and stairs) plus other visible objects
+        try:
+            travel_color = "#FFA500"
+            tp_names: List[str] = []
+            other_objects: List[str] = []
+            # Prefer object list for richer tagging
+            vals = list((self.objects or {}).values()) if isinstance(self.objects, dict) else []
+            if vals:
+                for o in vals:
+                    try:
+                        name = getattr(o, 'display_name', None)
+                        if not name:
+                            continue
+                        tags = set(getattr(o, 'object_tags', []) or [])
+                        if 'Travel Point' in tags:
+                            tp_names.append(f"[color={travel_color}]{name}[/color]")
+                        else:
+                            other_objects.append(str(name))
+                    except Exception:
+                        continue
+            else:
+                # Fallback to basic exits as travel points
+                for d in sorted((self.doors or {}).keys()):
+                    tp_names.append(f"[color={travel_color}]{d}[/color]")
+                if self.stairs_up_to:
+                    tp_names.append(f"[color={travel_color}]stairs up[/color]")
+                if self.stairs_down_to:
+                    tp_names.append(f"[color={travel_color}]stairs down[/color]")
+            # Unique + stable order
+            def _uniq(lst: List[str]) -> List[str]:
+                seen = {}
+                out: List[str] = []
+                for x in lst:
+                    if x not in seen:
+                        seen[x] = True
+                        out.append(x)
+                return out
+            tp_names = _uniq(sorted(tp_names, key=lambda s: s.lower()))
+            other_objects = _uniq(sorted(other_objects, key=lambda s: s.lower()))
+            if tp_names:
+                lines.append("Travel Points: " + ", ".join(tp_names))
+            if other_objects:
+                lines.append("Objects: " + ", ".join(other_objects))
+        except Exception:
+            # Fallback to prior exits formatting on any error
+            exit_bits: List[str] = []
+            if self.doors:
+                exit_bits.append("doors: " + ", ".join(sorted(self.doors.keys())))
+            if self.stairs_up_to:
+                exit_bits.append("stairs up")
+            if self.stairs_down_to:
+                exit_bits.append("stairs down")
+            if exit_bits:
+                lines.append("Exits: " + "; ".join(exit_bits))
 
         return "\n".join(lines)
 
@@ -238,6 +429,8 @@ class Room:
             "stairs_down_id": self.stairs_down_id,
             # Door locks
             "door_locks": self.door_locks,
+            # Objects in the room
+            "objects": {oid: obj.to_dict() for oid, obj in self.objects.items()},
         }
 
     @staticmethod
@@ -256,7 +449,24 @@ class Room:
             stairs_up_id=data.get("stairs_up_id"),
             stairs_down_id=data.get("stairs_down_id"),
             door_locks=dict(data.get("door_locks", {})),
+            objects={},
         )
+        # Load objects if present
+        try:
+            objs_raw = data.get("objects", {})
+            if isinstance(objs_raw, dict):
+                for oid, odata in objs_raw.items():
+                    if isinstance(odata, dict):
+                        obj = Object.from_dict(odata)
+                        # Ensure key matches object uuid
+                        room.objects[obj.uuid] = obj
+            elif isinstance(objs_raw, list):
+                for odata in objs_raw:
+                    if isinstance(odata, dict):
+                        obj = Object.from_dict(odata)
+                        room.objects[obj.uuid] = obj
+        except Exception:
+            pass
         # Backfill missing door IDs for existing door names
         for dname in list(room.doors.keys()):
             if dname not in room.door_ids:
@@ -266,6 +476,66 @@ class Room:
             room.stairs_up_id = str(uuid.uuid4())
         if room.stairs_down_to and not room.stairs_down_id:
             room.stairs_down_id = str(uuid.uuid4())
+        # Ensure door objects exist for every named door
+        try:
+            for dname, target_room in (room.doors or {}).items():
+                oid = room.door_ids.get(dname) or str(uuid.uuid4())
+                room.door_ids[dname] = oid
+                if oid not in room.objects:
+                    desc = f"A doorway named '{dname}'."
+                    obj = Object(
+                        display_name=dname,
+                        description=desc,
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=target_room,
+                    )
+                    # Force object's uuid to match oid for stable linking
+                    obj.uuid = oid
+                    room.objects[oid] = obj
+                else:
+                    # Ensure tags include immovable + travel point and link target is set
+                    o = room.objects[oid]
+                    o.object_tags.update({"Immovable", "Travel Point"})
+                    if not getattr(o, 'link_target_room_id', None):
+                        o.link_target_room_id = target_room
+        except Exception:
+            pass
+        # Ensure stairs objects exist (up/down) when linked
+        try:
+            if room.stairs_up_to and room.stairs_up_id:
+                oid = room.stairs_up_id
+                if oid not in room.objects:
+                    obj = Object(
+                        display_name="stairs up",
+                        description="A staircase leading up.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room.stairs_up_to,
+                    )
+                    obj.uuid = oid
+                    room.objects[oid] = obj
+                else:
+                    o = room.objects[oid]
+                    o.object_tags.update({"Immovable", "Travel Point"})
+                    if not getattr(o, 'link_target_room_id', None):
+                        o.link_target_room_id = room.stairs_up_to
+            if room.stairs_down_to and room.stairs_down_id:
+                oid = room.stairs_down_id
+                if oid not in room.objects:
+                    obj = Object(
+                        display_name="stairs down",
+                        description="A staircase leading down.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room.stairs_down_to,
+                    )
+                    obj.uuid = oid
+                    room.objects[oid] = obj
+                else:
+                    o = room.objects[oid]
+                    o.object_tags.update({"Immovable", "Travel Point"})
+                    if not getattr(o, 'link_target_room_id', None):
+                        o.link_target_room_id = room.stairs_down_to
+        except Exception:
+            pass
         return room
 
 
@@ -275,6 +545,8 @@ class World:
         self.players: Dict[str, Player] = {}
         # Simple NPC sheets by name (if needed later)
         self.npc_sheets: Dict[str, CharacterSheet] = {}
+        # Admin-created object templates: key -> Object
+        self.object_templates: Dict[str, Object] = {}
         # Persisted user accounts
         self.users: Dict[str, User] = {}
         # New: Global mapping of NPC display name -> stable UUID
@@ -372,6 +644,7 @@ class World:
         return {
             "rooms": {rid: room.to_dict() for rid, room in self.rooms.items()},
             "npc_sheets": {name: sheet.to_dict() for name, sheet in self.npc_sheets.items()},
+            "object_templates": {key: obj.to_dict() for key, obj in self.object_templates.items()},
             "users": {uid: user.to_dict() for uid, user in self.users.items()},
             # Persist npc id mapping
             "npc_ids": self.npc_ids,
@@ -401,6 +674,16 @@ class World:
             for name, sdata in npc_sheets.items():
                 if isinstance(sdata, dict):
                     w.npc_sheets[name] = CharacterSheet.from_dict(sdata)
+        # Load object templates
+        obj_t = data.get("object_templates", {})
+        if isinstance(obj_t, dict):
+            for key, odata in obj_t.items():
+                if isinstance(odata, dict):
+                    try:
+                        w.object_templates[str(key)] = Object.from_dict(odata)
+                    except Exception:
+                        # Skip malformed entries
+                        pass
         # Load npc id mapping and backfill for any npcs referenced in rooms
         npc_ids = data.get("npc_ids", {})
         if isinstance(npc_ids, dict):

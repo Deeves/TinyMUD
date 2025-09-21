@@ -29,7 +29,7 @@ import sys
 import os
 import socket
 import atexit
-from typing import Any
+from typing import Any, cast
 import re
 import random
 # Optional .env support
@@ -47,6 +47,7 @@ from dialogue_utils import (
 )
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
+    parse_pipe_parts as _pipe_parts,
     resolve_room_id as _resolve_room_id_generic,
     resolve_player_sid_in_room as _resolve_player_sid_in_room,
     resolve_player_sid_global as _resolve_player_sid_global,
@@ -115,7 +116,7 @@ def _print_command_help() -> None:
     "Player commands (after auth):",
         "  look | l                             - describe your current room",
         "  look at <name>                       - inspect a Player or NPC in the room",
-    "  move through <door name>             - go via a named door in the room",
+    "  move through <name>                  - go via a named door or travel point",
     "  move up stairs | move down stairs    - use stairs, if present",
     "  say <message>                        - say something; anyone present may respond",
     "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
@@ -151,6 +152,14 @@ def _print_command_help() -> None:
     "  /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>",
     "  /room linkstairs <room_a> | <up|down> | <room_b>",
         "",
+    "Object management:",
+    "  /object createtemplateobject           - start a wizard to create and save an Object template",
+    "  /object createobject <room> | <name> | <desc> | <tag, tag, ...>  - create an Object in a room (supports 'here')",
+    "  /object createobject <room> | <name> | <desc> | <template_key>   - create from saved template (overrides name/desc)",
+    "  /object listtemplates                  - list saved object template keys",
+    "  /object viewtemplate <key>             - show a template's JSON by key",
+    "  /object deletetemplate <key>           - delete a template by key",
+    "",
         "NPC management:",
     "  /npc add <room name> | <npc name> | <desc>  - add an NPC to a room (and set description)",
         "  /npc remove <npc name>                    - remove an NPC from your current room",
@@ -192,7 +201,7 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("[b]Player[/b]")
     lines.append("look | l                                         — describe your current room")
     lines.append("look at <name>                                   — inspect a Player or NPC in the room")
-    lines.append("move through <door name>                         — go via a named door in the room")
+    lines.append("move through <name>                              — go via a named door or travel point")
     lines.append("move up stairs | move down stairs                — use stairs, if present")
     lines.append("say <message>                                    — say something; anyone present may respond")
     lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
@@ -230,6 +239,13 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
         lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
         lines.append("")
+    lines.append("[b]Object management[/b]")
+    lines.append("/object createtemplateobject                     — start a wizard to create and save an Object template")
+    lines.append("/object createobject <room> | <name> | <desc> | <tags or template_key> — create an Object in a room (supports 'here')")
+    lines.append("/object listtemplates                            — list saved object template keys")
+    lines.append("/object viewtemplate <key>                       — show a template's JSON by key")
+    lines.append("/object deletetemplate <key>                     — delete a template by key")
+    lines.append("")
     lines.append("[b]NPC management[/b]")
     lines.append("/npc add <room name> | <npc name> | <desc>       — add an NPC to a room and set description")
     lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
@@ -306,6 +322,7 @@ sessions: dict[str, str] = {}  # sid -> user_id
 _pending_confirm: dict[str, str] = {}  # sid -> action (e.g., 'purge')
 auth_sessions: dict[str, dict] = {}  # sid -> { mode: 'create'|'login', step: str, temp: dict }
 world_setup_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
+object_template_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
 
 
 
@@ -398,6 +415,7 @@ def _format_look(w: World, sid: str | None) -> str:
         lines.append(f"You are in {room.id}. {room_desc}")
 
         bits: list[str] = []
+        TRAVEL_COLOR = "#FFA500"  # orange for travel points
         # Other players (exclude viewer)
         try:
             other_sids = [psid for psid in room.players if psid != sid]
@@ -414,17 +432,47 @@ def _format_look(w: World, sid: str | None) -> str:
         except Exception:
             pass
 
-        # Objects: list doors and stairs as room objects
+        # Objects present (including fixed fixtures and items)
         try:
-            object_names: list[str] = []
-            if getattr(room, 'doors', None):
-                object_names.extend(sorted(room.doors.keys()))
-            if getattr(room, 'stairs_up_to', None):
-                object_names.append("stairs up")
-            if getattr(room, 'stairs_down_to', None):
-                object_names.append("stairs down")
-            if object_names:
-                bits.append("Objects: " + ", ".join(object_names))
+            tp_names: list[str] = []
+            obj_names: list[str] = []
+            # Prefer canonical objects if available
+            vals = list(room.objects.values()) if isinstance(room.objects, dict) else []
+            if vals:
+                for o in vals:
+                    try:
+                        name = getattr(o, 'display_name', None)
+                        if not name:
+                            continue
+                        tags = set(getattr(o, 'object_tags', []) or [])
+                        if 'Travel Point' in tags:
+                            tp_names.append(f"[color={TRAVEL_COLOR}]{str(name)}[/color]")
+                        else:
+                            obj_names.append(str(name))
+                    except Exception:
+                        continue
+            else:
+                # Fallback to doors/stairs only as travel points
+                if getattr(room, 'doors', None):
+                    for dname in sorted(room.doors.keys()):
+                        tp_names.append(f"[color={TRAVEL_COLOR}]{dname}[/color]")
+                if getattr(room, 'stairs_up_to', None):
+                    tp_names.append(f"[color={TRAVEL_COLOR}]stairs up[/color]")
+                if getattr(room, 'stairs_down_to', None):
+                    tp_names.append(f"[color={TRAVEL_COLOR}]stairs down[/color]")
+            # De-duplicate and sort for stable output
+            def _unique_sorted(lst: list[str]) -> list[str]:
+                seen = {}
+                for x in lst:
+                    if x not in seen:
+                        seen[x] = True
+                return sorted(seen.keys(), key=lambda s: s.lower())
+            tp_names = _unique_sorted(tp_names)
+            obj_names = _unique_sorted(obj_names)
+            if tp_names:
+                bits.append("Travel Points: " + ", ".join(tp_names))
+            if obj_names:
+                bits.append("Objects: " + ", ".join(obj_names))
         except Exception:
             pass
 
@@ -439,6 +487,135 @@ def _format_look(w: World, sid: str | None) -> str:
         except Exception:
             return "You are nowhere."
 
+
+def _resolve_object_in_room(room: Room | None, name_raw: str):
+    """Fuzzy-resolve an Object in the given room by display name.
+
+    Returns (obj | None, suggestions: list[str]). If multiple matches exist, returns (None, suggestions).
+    Matching order: case-insensitive exact, prefix, substring.
+    """
+    if not room or not getattr(room, 'objects', None):
+        return None, []
+    try:
+        # Collect objects and their names
+        objs = list(room.objects.values())
+        target = (name_raw or "").strip()
+        tlow = target.lower()
+        if not tlow:
+            return None, []
+        # Exact (ci) matches
+        exact = [o for o in objs if getattr(o, 'display_name', '').lower() == tlow]
+        if len(exact) == 1:
+            return exact[0], []
+        if len(exact) > 1:
+            return None, [getattr(o, 'display_name', 'Unnamed') for o in exact]
+        # Prefix matches
+        pref = [o for o in objs if getattr(o, 'display_name', '').lower().startswith(tlow)]
+        if len(pref) == 1:
+            return pref[0], []
+        if len(pref) > 1:
+            return None, [getattr(o, 'display_name', 'Unnamed') for o in pref]
+        # Substring matches
+        subs = [o for o in objs if tlow in getattr(o, 'display_name', '').lower()]
+        if len(subs) == 1:
+            return subs[0], []
+        if len(subs) > 1:
+            return None, [getattr(o, 'display_name', 'Unnamed') for o in subs]
+        return None, []
+    except Exception:
+        return None, []
+
+
+def _format_object_summary(obj: Any, w: World) -> str:
+    """Return an attractive BBCode summary for an Object.
+
+    Omits any fields that are None/empty and keeps the prose coherent.
+    """
+    try:
+        # Title, with special color if this object is a Travel Point
+        name_disp = getattr(obj, 'display_name', 'Unnamed')
+        tags_set = set(getattr(obj, 'object_tags', []) or [])
+        if 'Travel Point' in tags_set:
+            title = f"[b][color=#FFA500]{name_disp}[/color][/b]"
+        else:
+            title = f"[b]{name_disp}[/b]"
+        lines: list[str] = [title]
+        desc = (getattr(obj, 'description', '') or '').strip()
+        if desc:
+            lines.append(desc)
+
+        # Build a compact details line with available attributes
+        details_bits: list[str] = []
+        material = getattr(obj, 'material_tag', None)
+        if material:
+            details_bits.append(f"Material: {material}")
+        quality = getattr(obj, 'quality', None)
+        if quality:
+            details_bits.append(f"Quality: {quality}")
+        durability = getattr(obj, 'durability', None)
+        if durability is not None:
+            details_bits.append(f"Durability: {durability}")
+        value = getattr(obj, 'value', None)
+        if value is not None:
+            details_bits.append(f"Value: {value} coin{'s' if int(value) != 1 else ''}")
+        # Tags (omit travel/meta defaults when noisy)
+        try:
+            tags = list(getattr(obj, 'object_tags', []) or [])
+            # filter duplicates and trivial formatting
+            tags = [str(t) for t in tags if t]
+            # keep order but unique
+            seen = set()
+            tags_u: list[str] = []
+            for t in tags:
+                if t not in seen:
+                    seen.add(t)
+                    tags_u.append(t)
+            if tags_u:
+                details_bits.append("Tags: " + ", ".join(tags_u))
+        except Exception:
+            pass
+
+        if details_bits:
+                lines.append("[i]" + " • ".join(details_bits) + "[/i]")
+
+        # Loot location hint (Object)
+        try:
+            llh = getattr(obj, 'loot_location_hint', None)
+            if llh is not None:
+                name = getattr(llh, 'display_name', None) or 'somewhere appropriate'
+                lines.append(f"Typically found at: {name}.")
+        except Exception:
+            pass
+
+        # Crafting / Deconstruct recipes
+        try:
+            craft = [getattr(o, 'display_name', 'Unnamed') for o in (getattr(obj, 'crafting_recipe', []) or []) if o]
+            if craft:
+                lines.append("Recipe: " + ", ".join(craft))
+        except Exception:
+            pass
+        try:
+            decon = [getattr(o, 'display_name', 'Unnamed') for o in (getattr(obj, 'deconstruct_recipe', []) or []) if o]
+            if decon:
+                lines.append("Deconstructs into: " + ", ".join(decon))
+        except Exception:
+            pass
+
+        # Travel link hint — include inline and ensure it's shown
+        try:
+            link = getattr(obj, 'link_target_room_id', None)
+            if link:
+                lines.append(f"This appears to lead to: {link}.")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+    except Exception:
+        # Fallback minimal dump
+        try:
+            return f"[b]{getattr(obj, 'display_name', 'Object')}[/b]"
+        except Exception:
+            return "An object."
 
 
 def _resolve_npcs_in_room(room: Room | None, requested: list[str]) -> list[str]:
@@ -885,6 +1062,246 @@ def handle_message(data):
                 emit('message', {'type': 'system', 'content': world.describe_room_for(sid)})
                 return
 
+        # Handle object template creation wizard if active for this sid
+        if sid and sid in object_template_sessions:
+            sid_str = cast(str, sid)
+            sess = object_template_sessions.get(sid_str, {"step": "template_key", "temp": {}})
+            step = sess.get("step")
+            temp = sess.get("temp", {})
+            text_stripped = player_message.strip()
+            text_lower2 = text_stripped.lower()
+            # Allow cancel
+            if text_lower2 in ("cancel",):
+                object_template_sessions.pop(sid_str, None)
+                emit('message', {'type': 'system', 'content': 'Object template creation cancelled.'})
+                return
+
+            def _ask_next(current: str) -> None:
+                sess['step'] = current
+                object_template_sessions[sid_str] = sess
+                prompts = {
+                    'template_key': "Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:",
+                    'display_name': "Enter display name (required), e.g., Bronze Sword:",
+                    'description': "Enter a short description (optional, Enter to skip):",
+                    'object_tags': "Enter comma-separated tags (optional; default: one-hand). Examples: weapon,cutting damage,one-hand:",
+                    'material_tag': "Enter material tag (optional), e.g., bronze (Enter to skip):",
+                    'value': "Enter value in coins (optional integer; Enter to skip):",
+                    'durability': "Enter durability (optional integer; Enter to skip):",
+                    'quality': "Enter quality (optional), e.g., average (Enter to skip):",
+                    'link_target_room_id': "If this is a travel point, enter a room id/name to link (supports 'here', fuzzy). Otherwise Enter to skip:",
+                    'link_to_object_uuid': "If this links to another object UUID, enter it (optional; Enter to skip):",
+                    'loot_location_hint': "Enter loot location hint as JSON object or a plain name (optional). Examples: {\"display_name\": \"Old Chest\"} or Old Chest. Enter to skip:",
+                    'crafting_recipe': "Enter crafting recipe as JSON array of objects or comma-separated names (optional). Examples: [{\"display_name\":\"Bronze Ingot\"}],Hammer or Enter to skip:",
+                    'deconstruct_recipe': "Enter deconstruct recipe as JSON array of objects or comma-separated names (optional). Enter to skip:",
+                    'confirm': "Type 'save' to save this template, or 'cancel' to abort.",
+                }
+                emit('message', {'type': 'system', 'content': prompts.get(current, '...')})
+
+            import json as _json
+            # Step handlers
+            if step == 'template_key':
+                key = re.sub(r"[^A-Za-z0-9_]+", "_", text_stripped)
+                if not key:
+                    emit('message', {'type': 'error', 'content': 'Template key cannot be empty.'})
+                    return
+                if key in getattr(world, 'object_templates', {}):
+                    emit('message', {'type': 'error', 'content': f"Template key '{key}' already exists. Choose another."})
+                    return
+                temp['key'] = key
+                sess['temp'] = temp
+                _ask_next('display_name')
+                return
+            if step == 'display_name':
+                name = text_stripped
+                if len(name) < 1:
+                    emit('message', {'type': 'error', 'content': 'Display name is required.'})
+                    return
+                temp['display_name'] = name
+                sess['temp'] = temp
+                _ask_next('description')
+                return
+            if step == 'description':
+                temp['description'] = text_stripped if text_stripped else ""
+                sess['temp'] = temp
+                _ask_next('object_tags')
+                return
+            if step == 'object_tags':
+                if text_stripped:
+                    tags = [t.strip() for t in text_stripped.split(',') if t.strip()]
+                else:
+                    tags = ['one-hand']
+                temp['object_tags'] = list(dict.fromkeys(tags))
+                sess['temp'] = temp
+                _ask_next('material_tag')
+                return
+            if step == 'material_tag':
+                temp['material_tag'] = text_stripped if text_stripped else None
+                sess['temp'] = temp
+                _ask_next('value')
+                return
+            if step == 'value':
+                if not text_stripped:
+                    temp['value'] = None
+                else:
+                    try:
+                        temp['value'] = int(text_stripped)
+                    except Exception:
+                        emit('message', {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        return
+                sess['temp'] = temp
+                _ask_next('durability')
+                return
+            if step == 'durability':
+                if not text_stripped:
+                    temp['durability'] = None
+                else:
+                    try:
+                        temp['durability'] = int(text_stripped)
+                    except Exception:
+                        emit('message', {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        return
+                sess['temp'] = temp
+                _ask_next('quality')
+                return
+            if step == 'quality':
+                temp['quality'] = text_stripped if text_stripped else None
+                sess['temp'] = temp
+                _ask_next('link_target_room_id')
+                return
+            if step == 'link_target_room_id':
+                if not text_stripped:
+                    temp['link_target_room_id'] = None
+                else:
+                    rok, rerr, rid = _resolve_room_id_fuzzy(sid, text_stripped)
+                    if not rok:
+                        emit('message', {'type': 'error', 'content': rerr or 'Unable to resolve room id. Try again or press Enter to skip.'})
+                        return
+                    temp['link_target_room_id'] = rid
+                sess['temp'] = temp
+                _ask_next('link_to_object_uuid')
+                return
+            if step == 'link_to_object_uuid':
+                temp['link_to_object_uuid'] = text_stripped if text_stripped else None
+                sess['temp'] = temp
+                _ask_next('loot_location_hint')
+                return
+            if step == 'loot_location_hint':
+                if not text_stripped:
+                    temp['loot_location_hint'] = None
+                else:
+                    odata = None
+                    try:
+                        parsed = _json.loads(text_stripped)
+                        if isinstance(parsed, dict):
+                            odata = parsed
+                        else:
+                            # Non-dict JSON: treat as simple name
+                            odata = {"display_name": str(parsed)}
+                    except Exception:
+                        # Not JSON: treat as a plain name
+                        odata = {"display_name": text_stripped}
+                    temp['loot_location_hint'] = odata
+                sess['temp'] = temp
+                _ask_next('crafting_recipe')
+                return
+            def _parse_recipe_input(s: str):
+                if not s:
+                    return []
+                try:
+                    parsed = _json.loads(s)
+                    if isinstance(parsed, list):
+                        # filter only dicts or scalars
+                        out = []
+                        for el in parsed:
+                            if isinstance(el, dict):
+                                out.append(el)
+                            elif isinstance(el, (str, int)):
+                                out.append({"display_name": str(el)})
+                        return out
+                    if isinstance(parsed, dict):
+                        return [parsed]
+                    # scalar -> single object
+                    return [{"display_name": str(parsed)}]
+                except Exception:
+                    # comma-separated names
+                    names = [p.strip() for p in s.split(',') if p.strip()]
+                    return [{"display_name": n} for n in names]
+
+            if step == 'crafting_recipe':
+                temp['crafting_recipe'] = _parse_recipe_input(text_stripped)
+                sess['temp'] = temp
+                _ask_next('deconstruct_recipe')
+                return
+            if step == 'deconstruct_recipe':
+                temp['deconstruct_recipe'] = _parse_recipe_input(text_stripped)
+                sess['temp'] = temp
+                # Show summary then confirm
+                try:
+                    preview = {
+                        'display_name': temp.get('display_name'),
+                        'description': temp.get('description', ''),
+                        'object_tag': temp.get('object_tags', ['one-hand']),
+                        'material_tag': temp.get('material_tag'),
+                        'value': temp.get('value'),
+                        'durability': temp.get('durability'),
+                        'quality': temp.get('quality'),
+                        'link_target_room_id': temp.get('link_target_room_id'),
+                        'link_to_object_uuid': temp.get('link_to_object_uuid'),
+                        'loot_location_hint': temp.get('loot_location_hint'),
+                        'crafting_recipe': temp.get('crafting_recipe', []),
+                        'deconstruct_recipe': temp.get('deconstruct_recipe', []),
+                    }
+                    raw = _json.dumps(preview, ensure_ascii=False, indent=2)
+                except Exception:
+                    raw = '(error building preview)'
+                emit('message', {'type': 'system', 'content': f"Preview of template object:\n{raw}"})
+                _ask_next('confirm')
+                return
+            if step == 'confirm':
+                if text_lower2 not in ('save', 'y', 'yes'):
+                    emit('message', {'type': 'system', 'content': "Not saved. Type 'save' to save or 'cancel' to abort."})
+                    return
+                # Build Object from collected data
+                try:
+                    from world import Object as _Obj
+                    key = temp.get('key')
+                    if not key:
+                        raise ValueError('Missing template key')
+                    # Build nested items
+                    llh_dict = temp.get('loot_location_hint')
+                    crafting_list = temp.get('crafting_recipe', [])
+                    decon_list = temp.get('deconstruct_recipe', [])
+                    llh_obj = _Obj.from_dict(llh_dict) if llh_dict else None
+                    craft_objs = [_Obj.from_dict(o) for o in crafting_list]
+                    decon_objs = [_Obj.from_dict(o) for o in decon_list]
+                    obj = _Obj(
+                        display_name=temp.get('display_name'),
+                        description=temp.get('description', ''),
+                        object_tags=set(temp.get('object_tags', ['one-hand'])),
+                        material_tag=temp.get('material_tag'),
+                        value=temp.get('value'),
+                        loot_location_hint=llh_obj,
+                        durability=temp.get('durability'),
+                        quality=temp.get('quality'),
+                        crafting_recipe=craft_objs,
+                        deconstruct_recipe=decon_objs,
+                        link_target_room_id=temp.get('link_target_room_id'),
+                        link_to_object_uuid=temp.get('link_to_object_uuid'),
+                    )
+                    # Save into world templates
+                    if not hasattr(world, 'object_templates'):
+                        world.object_templates = {}
+                    world.object_templates[key] = obj
+                    try:
+                        world.save_to_file(STATE_PATH)
+                    except Exception:
+                        pass
+                    object_template_sessions.pop(sid_str, None)
+                    emit('message', {'type': 'system', 'content': f"Saved object template '{key}'."})
+                    return
+                except Exception as e:
+                    emit('message', {'type': 'error', 'content': f'Failed to save template: {e}'})
+                    return
         # Route slash commands to the command handler (includes auth)
         if player_message.strip().startswith("/"):
             sid = get_sid()
@@ -1112,6 +1529,14 @@ def handle_message(data):
                         pass
                     rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
                     emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
+                    return
+                # Try Objects in room
+                obj, suggestions = _resolve_object_in_room(room, name_raw)
+                if obj is not None:
+                    emit('message', {'type': 'system', 'content': _format_object_summary(obj, world)})
+                    return
+                if suggestions:
+                    emit('message', {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
                     return
                 emit('message', {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
                 return
@@ -1458,6 +1883,14 @@ def handle_command(sid: str | None, text: str) -> None:
                 rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
                 emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
                 return
+            # Try Objects
+            obj, suggestions = _resolve_object_in_room(room, name)
+            if obj is not None:
+                emit('message', {'type': 'system', 'content': _format_object_summary(obj, world)})
+                return
+            if suggestions:
+                emit('message', {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
+                return
             emit('message', {'type': 'system', 'content': f"You don't see '{name}' here."})
             return
         # Otherwise, unrecognized look usage
@@ -1743,7 +2176,7 @@ def handle_command(sid: str | None, text: str) -> None:
         return
 
     # Admin-only commands below
-    admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring', 'safety'}
+    admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring', 'safety', 'object'}
     if cmd in admin_only_cmds and sid not in admins:
         emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
         return
@@ -1943,6 +2376,161 @@ def handle_command(sid: str | None, text: str) -> None:
         world_setup_sessions[sid] = {"step": "world_name", "temp": {}}
         emit('message', {'type': 'system', 'content': 'Let\'s set up your world! What\'s the name of this world?'})
         return
+
+    # /object commands (admin)
+    if cmd == 'object':
+        if sid is None:
+            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            return
+        if not args:
+            emit('message', {'type': 'system', 'content': 'Usage: /object <createtemplateobject | createobject <room> | <name> | <desc> | <tags or template_key> | listtemplates | viewtemplate <key> | deletetemplate <key>>'})
+            return
+        sub = args[0].lower()
+        # create simple object in current room or from template
+        if sub == 'createobject':
+            # Must be a logged-in player to place in a room
+            if sid not in world.players:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first to create objects.'})
+                return
+            # Parse: <room> | <display name> | <description> | <tags csv> OR <template_key>
+            try:
+                joined = " ".join(args[1:])
+                p_room, p_name, p_desc, p_third = _pipe_parts(joined, expected=4)
+            except Exception:
+                emit('message', {'type': 'error', 'content': 'Usage: /object createobject <room> | <display name> | <description> | <tags or template_key>'})
+                return
+            name = _strip_quotes(p_name or "").strip()
+            desc = _strip_quotes(p_desc or "").strip()
+            third = (p_third or "").strip()
+            if not name:
+                emit('message', {'type': 'error', 'content': 'Display name required.'})
+                return
+            # Resolve room: supports 'here' alias and fuzzy room id
+            room_input = _strip_quotes(p_room or "").strip()
+            rok, rerr, rid = _resolve_room_id_fuzzy(sid, room_input or 'here')
+            if not rok or not rid:
+                emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
+                return
+            room = world.rooms.get(rid)
+            if not room:
+                emit('message', {'type': 'error', 'content': 'Room not found.'})
+                return
+            from world import Object as _Obj
+            new_obj: _Obj
+            used_template = False
+            # If the third part matches a template key, clone that template
+            tpl_store = getattr(world, 'object_templates', {}) or {}
+            template_key = None
+            if third:
+                # Prefer exact key match first (case-sensitive), else case-insensitive key match
+                if third in tpl_store:
+                    template_key = third
+                else:
+                    for k in tpl_store.keys():
+                        if k.lower() == third.lower():
+                            template_key = k
+                            break
+            if template_key:
+                base = tpl_store.get(template_key)
+                if not base:
+                    emit('message', {'type': 'error', 'content': f"Template '{third}' not found."})
+                    return
+                # Clone by dict round-trip, then override
+                try:
+                    base_dict = base.to_dict()
+                    new_obj = _Obj.from_dict(base_dict)
+                except Exception:
+                    # Fallback shallow clone
+                    new_obj = _Obj(
+                        display_name=base.display_name,
+                        description=base.description,
+                        object_tags=set(base.object_tags or set()),
+                        material_tag=base.material_tag,
+                        value=base.value,
+                        loot_location_hint=base.loot_location_hint,
+                        durability=base.durability,
+                        quality=base.quality,
+                        crafting_recipe=list(base.crafting_recipe or []),
+                        deconstruct_recipe=list(base.deconstruct_recipe or []),
+                        link_target_room_id=base.link_target_room_id,
+                        link_to_object_uuid=base.link_to_object_uuid,
+                    )
+                # Always assign a fresh UUID for the new instance
+                new_obj.uuid = str(__import__('uuid').uuid4())
+                # Override name/desc
+                new_obj.display_name = name
+                new_obj.description = desc
+                used_template = True
+            else:
+                # Treat third as a CSV of tags
+                tags = [t.strip() for t in third.split(',') if t.strip()] if third else ['one-hand']
+                # Normalize: ensure duplicates removed
+                tags = list(dict.fromkeys(tags))
+                new_obj = _Obj(display_name=name, description=desc, object_tags=set(tags))
+            # Place object in room unless it's a travel point (Travel Point objects are immovable fixtures)
+            try:
+                room.objects[new_obj.uuid] = new_obj
+                world.save_to_file(STATE_PATH)
+            except Exception:
+                pass
+            # Feedback
+            how = f"from template '{template_key}'" if used_template and template_key else ""
+            where = rid
+            emit('message', {'type': 'system', 'content': f"Created object '{new_obj.display_name}' {how} in room {where}."})
+            return
+        # create wizard
+        if sub == 'createtemplateobject':
+            sid_str = cast(str, sid)
+            object_template_sessions[sid_str] = {"step": "template_key", "temp": {}}
+            emit('message', {'type': 'system', 'content': 'Creating a new Object template. Type cancel to abort at any time.'})
+            emit('message', {'type': 'system', 'content': 'Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:'})
+            return
+        # list templates
+        if sub == 'listtemplates':
+            templates = list(getattr(world, 'object_templates', {}) or {})
+            if not templates:
+                emit('message', {'type': 'system', 'content': 'No object templates saved.'})
+            else:
+                emit('message', {'type': 'system', 'content': 'Object templates: ' + ", ".join(sorted(templates))})
+            return
+        # view template <key>
+        if sub == 'viewtemplate':
+            if len(args) < 2:
+                emit('message', {'type': 'error', 'content': 'Usage: /object viewtemplate <key>'})
+                return
+            key = args[1]
+            obj = (getattr(world, 'object_templates', {}) or {}).get(key)
+            if not obj:
+                emit('message', {'type': 'error', 'content': f"Template '{key}' not found."})
+                return
+            try:
+                import json
+                raw = json.dumps(obj.to_dict(), ensure_ascii=False, indent=2)
+            except Exception:
+                raw = str(obj.to_dict())
+            emit('message', {'type': 'system', 'content': f"[b]{key}[/b]\n{raw}"})
+            return
+        # delete template <key>
+        if sub == 'deletetemplate':
+            if len(args) < 2:
+                emit('message', {'type': 'error', 'content': 'Usage: /object deletetemplate <key>'})
+                return
+            key = args[1]
+            store = getattr(world, 'object_templates', {})
+            if key not in store:
+                emit('message', {'type': 'error', 'content': f"Template '{key}' not found."})
+                return
+            try:
+                del store[key]
+                world.save_to_file(STATE_PATH)
+                emit('message', {'type': 'system', 'content': f"Deleted template '{key}'."})
+            except Exception as e:
+                emit('message', {'type': 'error', 'content': f"Failed to delete template: {e}"})
+            return
+        emit('message', {'type': 'error', 'content': 'Unknown /object subcommand. Use createobject, createtemplateobject, listtemplates, viewtemplate, or deletetemplate.'})
+        return
+
+    # (Removed duplicate /object handler)
 
     # /room commands (admin)
     if cmd == 'room':

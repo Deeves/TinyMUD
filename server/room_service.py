@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import List, Tuple, Optional, TYPE_CHECKING
 import uuid
 
-from world import Room
+from world import Room, Object
 if TYPE_CHECKING:
     from world import World
 from id_parse_utils import (
@@ -177,7 +177,22 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
                 world.start_room_id = new_id
         except Exception:
             pass
-        # 4) Remap the world.rooms key and update the room object's id
+        # 4) Update any Object link targets in all rooms that point to old_id -> new_id
+        try:
+            for r in list(world.rooms.values()):
+                try:
+                    for _oid, obj in (getattr(r, 'objects', {}) or {}).items():
+                        try:
+                            if getattr(obj, 'link_target_room_id', None) == old_id:
+                                obj.link_target_room_id = new_id
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 5) Remap the world.rooms key and update the room object's id
         try:
             # Preserve current players set on the object; just change its id field
             world.rooms.pop(old_id, None)
@@ -224,6 +239,24 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         try:
             if door_name not in room.door_ids:
                 room.door_ids[door_name] = str(uuid.uuid4())
+            # Ensure matching Object exists/updated
+            oid = room.door_ids.get(door_name)
+            if oid:
+                if oid not in room.objects:
+                    desc = f"A doorway named '{door_name}'."
+                    obj = Object(
+                        display_name=door_name,
+                        description=desc,
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=target_room,
+                    )
+                    obj.uuid = oid
+                    room.objects[oid] = obj
+                else:
+                    o = room.objects[oid]
+                    o.display_name = door_name
+                    o.object_tags = set(o.object_tags or set()) | {"Immovable", "Travel Point"}
+                    o.link_target_room_id = target_room
         except Exception:
             pass
 
@@ -248,6 +281,24 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             try:
                 if back_name not in tgt.door_ids:
                     tgt.door_ids[back_name] = str(uuid.uuid4())
+                # Ensure matching Object for back link
+                boid = tgt.door_ids.get(back_name)
+                if boid:
+                    if boid not in tgt.objects:
+                        desc = f"A doorway named '{back_name}'."
+                        obj = Object(
+                            display_name=back_name,
+                            description=desc,
+                            object_tags={"Immovable", "Travel Point"},
+                            link_target_room_id=room_id,
+                        )
+                        obj.uuid = boid
+                        tgt.objects[boid] = obj
+                    else:
+                        o2 = tgt.objects[boid]
+                        o2.display_name = back_name
+                        o2.object_tags = set(o2.object_tags or set()) | {"Immovable", "Travel Point"}
+                        o2.link_target_room_id = room_id
             except Exception:
                 pass
             emits.append({'type': 'system', 'content': f"Linked door '{door_name}' in '{room_id_res}' <-> '{back_name}' in '{target_room}'."})
@@ -280,9 +331,21 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         okd, derr, resolved = _resolve_door_name(room, door_name)
         if not okd or not resolved:
             return True, (derr or f"Door '{door_name}' not found in room '{room_id}'."), emits
+        # Capture object id before removal
+        oid = None
+        try:
+            oid = room.door_ids.get(resolved)
+        except Exception:
+            oid = None
         room.doors.pop(resolved, None)
         try:
             room.door_ids.pop(resolved, None)
+        except Exception:
+            pass
+        # Remove matching Object if present
+        try:
+            if oid and oid in room.objects:
+                room.objects.pop(oid, None)
         except Exception:
             pass
         _save_silent(world, state_path)
@@ -323,14 +386,54 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         room.stairs_down_to = _norm_stairs(down_str)
         # Maintain stairs ids according to presence
         try:
+            # IDs maintenance
             if room.stairs_up_to and not room.stairs_up_id:
                 room.stairs_up_id = str(uuid.uuid4())
             if not room.stairs_up_to:
+                # remove object if existed
+                if room.stairs_up_id and room.stairs_up_id in room.objects:
+                    room.objects.pop(room.stairs_up_id, None)
                 room.stairs_up_id = None
             if room.stairs_down_to and not room.stairs_down_id:
                 room.stairs_down_id = str(uuid.uuid4())
             if not room.stairs_down_to:
+                if room.stairs_down_id and room.stairs_down_id in room.objects:
+                    room.objects.pop(room.stairs_down_id, None)
                 room.stairs_down_id = None
+
+            # Ensure Objects for present stairs
+            if room.stairs_up_to and room.stairs_up_id:
+                oid_u = room.stairs_up_id
+                if oid_u not in room.objects:
+                    obj_u = Object(
+                        display_name="stairs up",
+                        description="A staircase leading up.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room.stairs_up_to,
+                    )
+                    obj_u.uuid = oid_u
+                    room.objects[oid_u] = obj_u
+                else:
+                    ou = room.objects[oid_u]
+                    ou.display_name = "stairs up"
+                    ou.object_tags = set(ou.object_tags or set()) | {"Immovable", "Travel Point"}
+                    ou.link_target_room_id = room.stairs_up_to
+            if room.stairs_down_to and room.stairs_down_id:
+                oid_d = room.stairs_down_id
+                if oid_d not in room.objects:
+                    obj_d = Object(
+                        display_name="stairs down",
+                        description="A staircase leading down.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room.stairs_down_to,
+                    )
+                    obj_d.uuid = oid_d
+                    room.objects[oid_d] = obj_d
+                else:
+                    od = room.objects[oid_d]
+                    od.display_name = "stairs down"
+                    od.object_tags = set(od.object_tags or set()) | {"Immovable", "Travel Point"}
+                    od.link_target_room_id = room.stairs_down_to
         except Exception:
             pass
         _save_silent(world, state_path)
@@ -368,12 +471,44 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             return True, 'Both rooms must exist.', emits
         ra.doors[door_a] = room_b_res
         rb.doors[door_b] = room_a_res
-        # Ensure door ids on both sides
+        # Ensure door ids on both sides and matching Objects
         try:
             if door_a not in ra.door_ids:
                 ra.door_ids[door_a] = str(uuid.uuid4())
+            oid_a = ra.door_ids.get(door_a)
+            if oid_a:
+                if oid_a not in ra.objects:
+                    obj_a = Object(
+                        display_name=door_a,
+                        description=f"A doorway named '{door_a}'.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room_b_res,
+                    )
+                    obj_a.uuid = oid_a
+                    ra.objects[oid_a] = obj_a
+                else:
+                    oa = ra.objects[oid_a]
+                    oa.display_name = door_a
+                    oa.object_tags = set(oa.object_tags or set()) | {"Immovable", "Travel Point"}
+                    oa.link_target_room_id = room_b_res
             if door_b not in rb.door_ids:
                 rb.door_ids[door_b] = str(uuid.uuid4())
+            oid_b = rb.door_ids.get(door_b)
+            if oid_b:
+                if oid_b not in rb.objects:
+                    obj_b = Object(
+                        display_name=door_b,
+                        description=f"A doorway named '{door_b}'.",
+                        object_tags={"Immovable", "Travel Point"},
+                        link_target_room_id=room_a_res,
+                    )
+                    obj_b.uuid = oid_b
+                    rb.objects[oid_b] = obj_b
+                else:
+                    ob = rb.objects[oid_b]
+                    ob.display_name = door_b
+                    ob.object_tags = set(ob.object_tags or set()) | {"Immovable", "Travel Point"}
+                    ob.link_target_room_id = room_a_res
         except Exception:
             pass
         _save_silent(world, state_path)
@@ -413,12 +548,45 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         if d == 'up':
             ra.stairs_up_to = room_b_res
             rb.stairs_down_to = room_a_res
-            # ids
+            # ids and Objects
             try:
                 if not ra.stairs_up_id:
                     ra.stairs_up_id = str(uuid.uuid4())
                 if not rb.stairs_down_id:
                     rb.stairs_down_id = str(uuid.uuid4())
+                # Ensure objects
+                if ra.stairs_up_id:
+                    oid_u = ra.stairs_up_id
+                    if oid_u not in ra.objects:
+                        obj_u = Object(
+                            display_name="stairs up",
+                            description="A staircase leading up.",
+                            object_tags={"Immovable", "Travel Point"},
+                            link_target_room_id=room_b_res,
+                        )
+                        obj_u.uuid = oid_u
+                        ra.objects[oid_u] = obj_u
+                    else:
+                        ou = ra.objects[oid_u]
+                        ou.display_name = "stairs up"
+                        ou.object_tags = set(ou.object_tags or set()) | {"Immovable", "Travel Point"}
+                        ou.link_target_room_id = room_b_res
+                if rb.stairs_down_id:
+                    oid_d = rb.stairs_down_id
+                    if oid_d not in rb.objects:
+                        obj_d = Object(
+                            display_name="stairs down",
+                            description="A staircase leading down.",
+                            object_tags={"Immovable", "Travel Point"},
+                            link_target_room_id=room_a_res,
+                        )
+                        obj_d.uuid = oid_d
+                        rb.objects[oid_d] = obj_d
+                    else:
+                        od = rb.objects[oid_d]
+                        od.display_name = "stairs down"
+                        od.object_tags = set(od.object_tags or set()) | {"Immovable", "Travel Point"}
+                        od.link_target_room_id = room_a_res
             except Exception:
                 pass
         else:
@@ -429,6 +597,39 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
                     ra.stairs_down_id = str(uuid.uuid4())
                 if not rb.stairs_up_id:
                     rb.stairs_up_id = str(uuid.uuid4())
+                # Ensure objects
+                if ra.stairs_down_id:
+                    oid_d = ra.stairs_down_id
+                    if oid_d not in ra.objects:
+                        obj_d = Object(
+                            display_name="stairs down",
+                            description="A staircase leading down.",
+                            object_tags={"Immovable", "Travel Point"},
+                            link_target_room_id=room_b_res,
+                        )
+                        obj_d.uuid = oid_d
+                        ra.objects[oid_d] = obj_d
+                    else:
+                        od = ra.objects[oid_d]
+                        od.display_name = "stairs down"
+                        od.object_tags = set(od.object_tags or set()) | {"Immovable", "Travel Point"}
+                        od.link_target_room_id = room_b_res
+                if rb.stairs_up_id:
+                    oid_u = rb.stairs_up_id
+                    if oid_u not in rb.objects:
+                        obj_u = Object(
+                            display_name="stairs up",
+                            description="A staircase leading up.",
+                            object_tags={"Immovable", "Travel Point"},
+                            link_target_room_id=room_a_res,
+                        )
+                        obj_u.uuid = oid_u
+                        rb.objects[oid_u] = obj_u
+                    else:
+                        ou = rb.objects[oid_u]
+                        ou.display_name = "stairs up"
+                        ou.object_tags = set(ou.object_tags or set()) | {"Immovable", "Travel Point"}
+                        ou.link_target_room_id = room_a_res
             except Exception:
                 pass
         _save_silent(world, state_path)

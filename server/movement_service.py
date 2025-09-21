@@ -7,19 +7,19 @@ emits (to send back to the acting player) and broadcasts (to notify others).
 from __future__ import annotations
 
 from typing import List, Tuple, TYPE_CHECKING
-from id_parse_utils import resolve_door_name
+from id_parse_utils import resolve_door_name, fuzzy_resolve
 
 if TYPE_CHECKING:  # import only for typing to avoid runtime cycles
     from world import World, Room
 
 
 def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
-    """Move through a named door in the player's current room.
+    """Move through a named door or any Travel Point object in the player's current room.
 
     Contract:
     - Inputs: world (World), sid (str), door_name (str)
     - Output: (ok, err, emits, broadcasts)
-    - Errors: returns (False, message, [], []) on invalid player/room/door
+    - Errors: returns (False, message, [], []) on invalid player/room/door/object
     """
     assert isinstance(sid, str) and sid != "", "sid must be a non-empty string"
     assert isinstance(door_name, str), "door_name must be a string"
@@ -42,20 +42,78 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
             break
 
     if not name_in:
-        if len(room.doors) == 1:
-            name_in = next(iter(room.doors.keys()))
+        # Consider both doors and travel point objects
+        candidates: List[str] = []
+        try:
+            doors_map = getattr(room, 'doors', {}) or {}
+            candidates.extend(list(doors_map.keys()))
+        except Exception:
+            pass
+        try:
+            for _oid, obj in (getattr(room, 'objects', {}) or {}).items():
+                try:
+                    if 'Travel Point' in (obj.object_tags or set()):
+                        dn = (getattr(obj, 'display_name', None) or '').strip()
+                        if dn:
+                            candidates.append(dn)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        uniq = sorted(set(candidates))
+        if len(uniq) == 1:
+            name_in = uniq[0]
         else:
-            return False, 'Specify a door name: move through <door name>', emits, broadcasts
+            return False, "Specify a door or travel point name: move through <name>", emits, broadcasts
 
+    # 1) Try standard named doors first
     ok_res, err_res, resolved_door = resolve_door_name(room, name_in)
-    if not ok_res or not resolved_door:
-        return False, (err_res or f"No door named '{door_name}' here."), emits, broadcasts
-    name_in = resolved_door
-    target = room.doors.get(resolved_door)
-    if target not in world.rooms:
-        return False, f"Door '{name_in}' is linked to unknown room '{target}'.", emits, broadcasts
+    target = None
+    resolved_is_object = False
+    if ok_res and resolved_door:
+        name_in = resolved_door
+        target = room.doors.get(resolved_door)
+        if target not in world.rooms:
+            return False, f"Door '{name_in}' is linked to unknown room '{target}'.", emits, broadcasts
+    else:
+        # 2) Fall back to Travel Point objects in the room (by display_name)
+        # Collect candidates: any room.objects with tag 'Travel Point'
+        tp_name_to_ids: dict[str, List[str]] = {}
+        try:
+            for oid, obj in (getattr(room, 'objects', {}) or {}).items():
+                try:
+                    tags = set(obj.object_tags or [])
+                except Exception:
+                    tags = set()
+                if 'Travel Point' in tags:
+                    dn = (getattr(obj, 'display_name', None) or '').strip()
+                    if not dn:
+                        continue
+                    tp_name_to_ids.setdefault(dn, []).append(oid)
+        except Exception:
+            tp_name_to_ids = {}
+        tp_names = list(tp_name_to_ids.keys())
+        if tp_names:
+            ok_tp, err_tp, resolved_tp = fuzzy_resolve(name_in, tp_names)
+            if ok_tp and resolved_tp:
+                name_in = resolved_tp
+                # choose the first matching object id
+                oid = tp_name_to_ids[resolved_tp][0]
+                obj = room.objects.get(oid)
+                target = getattr(obj, 'link_target_room_id', None)
+                if not target:
+                    return False, f"The {name_in} doesn't lead anywhere.", emits, broadcasts
+                if target not in world.rooms:
+                    return False, f"Travel point '{name_in}' leads to unknown room '{target}'.", emits, broadcasts
+                resolved_is_object = True
+            else:
+                # Neither door nor travel point resolved
+                return False, (err_res or err_tp or f"No door or travel point named '{door_name}' here."), emits, broadcasts
+        else:
+            # No travel points in room; propagate prior door error/message
+            return False, (err_res or f"No door named '{door_name}' here."), emits, broadcasts
 
-    # Enforce optional door locks
+    # Enforce optional locks (by name) for both doors and travel point objects
     try:
         locks = getattr(room, 'door_locks', {}) or {}
         policy = locks.get(name_in)
