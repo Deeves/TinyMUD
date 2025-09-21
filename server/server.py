@@ -84,6 +84,7 @@ except Exception:
 from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
 from world import World, CharacterSheet, Room, User
+from look_service import format_look as _format_look, resolve_object_in_room as _resolve_object_in_room, format_object_summary as _format_object_summary
 from account_service import create_account_and_login, login_existing
 from movement_service import move_through_door, move_stairs, teleport_player
 from room_service import handle_room_command
@@ -103,6 +104,14 @@ from admin_service import (
 from ascii_art import ASCII_ART
 from security_utils import redact_sensitive
 from dice_utils import roll as dice_roll, DiceParseError as DiceError
+from object_service import (
+    create_object as _obj_create,
+    list_templates as _obj_list_templates,
+    view_template as _obj_view_template,
+    delete_template as _obj_delete_template,
+)
+from setup_service import begin_setup as _setup_begin, handle_setup_input as _setup_handle
+from auth_wizard_service import handle_interactive_auth as _auth_handle
 
 
 def _print_command_help() -> None:
@@ -395,227 +404,8 @@ def broadcast_to_room(room_id: str, payload: dict, exclude_sid: str | None = Non
 
 
 
-def _format_look(w: World, sid: str | None) -> str:
-    """Return a formatted room description:
-    'You are in <room_id>. <room_description>\n<lists of players, NPCs, and objects>'
-    Objects include doors and stairs currently present in the room.
-    """
-    if sid is None or sid not in w.players:
-        return "You are in the backrooms. How did you get here? try /teleport to escape."
-    try:
-        player = w.players.get(sid)
-        if not player:
-            return "You are in the backrooms. How did you get here? try /teleport to escape."
-        room = w.rooms.get(player.room_id)
-        if not room:
-            return "You are in the backrooms. How did you get here? try /teleport to escape."
-
-        lines: list[str] = []
-        room_desc = (room.description or "").strip()
-        lines.append(f"You are in {room.id}. {room_desc}")
-
-        bits: list[str] = []
-        TRAVEL_COLOR = "#FFA500"  # orange for travel points
-        # Other players (exclude viewer)
-        try:
-            other_sids = [psid for psid in room.players if psid != sid]
-            other_names = [w.players[psid].sheet.display_name for psid in other_sids if psid in w.players]
-            if other_names:
-                bits.append("Players: " + ", ".join(sorted(other_names)))
-        except Exception:
-            pass
-
-        # NPCs present
-        try:
-            if getattr(room, 'npcs', None) and room.npcs:
-                bits.append("NPCs: " + ", ".join(sorted(room.npcs)))
-        except Exception:
-            pass
-
-        # Objects present (including fixed fixtures and items)
-        try:
-            tp_names: list[str] = []
-            obj_names: list[str] = []
-            # Prefer canonical objects if available
-            vals = list(room.objects.values()) if isinstance(room.objects, dict) else []
-            if vals:
-                for o in vals:
-                    try:
-                        name = getattr(o, 'display_name', None)
-                        if not name:
-                            continue
-                        tags = set(getattr(o, 'object_tags', []) or [])
-                        if 'Travel Point' in tags:
-                            tp_names.append(f"[color={TRAVEL_COLOR}]{str(name)}[/color]")
-                        else:
-                            obj_names.append(str(name))
-                    except Exception:
-                        continue
-            else:
-                # Fallback to doors/stairs only as travel points
-                if getattr(room, 'doors', None):
-                    for dname in sorted(room.doors.keys()):
-                        tp_names.append(f"[color={TRAVEL_COLOR}]{dname}[/color]")
-                if getattr(room, 'stairs_up_to', None):
-                    tp_names.append(f"[color={TRAVEL_COLOR}]stairs up[/color]")
-                if getattr(room, 'stairs_down_to', None):
-                    tp_names.append(f"[color={TRAVEL_COLOR}]stairs down[/color]")
-            # De-duplicate and sort for stable output
-            def _unique_sorted(lst: list[str]) -> list[str]:
-                seen = {}
-                for x in lst:
-                    if x not in seen:
-                        seen[x] = True
-                return sorted(seen.keys(), key=lambda s: s.lower())
-            tp_names = _unique_sorted(tp_names)
-            obj_names = _unique_sorted(obj_names)
-            if tp_names:
-                bits.append("Travel Points: " + ", ".join(tp_names))
-            if obj_names:
-                bits.append("Objects: " + ", ".join(obj_names))
-        except Exception:
-            pass
-
-        if bits:
-            lines.append("; ".join(bits))
-
-        return "\n".join(lines)
-    except Exception:
-        # Fall back to existing world description on any unexpected error
-        try:
-            return w.describe_room_for(sid)
-        except Exception:
-            return "You are nowhere."
-
-
-def _resolve_object_in_room(room: Room | None, name_raw: str):
-    """Fuzzy-resolve an Object in the given room by display name.
-
-    Returns (obj | None, suggestions: list[str]). If multiple matches exist, returns (None, suggestions).
-    Matching order: case-insensitive exact, prefix, substring.
-    """
-    if not room or not getattr(room, 'objects', None):
-        return None, []
-    try:
-        # Collect objects and their names
-        objs = list(room.objects.values())
-        target = (name_raw or "").strip()
-        tlow = target.lower()
-        if not tlow:
-            return None, []
-        # Exact (ci) matches
-        exact = [o for o in objs if getattr(o, 'display_name', '').lower() == tlow]
-        if len(exact) == 1:
-            return exact[0], []
-        if len(exact) > 1:
-            return None, [getattr(o, 'display_name', 'Unnamed') for o in exact]
-        # Prefix matches
-        pref = [o for o in objs if getattr(o, 'display_name', '').lower().startswith(tlow)]
-        if len(pref) == 1:
-            return pref[0], []
-        if len(pref) > 1:
-            return None, [getattr(o, 'display_name', 'Unnamed') for o in pref]
-        # Substring matches
-        subs = [o for o in objs if tlow in getattr(o, 'display_name', '').lower()]
-        if len(subs) == 1:
-            return subs[0], []
-        if len(subs) > 1:
-            return None, [getattr(o, 'display_name', 'Unnamed') for o in subs]
-        return None, []
-    except Exception:
-        return None, []
-
-
-def _format_object_summary(obj: Any, w: World) -> str:
-    """Return an attractive BBCode summary for an Object.
-
-    Omits any fields that are None/empty and keeps the prose coherent.
-    """
-    try:
-        # Title, with special color if this object is a Travel Point
-        name_disp = getattr(obj, 'display_name', 'Unnamed')
-        tags_set = set(getattr(obj, 'object_tags', []) or [])
-        if 'Travel Point' in tags_set:
-            title = f"[b][color=#FFA500]{name_disp}[/color][/b]"
-        else:
-            title = f"[b]{name_disp}[/b]"
-        lines: list[str] = [title]
-        desc = (getattr(obj, 'description', '') or '').strip()
-        if desc:
-            lines.append(desc)
-
-        # Build a compact details line with available attributes
-        details_bits: list[str] = []
-        material = getattr(obj, 'material_tag', None)
-        if material:
-            details_bits.append(f"Material: {material}")
-        quality = getattr(obj, 'quality', None)
-        if quality:
-            details_bits.append(f"Quality: {quality}")
-        durability = getattr(obj, 'durability', None)
-        if durability is not None:
-            details_bits.append(f"Durability: {durability}")
-        value = getattr(obj, 'value', None)
-        if value is not None:
-            details_bits.append(f"Value: {value} coin{'s' if int(value) != 1 else ''}")
-        # Tags (omit travel/meta defaults when noisy)
-        try:
-            tags = list(getattr(obj, 'object_tags', []) or [])
-            # filter duplicates and trivial formatting
-            tags = [str(t) for t in tags if t]
-            # keep order but unique
-            seen = set()
-            tags_u: list[str] = []
-            for t in tags:
-                if t not in seen:
-                    seen.add(t)
-                    tags_u.append(t)
-            if tags_u:
-                details_bits.append("Tags: " + ", ".join(tags_u))
-        except Exception:
-            pass
-
-        if details_bits:
-                lines.append("[i]" + " • ".join(details_bits) + "[/i]")
-
-        # Loot location hint (Object)
-        try:
-            llh = getattr(obj, 'loot_location_hint', None)
-            if llh is not None:
-                name = getattr(llh, 'display_name', None) or 'somewhere appropriate'
-                lines.append(f"Typically found at: {name}.")
-        except Exception:
-            pass
-
-        # Crafting / Deconstruct recipes
-        try:
-            craft = [getattr(o, 'display_name', 'Unnamed') for o in (getattr(obj, 'crafting_recipe', []) or []) if o]
-            if craft:
-                lines.append("Recipe: " + ", ".join(craft))
-        except Exception:
-            pass
-        try:
-            decon = [getattr(o, 'display_name', 'Unnamed') for o in (getattr(obj, 'deconstruct_recipe', []) or []) if o]
-            if decon:
-                lines.append("Deconstructs into: " + ", ".join(decon))
-        except Exception:
-            pass
-
-        # Travel link hint — include inline and ensure it's shown
-        try:
-            link = getattr(obj, 'link_target_room_id', None)
-            if link:
-                lines.append(f"This appears to lead to: {link}.")
-        except Exception:
-            pass
-
-        return "\n".join(lines)
-    except Exception:
-        # Fallback minimal dump
-        try:
-            return f"[b]{getattr(obj, 'display_name', 'Object')}[/b]"
-        except Exception:
-            return "An object."
+## The original helpers for look/object summaries were moved to look_service.
+## Importing them above keeps server.py lean while preserving behavior.
 
 
 def _resolve_npcs_in_room(room: Room | None, requested: list[str]) -> list[str]:
@@ -905,161 +695,12 @@ def handle_message(data):
             else:
                 emit('message', {'type': 'system', 'content': "Please confirm with 'Y' to proceed or 'N' to cancel."})
                 return
-        # Handle world setup wizard if active for this sid
+        # Handle world setup wizard if active for this sid (delegated to setup_service)
         if sid and sid in world_setup_sessions:
-            sess = world_setup_sessions.get(sid, {"step": "world_name", "temp": {}})
-            step = sess.get("step")
-            temp = sess.get("temp", {})
-            # Allow cancel/back within wizard
-            if text_lower in ("cancel", "back"):
-                world_setup_sessions.pop(sid, None)
-                emit('message', {'type': 'system', 'content': 'Setup cancelled. Use /setup to restart if needed.'})
-                return
-            if step == 'world_name':
-                name = player_message.strip()
-                if len(name) < 2 or len(name) > 64:
-                    emit('message', {'type': 'error', 'content': 'World name must be 2-64 characters.'})
-                    return
-                world.world_name = name
-                sess['step'] = 'world_description'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': 'Describe the world in 1-3 sentences:'})
-                return
-            if step == 'world_description':
-                desc = player_message.strip()
-                if len(desc) < 10:
-                    emit('message', {'type': 'error', 'content': 'Please add a bit more detail (>= 10 chars).'} )
-                    return
-                world.world_description = desc
-                sess['step'] = 'world_conflict'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': 'Describe the main conflict of this world:'})
-                return
-            if step == 'world_conflict':
-                conflict = player_message.strip()
-                if len(conflict) < 5:
-                    emit('message', {'type': 'error', 'content': 'Please provide a short conflict summary (>= 5 chars).'} )
-                    return
-                world.world_conflict = conflict
-                # Ask for roleplay comfort/safety setting next
-                sess['step'] = 'safety_level'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': (
-                    "What type of roleplay are you and your group comfortable with?\n"
-                    "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
-                    "You can type: G, PG-13, R, or OFF."
-                )})
-                return
-            if step == 'safety_level':
-                level_raw = player_message.strip().upper()
-                # Normalize a few inputs
-                if level_raw in ("HIGH", "G", "ALL-AGES"):
-                    level = 'G'
-                elif level_raw in ("MEDIUM", "PG13", "PG-13", "PG_13", "PG"):
-                    level = 'PG-13'
-                elif level_raw in ("LOW", "R"):
-                    level = 'R'
-                elif level_raw in ("OFF", "NONE", "NO FILTERS", "SAFETY FILTERS OFF"):
-                    level = 'OFF'
-                else:
-                    emit('message', {'type': 'error', 'content': 'Please answer with G, PG-13, R, or OFF.'})
-                    return
-                try:
-                    world.safety_level = level
-                    world.save_to_file(STATE_PATH)
-                except Exception:
-                    pass
-                sess['step'] = 'room_id'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': 'Create the starting room. Enter a room id (letters, numbers, underscores), e.g., town_square:'})
-                return
-            if step == 'room_id':
-                rid = re.sub(r"[^A-Za-z0-9_]+", "_", player_message.strip())
-                if not rid:
-                    emit('message', {'type': 'error', 'content': 'Room id cannot be empty.'})
-                    return
-                if rid in world.rooms:
-                    emit('message', {'type': 'error', 'content': f"Room id '{rid}' already exists. Choose another."})
-                    return
-                temp['room_id'] = rid
-                sess['temp'] = temp
-                sess['step'] = 'room_desc'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': 'Enter a description for the starting room:'})
-                return
-            if step == 'room_desc':
-                rdesc = player_message.strip()
-                rid = temp.get('room_id')
-                if not rid:
-                    emit('message', {'type': 'error', 'content': 'Internal error: missing room id.'})
-                    return
-                # Create room
-                world.rooms[rid] = Room(id=rid, description=rdesc)
-                world.start_room_id = rid
-                # Move current player there if logged in
-                if sid in world.players:
-                    try:
-                        world.move_player(sid, rid)
-                    except Exception:
-                        pass
-                try:
-                    world.save_to_file(STATE_PATH)
-                except Exception:
-                    pass
-                sess['step'] = 'npc_name'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': 'Create an NPC for this room. Enter an NPC name (or type "skip"): '})
-                return
-            if step == 'npc_name':
-                npc_name = player_message.strip()
-                if npc_name.lower() in ('skip', 'none'):
-                    # Finish setup
-                    world.setup_complete = True
-                    try:
-                        world.save_to_file(STATE_PATH)
-                    except Exception:
-                        pass
-                    world_setup_sessions.pop(sid, None)
-                    emit('message', {'type': 'system', 'content': 'World setup complete! Others will now see your world description and conflict on login.'})
-                    # Show look
-                    emit('message', {'type': 'system', 'content': world.describe_room_for(sid)})
-                    return
-                temp['npc_name'] = npc_name
-                sess['temp'] = temp
-                sess['step'] = 'npc_desc'
-                world_setup_sessions[sid] = sess
-                emit('message', {'type': 'system', 'content': f'Enter a short description for {npc_name}:'})
-                return
-            if step == 'npc_desc':
-                npc_desc = player_message.strip()
-                rid = temp.get('room_id')
-                npc_name = temp.get('npc_name')
-                room = world.rooms.get(rid)
-                if room and npc_name:
-                    room.npcs.add(npc_name)
-                    # Ensure NPC sheet
-                    npc_sheet = world.npc_sheets.get(npc_name)
-                    if npc_sheet is None:
-                        npc_sheet = CharacterSheet(display_name=npc_name, description=npc_desc)
-                        world.npc_sheets[npc_name] = npc_sheet
-                    else:
-                        npc_sheet.description = npc_desc
-                    try:
-                        world.get_or_create_npc_id(npc_name)
-                    except Exception:
-                        pass
-                    try:
-                        world.save_to_file(STATE_PATH)
-                    except Exception:
-                        pass
-                world.setup_complete = True
-                try:
-                    world.save_to_file(STATE_PATH)
-                except Exception:
-                    pass
-                world_setup_sessions.pop(sid, None)
-                emit('message', {'type': 'system', 'content': f"NPC '{npc_name}' added. World setup complete!"})
-                emit('message', {'type': 'system', 'content': world.describe_room_for(sid)})
+            handled, emits_list = _setup_handle(world, STATE_PATH, sid, player_message, world_setup_sessions)
+            if handled:
+                for payload in emits_list:
+                    emit('message', payload)
                 return
 
         # Handle object template creation wizard if active for this sid
@@ -1313,101 +954,25 @@ def handle_message(data):
             if sid is None:
                 emit('message', {'type': 'error', 'content': 'Not connected.'})
                 return
-            # Initialize session state
-            if sid not in auth_sessions:
-                auth_sessions[sid] = {"mode": None, "step": "choose", "temp": {}}
-            sess = auth_sessions[sid]
-            # Allow bare 'login' or 'create' to pick a path
-            if sess["step"] == "choose":
-                if text_lower in ("login", "l"):
-                    sess["mode"] = "login"
-                    sess["step"] = "name"
-                    emit('message', {'type': 'system', 'content': 'Login selected. Enter your display name:'})
-                    return
-                if text_lower in ("create", "c"):
-                    sess["mode"] = "create"
-                    sess["step"] = "name"
-                    emit('message', {'type': 'system', 'content': 'Creation selected. Choose a display name (2-32 chars):'})
-                    return
-                emit('message', {'type': 'system', 'content': 'Type "create" to forge a new character or "login" to sign in.'})
-                return
-            # Common cancel/back
-            if text_lower in ("cancel", "back"):
-                sess["mode"] = None
-                sess["step"] = "choose"
-                sess["temp"] = {}
-                emit('message', {'type': 'system', 'content': 'Cancelled. Type "create" or "login" to continue.'})
-                return
-            # Name step
-            if sess["step"] == "name":
-                name = player_message.strip()
-                if len(name) < 2 or len(name) > 32:
-                    emit('message', {'type': 'error', 'content': 'Name must be between 2 and 32 characters. Try again or type cancel.'})
-                    return
-                sess["temp"]["name"] = name
-                sess["step"] = "password"
-                emit('message', {'type': 'system', 'content': 'Enter password:'})
-                return
-            # Password step
-            if sess["step"] == "password":
-                pwd = player_message.strip()
-                if len(pwd) < 3:
-                    emit('message', {'type': 'error', 'content': 'Password too short (min 3). Try again or type cancel.'})
-                    return
-                sess["temp"]["password"] = pwd
-                if sess["mode"] == "create":
-                    sess["step"] = "description"
-                    emit('message', {'type': 'system', 'content': 'Enter a short character description (max 300 chars):'})
-                    return
-                # login path completes here
-                name = sess["temp"]["name"]
-                ok, err, emits, broadcasts = login_existing(world, sid, name, pwd, sessions, admins)
-                if not ok:
-                    emit('message', {'type': 'error', 'content': err or 'Login failed.'})
-                    return
-                # Clear auth flow
-                auth_sessions.pop(sid, None)
-                for payload in emits:
+            handled, emits2, broadcasts2 = _auth_handle(world, sid, player_message, sessions, admins, STATE_PATH, auth_sessions)
+            if handled:
+                for payload in emits2:
                     emit('message', payload)
-                for room_id, payload in broadcasts:
-                    broadcast_to_room(room_id, payload, exclude_sid=sid)
-                return
-            # Description step (create only)
-            if sess["step"] == "description":
-                desc = player_message.strip()
-                if len(desc) > 300:
-                    emit('message', {'type': 'error', 'content': 'Description too long (max 300). Try again or type cancel.'})
-                    return
-                name = sess["temp"].get("name", "")
-                pwd = sess["temp"].get("password", "")
-                if world.get_user_by_display_name(name):
-                    emit('message', {'type': 'error', 'content': 'That display name is already taken. Type back to choose another.'})
-                    return
-                ok, err, emits, broadcasts = create_account_and_login(world, sid, name, pwd, desc, sessions, admins, STATE_PATH)
-                if not ok:
-                    emit('message', {'type': 'error', 'content': err or 'Failed to create user.'})
-                    return
-                auth_sessions.pop(sid, None)
-                for payload in emits:
-                    emit('message', payload)
-                for room_id, payload in broadcasts:
+                for room_id, payload in broadcasts2:
                     broadcast_to_room(room_id, payload, exclude_sid=sid)
                 # If this is the first user and setup not complete, start setup wizard
                 try:
-                    if not world.setup_complete and sid in sessions:
+                    if not getattr(world, 'setup_complete', False) and sid in sessions:
                         uid = sessions.get(sid)
                         user = world.users.get(uid) if uid else None
                         if user and user.is_admin:
-                            world_setup_sessions[sid] = {"step": "world_name", "temp": {}}
                             emit('message', {'type': 'system', 'content': 'You are the first adventurer here and have been made an Admin.'})
-                            emit('message', {'type': 'system', 'content': 'Let\'s set up your world! What\'s the name of this world?'})
+                            for p in _setup_begin(world_setup_sessions, sid):
+                                emit('message', p)
                             return
                 except Exception:
                     pass
                 return
-            # Fallback
-            emit('message', {'type': 'system', 'content': 'Type "create" or "login" to begin, or /auth commands for one-line auth.'})
-            return
 
         # Movement: through doors or stairs
         if sid and sid in world.players:
@@ -2373,8 +1938,8 @@ def handle_command(sid: str | None, text: str) -> None:
         if getattr(world, 'setup_complete', False):
             emit('message', {'type': 'system', 'content': 'Setup is already complete. Use /purge to reset the world if you want to run setup again.'})
             return
-        world_setup_sessions[sid] = {"step": "world_name", "temp": {}}
-        emit('message', {'type': 'system', 'content': 'Let\'s set up your world! What\'s the name of this world?'})
+        for p in _setup_begin(world_setup_sessions, sid):
+            emit('message', p)
         return
 
     # /object commands (admin)
@@ -2388,95 +1953,15 @@ def handle_command(sid: str | None, text: str) -> None:
         sub = args[0].lower()
         # create simple object in current room or from template
         if sub == 'createobject':
-            # Must be a logged-in player to place in a room
             if sid not in world.players:
                 emit('message', {'type': 'error', 'content': 'Please authenticate first to create objects.'})
                 return
-            # Parse: <room> | <display name> | <description> | <tags csv> OR <template_key>
-            try:
-                joined = " ".join(args[1:])
-                p_room, p_name, p_desc, p_third = _pipe_parts(joined, expected=4)
-            except Exception:
-                emit('message', {'type': 'error', 'content': 'Usage: /object createobject <room> | <display name> | <description> | <tags or template_key>'})
+            handled, err, emits3 = _obj_create(world, STATE_PATH, sid, args[1:])
+            if err:
+                emit('message', {'type': 'error', 'content': err})
                 return
-            name = _strip_quotes(p_name or "").strip()
-            desc = _strip_quotes(p_desc or "").strip()
-            third = (p_third or "").strip()
-            if not name:
-                emit('message', {'type': 'error', 'content': 'Display name required.'})
-                return
-            # Resolve room: supports 'here' alias and fuzzy room id
-            room_input = _strip_quotes(p_room or "").strip()
-            rok, rerr, rid = _resolve_room_id_fuzzy(sid, room_input or 'here')
-            if not rok or not rid:
-                emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
-                return
-            room = world.rooms.get(rid)
-            if not room:
-                emit('message', {'type': 'error', 'content': 'Room not found.'})
-                return
-            from world import Object as _Obj
-            new_obj: _Obj
-            used_template = False
-            # If the third part matches a template key, clone that template
-            tpl_store = getattr(world, 'object_templates', {}) or {}
-            template_key = None
-            if third:
-                # Prefer exact key match first (case-sensitive), else case-insensitive key match
-                if third in tpl_store:
-                    template_key = third
-                else:
-                    for k in tpl_store.keys():
-                        if k.lower() == third.lower():
-                            template_key = k
-                            break
-            if template_key:
-                base = tpl_store.get(template_key)
-                if not base:
-                    emit('message', {'type': 'error', 'content': f"Template '{third}' not found."})
-                    return
-                # Clone by dict round-trip, then override
-                try:
-                    base_dict = base.to_dict()
-                    new_obj = _Obj.from_dict(base_dict)
-                except Exception:
-                    # Fallback shallow clone
-                    new_obj = _Obj(
-                        display_name=base.display_name,
-                        description=base.description,
-                        object_tags=set(base.object_tags or set()),
-                        material_tag=base.material_tag,
-                        value=base.value,
-                        loot_location_hint=base.loot_location_hint,
-                        durability=base.durability,
-                        quality=base.quality,
-                        crafting_recipe=list(base.crafting_recipe or []),
-                        deconstruct_recipe=list(base.deconstruct_recipe or []),
-                        link_target_room_id=base.link_target_room_id,
-                        link_to_object_uuid=base.link_to_object_uuid,
-                    )
-                # Always assign a fresh UUID for the new instance
-                new_obj.uuid = str(__import__('uuid').uuid4())
-                # Override name/desc
-                new_obj.display_name = name
-                new_obj.description = desc
-                used_template = True
-            else:
-                # Treat third as a CSV of tags
-                tags = [t.strip() for t in third.split(',') if t.strip()] if third else ['one-hand']
-                # Normalize: ensure duplicates removed
-                tags = list(dict.fromkeys(tags))
-                new_obj = _Obj(display_name=name, description=desc, object_tags=set(tags))
-            # Place object in room unless it's a travel point (Travel Point objects are immovable fixtures)
-            try:
-                room.objects[new_obj.uuid] = new_obj
-                world.save_to_file(STATE_PATH)
-            except Exception:
-                pass
-            # Feedback
-            how = f"from template '{template_key}'" if used_template and template_key else ""
-            where = rid
-            emit('message', {'type': 'system', 'content': f"Created object '{new_obj.display_name}' {how} in room {where}."})
+            for payload in emits3:
+                emit('message', payload)
             return
         # create wizard
         if sub == 'createtemplateobject':
@@ -2487,11 +1972,11 @@ def handle_command(sid: str | None, text: str) -> None:
             return
         # list templates
         if sub == 'listtemplates':
-            templates = list(getattr(world, 'object_templates', {}) or {})
+            templates = _obj_list_templates(world)
             if not templates:
                 emit('message', {'type': 'system', 'content': 'No object templates saved.'})
             else:
-                emit('message', {'type': 'system', 'content': 'Object templates: ' + ", ".join(sorted(templates))})
+                emit('message', {'type': 'system', 'content': 'Object templates: ' + ", ".join(templates)})
             return
         # view template <key>
         if sub == 'viewtemplate':
@@ -2499,15 +1984,10 @@ def handle_command(sid: str | None, text: str) -> None:
                 emit('message', {'type': 'error', 'content': 'Usage: /object viewtemplate <key>'})
                 return
             key = args[1]
-            obj = (getattr(world, 'object_templates', {}) or {}).get(key)
-            if not obj:
-                emit('message', {'type': 'error', 'content': f"Template '{key}' not found."})
+            okv, ev, raw = _obj_view_template(world, key)
+            if not okv:
+                emit('message', {'type': 'error', 'content': ev or 'Template not found.'})
                 return
-            try:
-                import json
-                raw = json.dumps(obj.to_dict(), ensure_ascii=False, indent=2)
-            except Exception:
-                raw = str(obj.to_dict())
             emit('message', {'type': 'system', 'content': f"[b]{key}[/b]\n{raw}"})
             return
         # delete template <key>
@@ -2516,16 +1996,12 @@ def handle_command(sid: str | None, text: str) -> None:
                 emit('message', {'type': 'error', 'content': 'Usage: /object deletetemplate <key>'})
                 return
             key = args[1]
-            store = getattr(world, 'object_templates', {})
-            if key not in store:
-                emit('message', {'type': 'error', 'content': f"Template '{key}' not found."})
+            handled, err2, emitsD = _obj_delete_template(world, STATE_PATH, key)
+            if err2:
+                emit('message', {'type': 'error', 'content': err2})
                 return
-            try:
-                del store[key]
-                world.save_to_file(STATE_PATH)
-                emit('message', {'type': 'system', 'content': f"Deleted template '{key}'."})
-            except Exception as e:
-                emit('message', {'type': 'error', 'content': f"Failed to delete template: {e}"})
+            for payload in emitsD:
+                emit('message', payload)
             return
         emit('message', {'type': 'error', 'content': 'Unknown /object subcommand. Use createobject, createtemplateobject, listtemplates, viewtemplate, or deletetemplate.'})
         return
