@@ -57,6 +57,11 @@ class Object:
     link_to_object_uuid: Optional[str] = None
     # Stable id
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Container support (when 'Container' in object_tags): two small and two large slots
+    container_small_slots: List[Optional["Object"]] = field(default_factory=lambda: [None, None])
+    container_large_slots: List[Optional["Object"]] = field(default_factory=lambda: [None, None])
+    container_opened: bool = False
+    container_searched: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +79,11 @@ class Object:
             # Travel helpers (optional)
             "link_target_room_id": self.link_target_room_id,
             "link_to_object_uuid": self.link_to_object_uuid,
+            # Container persistence
+            "container_small_slots": [o.to_dict() if o else None for o in (self.container_small_slots or [None, None])],
+            "container_large_slots": [o.to_dict() if o else None for o in (self.container_large_slots or [None, None])],
+            "container_opened": self.container_opened,
+            "container_searched": self.container_searched,
         }
 
     @staticmethod
@@ -172,6 +182,23 @@ class Object:
             link_to_object_uuid=(str(data.get("link_to_object_uuid")) if data.get("link_to_object_uuid") is not None else None),
             uuid=str(data.get("uuid") or uuid.uuid4()),
         )
+        # Load container fields
+        try:
+            small_raw = data.get("container_small_slots")
+            large_raw = data.get("container_large_slots")
+            if isinstance(small_raw, list):
+                obj.container_small_slots = [Object.from_dict(el) if isinstance(el, dict) else None for el in small_raw][:2]
+                if len(obj.container_small_slots) < 2:
+                    obj.container_small_slots.extend([None] * (2 - len(obj.container_small_slots)))
+            if isinstance(large_raw, list):
+                obj.container_large_slots = [Object.from_dict(el) if isinstance(el, dict) else None for el in large_raw][:2]
+                if len(obj.container_large_slots) < 2:
+                    obj.container_large_slots.extend([None] * (2 - len(obj.container_large_slots)))
+            obj.container_opened = bool(data.get("container_opened", False))
+            obj.container_searched = bool(data.get("container_searched", False))
+        except Exception:
+            # Leave defaults on error
+            pass
         return obj
 
 

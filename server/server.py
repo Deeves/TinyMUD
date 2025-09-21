@@ -112,6 +112,7 @@ from object_service import (
 )
 from setup_service import begin_setup as _setup_begin, handle_setup_input as _setup_handle
 from auth_wizard_service import handle_interactive_auth as _auth_handle
+from interaction_service import begin_interaction as _interact_begin, handle_interaction_input as _interact_handle
 
 
 def _print_command_help() -> None:
@@ -132,6 +133,7 @@ def _print_command_help() -> None:
     "  tell <Player or NPC> <message>       - speak directly to one person/NPC (room hears it)",
     "  whisper <Player or NPC> <message>    - private message; NPC always replies; not broadcast",
     "  roll <dice> [| Private]             - roll dice publicly or privately",
+        "  interact with <Object>            - list possible interactions for an object and choose one",
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
         "  /sheet                              - show your character sheet",
@@ -217,6 +219,7 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("tell <Player or NPC> <message>                   — speak directly to one person/NPC (room hears it)")
     lines.append("whisper <Player or NPC> <message>                — private message; NPC always replies; not broadcast")
     lines.append("roll <dice> [| Private]                         — roll dice publicly or privately")
+    lines.append("interact with <Object>                          — list possible interactions for an object and pick one")
     lines.append("/rename <new name>                               — change your display name")
     lines.append("/describe <text>                                 — update your character description")
     lines.append("/sheet                                           — show your character sheet")
@@ -332,6 +335,7 @@ _pending_confirm: dict[str, str] = {}  # sid -> action (e.g., 'purge')
 auth_sessions: dict[str, dict] = {}  # sid -> { mode: 'create'|'login', step: str, temp: dict }
 world_setup_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
 object_template_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
+interaction_sessions: dict[str, dict] = {}  # sid -> { step: 'choose', obj_uuid: str, actions: list[str] }
 
 
 
@@ -716,6 +720,24 @@ def handle_message(data):
                 object_template_sessions.pop(sid_str, None)
                 emit('message', {'type': 'system', 'content': 'Object template creation cancelled.'})
                 return
+        # Handle object interaction flow if active
+        if sid and sid in interaction_sessions:
+            handled, emits_list, broadcasts_list = _interact_handle(world, sid, player_message, interaction_sessions)
+            if handled:
+                for payload in emits_list:
+                    emit('message', payload)
+                # Apply any broadcasts (room_id, payload)
+                try:
+                    for room_id, payload in (broadcasts_list or []):
+                        broadcast_to_room(room_id, payload, exclude_sid=sid)
+                except Exception:
+                    pass
+                # Best-effort persistence after possible world mutation
+                try:
+                    world.save_to_file(STATE_PATH)
+                except Exception:
+                    pass
+                return
 
             def _ask_next(current: str) -> None:
                 sess['step'] = current
@@ -994,6 +1016,20 @@ def handle_message(data):
                         emit('message', payload)
                     for room_id, payload in broadcasts:
                         broadcast_to_room(room_id, payload, exclude_sid=sid)
+                    return
+                # interact with <object>
+                if text_lower.startswith("interact with "):
+                    obj_name = player_message.strip()[len("interact with "):].strip()
+                    if not obj_name:
+                        emit('message', {'type': 'error', 'content': 'Usage: interact with <Object>'})
+                        return
+                    room = current_room
+                    ok, err, emitsI = _interact_begin(world, sid, room, obj_name, interaction_sessions)
+                    if not ok:
+                        emit('message', {'type': 'system', 'content': err or 'Unable to interact.'})
+                        return
+                    for payload in emitsI:
+                        emit('message', payload)
                     return
                 # move up/down stairs
                 if text_lower in ("move up", "move upstairs", "move up stairs", "go up", "go up stairs"):
