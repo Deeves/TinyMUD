@@ -338,6 +338,82 @@ object_template_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict
 interaction_sessions: dict[str, dict] = {}  # sid -> { step: 'choose', obj_uuid: str, actions: list[str] }
 
 
+# --- Debug / Creative Mode bootstrap ---
+def _apply_creative_mode_to_existing_users() -> None:
+    """If world.debug_creative_mode is enabled, mark all persisted users as admins and save.
+
+    We keep this idempotent so it can run on each startup without side effects.
+    """
+    try:
+        if getattr(world, 'debug_creative_mode', False):
+            changed = False
+            for u in world.users.values():
+                if not getattr(u, 'is_admin', False):
+                    u.is_admin = True
+                    changed = True
+            if changed:
+                try:
+                    world.save_to_file(STATE_PATH)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _maybe_prompt_creative_mode() -> None:
+    """Offer to enable Debug / Creative Mode at startup when running interactively.
+
+    Skips prompting in non-interactive environments or when disabled via env.
+    Honors MUD_CREATIVE_MODE env ("1"/"true" to force enable, "0"/"false" to disable).
+    """
+    # Env override takes precedence
+    env_val = os.getenv('MUD_CREATIVE_MODE') or os.getenv('CREATIVE_MODE')
+    if env_val is not None:
+        val = str(env_val).strip().lower()
+        if val in ('1', 'true', 'yes', 'y', 'on'):
+            setattr(world, 'debug_creative_mode', True)
+            _apply_creative_mode_to_existing_users()
+            print("Debug / Creative Mode ENABLED via env. All users are admins.")
+            return
+        if val in ('0', 'false', 'no', 'n', 'off'):
+            setattr(world, 'debug_creative_mode', False)
+            try:
+                world.save_to_file(STATE_PATH)
+            except Exception:
+                pass
+            print("Debug / Creative Mode DISABLED via env.")
+            return
+    # If already set in persisted world, just apply and continue
+    if getattr(world, 'debug_creative_mode', False):
+        _apply_creative_mode_to_existing_users()
+        print("Debug / Creative Mode is ON (persisted). All users are admins.")
+        return
+    # Respect no-interactive environments
+    _no_prompt = os.getenv("MUD_NO_INTERACTIVE") == "1" or os.getenv("CI") == "true"
+    if _no_prompt or not (hasattr(sys, 'stdin') and hasattr(sys.stdin, 'isatty') and sys.stdin.isatty()):
+        return
+    try:
+        print("\nWould you like to enable [Debug / Creative Mode]? This automatically promotes all characters to Admin.")
+        ans = input("Enable Creative Mode now? (y/N): ").strip().lower()
+        if ans in ("y", "yes"):
+            setattr(world, 'debug_creative_mode', True)
+            _apply_creative_mode_to_existing_users()
+            try:
+                world.save_to_file(STATE_PATH)
+            except Exception:
+                pass
+            print("Creative Mode enabled. All users are admins.")
+        else:
+            print("Creative Mode remains disabled.")
+    except Exception:
+        # Silently skip on any input error
+        pass
+
+
+# Evaluate Creative Mode at startup
+_maybe_prompt_creative_mode()
+
+
 
 # Print command help after initialization so admins see it in the console.
 _print_command_help()
@@ -1107,7 +1183,9 @@ def handle_message(data):
                             except Exception:
                                 pass
                             rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{rel_text}"})
+                            # If the target player has admin rights, append a subtle aura line
+                            admin_aura = "\nRadiates an unspoken authority." if psid in admins else ""
+                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
                             return
                     except Exception:
                         pass
@@ -1459,8 +1537,10 @@ def handle_command(sid: str | None, text: str) -> None:
                                     rel_lines.append(f"{p.sheet.display_name}'s relation to you: {rel_from}")
                         except Exception:
                             pass
+                        # Append admin aura if the inspected player is an admin
+                        admin_aura = "\nRadiates an unspoken authority." if psid in admins else ""
                         rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{rel_text}"})
+                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
                         return
                 except Exception:
                     pass

@@ -1,22 +1,23 @@
 {
+	"$schema": "vscode://schemas/tasks",
 	"version": "2.0.0",
 	"tasks": [
 		{
 			"label": "Run server to verify startup print",
 			"type": "shell",
-			"command": "python server/server.py",
-			"args": [],
-			"problemMatcher": [
-				"$python"
-			],
+			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"args": ["server/server.py"],
+			"problemMatcher": ["$python"],
 			"group": "build"
 		},
-		{
+			{
 			"label": "Run pytest server",
 			"type": "shell",
-			"command": "pytest -q server",
+			"command": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"args": ["-m", "pytest", "-q", "server"],
 			"isBackground": false,
-			"group": "build"
+			"group": "build",
+				"problemMatcher": ["$python"]
 		}
 	]
 }

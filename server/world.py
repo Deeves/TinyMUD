@@ -593,6 +593,9 @@ class World:
         # Relationship graph (directed): entity_id -> { target_entity_id: relationship_type }
         # entity_id is user.user_id for players and world.get_or_create_npc_id(name) for NPCs
         self.relationships: Dict[str, Dict[str, str]] = {}
+        # Debug / Creative Mode: when True, all users are admins automatically.
+        # Persisted; can be toggled at server startup. Used by account/login flows.
+        self.debug_creative_mode = False
 
     def ensure_default_room(self) -> Optional[Room]:
         """No longer auto-creates a default room; setup wizard defines the first room."""
@@ -684,6 +687,8 @@ class World:
             "safety_level": self.safety_level,
             # Relationships
             "relationships": self.relationships,
+            # Debug / Creative Mode flag
+            "debug_creative_mode": self.debug_creative_mode,
         }
 
     @classmethod
@@ -754,6 +759,8 @@ class World:
             except Exception:
                 # Fallback to raw if any issues
                 w.relationships = dict(rels)
+        # Debug / Creative Mode flag (default False for back-compat)
+        w.debug_creative_mode = bool(data.get("debug_creative_mode", False))
         return w
 
     def save_to_file(self, path: str) -> None:

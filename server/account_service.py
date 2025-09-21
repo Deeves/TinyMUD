@@ -31,8 +31,8 @@ def create_account_and_login(
     broadcasts: List[Tuple[str, dict]] = []
 
     try:
-        # First user becomes admin by default
-        grant_admin = (len(world.users) == 0)
+        # First user becomes admin by default. In Creative Mode, everyone is admin.
+        grant_admin = (len(world.users) == 0) or bool(getattr(world, 'debug_creative_mode', False))
         user = world.create_user(display_name, password, description, is_admin=grant_admin)
         try:
             world.save_to_file(state_path)
@@ -90,7 +90,21 @@ def login_existing(
 
     player = world.add_player(sid, sheet=user.sheet)
     sessions[sid] = user.user_id
-    if user.is_admin:
+    # In Creative Mode, ensure the user is an admin (persist change best-effort)
+    if getattr(world, 'debug_creative_mode', False) and not getattr(user, 'is_admin', False):
+        try:
+            user.is_admin = True
+            try:
+                # state_path isn't available here; rely on caller's save cadence elsewhere
+                # but attempt attribute presence only.
+                if hasattr(world, 'save_to_file') and hasattr(world, 'to_dict'):
+                    # No path here to write; server typically persists on mutations elsewhere.
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if user.is_admin or getattr(world, 'debug_creative_mode', False):
         admins.add(sid)
 
     emits.append({'type': 'system', 'content': f'Welcome back, {user.display_name}.'})
