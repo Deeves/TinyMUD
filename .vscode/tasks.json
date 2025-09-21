@@ -10,6 +10,13 @@
 				"$python"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Run pytest server",
+			"type": "shell",
+			"command": "pytest -q server",
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

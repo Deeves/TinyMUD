@@ -56,7 +56,7 @@ def test_fuzzy_resolve() -> None:
     ok4, err4, val4 = fuzzy_resolve("lpi", items)
     assert_true(ok4 and val4 == "alpine", f"unique substring failed: {(ok4, val4)}")
     ok5, err5, val5 = fuzzy_resolve("al", items)
-    assert_true((not ok5) and err5 and "Ambiguous" in err5, f"ambiguity not reported: {(ok5, err5, val5)}")
+    assert_true((not ok5) and (err5 is not None) and ("Ambiguous" in (err5 or "")), f"ambiguity not reported: {(ok5, err5, val5)}")
     ok6, err6, val6 = fuzzy_resolve("zeta", items)
     assert_true((not ok6) and err6 is not None, f"not found should produce an error: {(ok6, err6)}")
 

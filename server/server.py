@@ -720,26 +720,9 @@ def handle_message(data):
                 object_template_sessions.pop(sid_str, None)
                 emit('message', {'type': 'system', 'content': 'Object template creation cancelled.'})
                 return
-        # Handle object interaction flow if active
-        if sid and sid in interaction_sessions:
-            handled, emits_list, broadcasts_list = _interact_handle(world, sid, player_message, interaction_sessions)
-            if handled:
-                for payload in emits_list:
-                    emit('message', payload)
-                # Apply any broadcasts (room_id, payload)
-                try:
-                    for room_id, payload in (broadcasts_list or []):
-                        broadcast_to_room(room_id, payload, exclude_sid=sid)
-                except Exception:
-                    pass
-                # Best-effort persistence after possible world mutation
-                try:
-                    world.save_to_file(STATE_PATH)
-                except Exception:
-                    pass
-                return
 
             def _ask_next(current: str) -> None:
+                # Update the current step in-session and persist to the map
                 sess['step'] = current
                 object_template_sessions[sid_str] = sess
                 prompts = {
@@ -965,6 +948,27 @@ def handle_message(data):
                 except Exception as e:
                     emit('message', {'type': 'error', 'content': f'Failed to save template: {e}'})
                     return
+            # If step is unknown, prompt the first step
+            _ask_next('template_key')
+            return
+        # Handle object interaction flow if active
+        if sid and sid in interaction_sessions:
+            handled, emits_list, broadcasts_list = _interact_handle(world, sid, player_message, interaction_sessions)
+            if handled:
+                for payload in emits_list:
+                    emit('message', payload)
+                # Apply any broadcasts (room_id, payload)
+                try:
+                    for room_id, payload in (broadcasts_list or []):
+                        broadcast_to_room(room_id, payload, exclude_sid=sid)
+                except Exception:
+                    pass
+                # Best-effort persistence after possible world mutation
+                try:
+                    world.save_to_file(STATE_PATH)
+                except Exception:
+                    pass
+                return
         # Route slash commands to the command handler (includes auth)
         if player_message.strip().startswith("/"):
             sid = get_sid()
