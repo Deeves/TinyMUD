@@ -125,14 +125,14 @@ def _print_command_help() -> None:
         "",
     "Player commands (after auth):",
         "  look | l                             - describe your current room",
-        "  look at <name>                       - inspect a Player or NPC in the room",
+        "  look at <name>                       - inspect a Player, NPC, or Object in the room",
     "  move through <name>                  - go via a named door or travel point",
     "  move up stairs | move down stairs    - use stairs, if present",
     "  say <message>                        - say something; anyone present may respond",
     "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
     "  tell <Player or NPC> <message>       - speak directly to one person/NPC (room hears it)",
     "  whisper <Player or NPC> <message>    - private message; NPC always replies; not broadcast",
-    "  roll <dice> [| Private]             - roll dice publicly or privately",
+    "  roll <dice> [| Private]             - roll dice publicly or privately (e.g., 2d6+1)",
         "  interact with <Object>            - list possible interactions for an object and choose one",
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
@@ -178,6 +178,13 @@ def _print_command_help() -> None:
     "  /npc setrelation <name> | <relationship> | <target> [| mutual] - link two entities; optional mutual makes it bidirectional",
     "  /npc familygen <room name> | <target npc> | <relationship>  - [Experimental] AI-generate a related NPC, set mutual link, place in room",
     "  /npc removerelations <name> | <target>    - remove any relationships in both directions",
+    "",
+    "Tips:",
+    "  - Use quotes around names with spaces: \"oak door\", \"Red Dragon\".",
+    "  - Use the | character to separate parts: /auth create Alice | pw | Adventurer.",
+    "  - You can use 'here' for room arguments: /teleport here, /object createobject here | name | desc | tag.",
+    "  - Names are fuzzy-resolved: exact > unique prefix > unique substring.",
+    "  - /say talks to the room, /tell talks to one target (room hears), /whisper is fully private.",
         "======================================\n",
     ]
     print("\n".join(lines))
@@ -211,14 +218,14 @@ def _build_help_text(sid: str | None) -> str:
     # Player commands (only meaningful once logged in, but list for visibility)
     lines.append("[b]Player[/b]")
     lines.append("look | l                                         — describe your current room")
-    lines.append("look at <name>                                   — inspect a Player or NPC in the room")
+    lines.append("look at <name>                                   — inspect a Player, NPC, or Object in the room")
     lines.append("move through <name>                              — go via a named door or travel point")
     lines.append("move up stairs | move down stairs                — use stairs, if present")
     lines.append("say <message>                                    — say something; anyone present may respond")
     lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
     lines.append("tell <Player or NPC> <message>                   — speak directly to one person/NPC (room hears it)")
     lines.append("whisper <Player or NPC> <message>                — private message; NPC always replies; not broadcast")
-    lines.append("roll <dice> [| Private]                         — roll dice publicly or privately")
+    lines.append("roll <dice> [| Private]                         — roll dice publicly or privately (e.g., 2d6+1)")
     lines.append("interact with <Object>                          — list possible interactions for an object and pick one")
     lines.append("/rename <new name>                               — change your display name")
     lines.append("/describe <text>                                 — update your character description")
@@ -235,7 +242,7 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/setup                                           — start world setup (create first room & NPC)")
         lines.append("/teleport <room name>                            — teleport yourself (fuzzy; 'here' allowed)")
         lines.append("/teleport <player> | <room name>                 — teleport another player (fuzzy; 'here' = your room)")
-        lines.append("/bring <player>                                   — bring a player to your current room")
+        lines.append("/bring <player>                                  — bring a player to your current room")
         lines.append("/purge                                           — reset world to factory defaults (confirm)")
         lines.append("/worldstate                                      — print redacted world_state.json")
         lines.append("/safety <G|PG-13|R|OFF>                         — set AI content safety level")
@@ -251,20 +258,29 @@ def _build_help_text(sid: str | None) -> str:
         lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
         lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
         lines.append("")
-    lines.append("[b]Object management[/b]")
-    lines.append("/object createtemplateobject                     — start a wizard to create and save an Object template")
-    lines.append("/object createobject <room> | <name> | <desc> | <tags or template_key> — create an Object in a room (supports 'here')")
-    lines.append("/object listtemplates                            — list saved object template keys")
-    lines.append("/object viewtemplate <key>                       — show a template's JSON by key")
-    lines.append("/object deletetemplate <key>                     — delete a template by key")
+        lines.append("[b]Object management[/b]")
+        lines.append("/object createtemplateobject                     — start a wizard to create and save an Object template")
+        lines.append("/object createobject <room> | <name> | <desc> | <tags or template_key> — create an Object in a room (supports 'here')")
+        lines.append("/object listtemplates                            — list saved object template keys")
+        lines.append("/object viewtemplate <key>                       — show a template's JSON by key")
+        lines.append("/object deletetemplate <key>                     — delete a template by key")
+        lines.append("")
+        lines.append("[b]NPC management[/b]")
+        lines.append("/npc add <room name> | <npc name> | <desc>       — add an NPC to a room and set description")
+        lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
+        lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
+        lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")
+        lines.append("/npc familygen <room name> | <target npc> | <relationship>    — [Experimental] AI-generate a related NPC, set mutual link, place in room")
+        lines.append("/npc removerelations <name> | <target>           — remove any relationships in both directions")
+
+    # Tips (always shown)
     lines.append("")
-    lines.append("[b]NPC management[/b]")
-    lines.append("/npc add <room name> | <npc name> | <desc>       — add an NPC to a room and set description")
-    lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
-    lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
-    lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")
-    lines.append("/npc familygen <room name> | <target npc> | <relationship>    — [Experimental] AI-generate a related NPC, set mutual link, place in room")
-    lines.append("/npc removerelations <name> | <target>           — remove any relationships in both directions")
+    lines.append("[b]Tips[/b]")
+    lines.append("• Use quotes around names with spaces: \"oak door\", \"Red Dragon\".")
+    lines.append("• Separate parts with | : /auth create Alice | pw | Adventurer.")
+    lines.append("• 'here' works for room arguments: /teleport here, /object createobject here | name | desc | tag.")
+    lines.append("• Names are fuzzy-resolved: exact > unique prefix > unique substring.")
+    lines.append("• /say talks to the room; /tell talks to one target (room hears it); /whisper is private.")
 
     return "\n".join(lines)
 

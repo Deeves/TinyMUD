@@ -225,6 +225,7 @@ func _on_text_submitted(player_text: String):
 	if player_text.begins_with("/"):
 		# Client-side /help: show quick tips without round-trip
 		var low := player_text.strip_edges().to_lower()
+		var suppress_echo := false
 		if low == "/help":
 			var lines := [
 				"[b]Client Help[/b]",
@@ -240,7 +241,10 @@ func _on_text_submitted(player_text: String):
 				append_to_log(l)
 			input_box.clear()
 			input_box.grab_focus()
-			return
+			# Also fetch the authoritative, context-aware help from the server
+			# by letting the '/help' command continue to be emitted below.
+			# Avoid echoing '/help' as a gray line since we already printed tips.
+			suppress_echo = true
 		# Client-side command: /quit — graceful exit without sending to server
 		if player_text.strip_edges().to_lower() == "/quit":
 			append_to_log("[color=gray]Exiting. Safe travels![/color]")
@@ -248,9 +252,9 @@ func _on_text_submitted(player_text: String):
 			input_box.editable = false
 			return
 		# For /auth commands, echo with no special coloring but sanitize any password
-		if player_text.strip_edges().to_lower().begins_with("/auth"):
+		if not suppress_echo and player_text.strip_edges().to_lower().begins_with("/auth"):
 			append_to_log(_sanitize_auth_echo(player_text))
-		else:
+		elif not suppress_echo:
 			append_to_log("[color=gray]" + player_text + "[/color]")
 		# Client-side /reconnect command
 		if player_text.strip_edges().to_lower() == "/reconnect":
