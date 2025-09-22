@@ -105,7 +105,11 @@ def handle_interactive_auth(
         name = sess['temp'].get('name', '')
         ok, err, emits2, broadcasts2 = login_existing(world, sid, name, pwd, sessions, admins)
         if not ok:
+            # When login fails, keep the user in the password step and explicitly
+            # re‑prompt for the password so the client can re‑mask input.
+            # The client UI watches for the exact phrase 'Enter password:' to toggle masking.
             emits.append({'type': 'error', 'content': err or 'Login failed.'})
+            emits.append({'type': 'system', 'content': 'Enter password:'})
             return True, emits, broadcasts
         # Clear auth flow
         auth_sessions.pop(sid, None)

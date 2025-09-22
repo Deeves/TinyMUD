@@ -43,6 +43,21 @@ min_value = 8.0
 max_value = 48.0
 value = 16.0
 
+[node name="ThemeHBox" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 1
+theme_override_constants/h_separation = 12
+
+[node name="ThemeLabel" type="Label" parent="VBox/ThemeHBox"]
+layout_mode = 2
+text = "Theme"
+
+[node name="ThemeDrop" type="OptionButton" parent="VBox/ThemeHBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+custom_minimum_size = Vector2(0, 36)
+
 [node name="BgHBox" type="HBoxContainer" parent="VBox"]
 layout_mode = 2
 size_flags_horizontal = 3

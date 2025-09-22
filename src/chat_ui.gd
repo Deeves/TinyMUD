@@ -30,6 +30,7 @@ var server_host: String = "127.0.0.1"
 var server_port: int = 5000
 var censor_passwords: bool = true
 var auto_reconnect: bool = false
+var theme_name: String = "Modern"
 var _reconnect_timer: SceneTreeTimer
 var _reconnect_attempts: int = 0
 const RECONNECT_BASE_DELAY := 1.5
@@ -61,6 +62,8 @@ func _ready():
 	options_menu.text_size_changed.connect(_on_text_size_changed)
 	options_menu.bg_color_changed.connect(_on_bg_color_changed)
 	options_menu.closed.connect(_on_options_closed)
+	if options_menu.has_signal("theme_option_changed"):
+		options_menu.theme_option_changed.connect(_on_theme_option_changed)
 	# Server settings from options menu
 	if options_menu.has_signal("server_settings_applied"):
 		options_menu.server_settings_applied.connect(_on_server_settings_applied)
@@ -74,11 +77,14 @@ func _ready():
 
 	# Load settings and apply
 	_load_settings()
+	# Apply font family/theme before sizing, then apply size and colors
+	_apply_theme_by_name(theme_name)
 	_apply_font_size(current_font_size)
 	_apply_background(current_bg_color)
 	# Initialize options panel controls
 	if options_menu.has_method("set_initial_values"):
-		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port, censor_passwords, auto_reconnect)
+		# Pass through the persisted theme so the dropdown reflects it
+		options_menu.set_initial_values(current_font_size, current_bg_color, server_host, server_port, censor_passwords, auto_reconnect, theme_name)
 
 	input_box.text_submitted.connect(_on_text_submitted)
 	input_box.gui_input.connect(_on_input_box_gui_input)
@@ -258,6 +264,8 @@ func _on_text_submitted(player_text: String):
 			append_to_log("[color=gray]" + player_text + "[/color]")
 		# Client-side /reconnect command
 		if player_text.strip_edges().to_lower() == "/reconnect":
+			# Treat manual command same as the button: clear prior scrollback
+			_clear_log_and_reset()
 			_manual_reconnect()
 			input_box.clear()
 			input_box.grab_focus()
@@ -459,6 +467,7 @@ func _save_settings() -> void:
 	cfg.set_value(SETTINGS_SECTION, "server_port", server_port)
 	cfg.set_value(SETTINGS_SECTION, "censor_passwords", censor_passwords)
 	cfg.set_value(SETTINGS_SECTION, "auto_reconnect", auto_reconnect)
+	cfg.set_value(SETTINGS_SECTION, "theme_name", theme_name)
 	cfg.save(SETTINGS_PATH)
 
 func _load_settings() -> void:
@@ -477,12 +486,86 @@ func _load_settings() -> void:
 		server_port = int(cfg.get_value(SETTINGS_SECTION, "server_port", server_port))
 		censor_passwords = bool(cfg.get_value(SETTINGS_SECTION, "censor_passwords", true))
 		auto_reconnect = bool(cfg.get_value(SETTINGS_SECTION, "auto_reconnect", false))
+		theme_name = str(cfg.get_value(SETTINGS_SECTION, "theme_name", theme_name))
 	else:
 		# Default on first run
 		censor_passwords = true
 		auto_reconnect = false
+		theme_name = "Modern"
 	# Start unmasked until explicitly prompted for password
 	input_box.secret = false
+
+func _on_theme_option_changed(new_theme_name: String) -> void:
+	theme_name = new_theme_name
+	# Apply immediately and persist
+	_apply_theme_by_name(theme_name)
+	# Re-apply current size to ensure theme font resources use our size
+	_apply_font_size(current_font_size)
+	_save_settings()
+
+# --- Theme application ---
+func _apply_theme_by_name(theme_name_value: String) -> void:
+	var n := String(theme_name_value).to_lower()
+	if n == "modern":
+		_apply_modern_inter_theme()
+	else:
+		# Fallback: reset to default font family; keep sizes via subsequent _apply_font_size
+		var fallback_theme := Theme.new()
+		self.theme = fallback_theme
+
+func _apply_modern_inter_theme() -> void:
+	# Load Inter variable font and construct styled variants via OpenType variations
+	var font_path := "res://assets/fonts/modern/InterVariable.ttf"
+	var base_font: Font = load(font_path)
+	if base_font == null:
+		# Try TTC as fallback
+		font_path = "res://assets/fonts/modern/Inter.ttc"
+		base_font = load(font_path)
+	if base_font == null:
+		# Give up gracefully: let default engine fonts apply
+		return
+	# Create variation instances for bold/italic/bold-italic if supported
+	var bold_font: Font = base_font
+	var italic_font: Font = base_font
+	var bold_italic_font: Font = base_font
+	# FontVariation is available in Godot 4; use it to set OpenType axes when possible
+	# Guarded at runtime; if FontVariation class exists, use it for axis variations
+	if ClassDB.class_exists("FontVariation"):
+		var fv_bold = ClassDB.instantiate("FontVariation")
+		fv_bold.base_font = base_font
+		# Inter supports 'wght' axis; 700 approximates Bold
+		fv_bold.variation_opentype = {"wght": 700.0}
+		bold_font = fv_bold
+
+		var fv_italic = ClassDB.instantiate("FontVariation")
+		fv_italic.base_font = base_font
+		# Inter supports 'ital' axis for true italic, some builds use 'slnt'
+		fv_italic.variation_opentype = {"ital": 1.0}
+		italic_font = fv_italic
+
+		var fv_bold_italic = ClassDB.instantiate("FontVariation")
+		fv_bold_italic.base_font = base_font
+		fv_bold_italic.variation_opentype = {"wght": 700.0, "ital": 1.0}
+		bold_italic_font = fv_bold_italic
+
+	# Build a theme that assigns Inter to all key UI controls
+	var t := Theme.new()
+	t.set_default_font(base_font)
+	# RichTextLabel supports styled fonts
+	t.set_font("normal_font", "RichTextLabel", base_font)
+	t.set_font("bold_font", "RichTextLabel", bold_font)
+	t.set_font("italics_font", "RichTextLabel", italic_font)
+	t.set_font("bold_italics_font", "RichTextLabel", bold_italic_font)
+	# Core controls that show text
+	t.set_font("font", "LineEdit", base_font)
+	t.set_font("font", "Button", base_font)
+	t.set_font("font", "Label", base_font)
+	t.set_font("font", "SpinBox", base_font)
+	t.set_font("font", "CheckBox", base_font)
+	t.set_font("font", "OptionButton", base_font)
+	t.set_font("font", "ColorPickerButton", base_font)
+	# Apply to Chat UI subtree
+	self.theme = t
 
 func _on_password_censor_toggled(enabled: bool) -> void:
 	censor_passwords = enabled
@@ -497,6 +580,11 @@ func _on_auto_reconnect_toggled(enabled: bool) -> void:
 		_schedule_reconnect(true)
 
 func _on_reconnect_pressed() -> void:
+	# Fresh-start UX: when a player explicitly clicks "Reconnect Now",
+	# clear any prior scrollback (including partial acks) so the new session
+	# begins clean. We intentionally do NOT clear on auto-reconnects to
+	# preserve context during transient network blips.
+	_clear_log_and_reset()
 	_manual_reconnect()
 
 func _connect_to_configured_server() -> void:
@@ -540,3 +628,17 @@ func _on_server_settings_applied(host: String, port: int) -> void:
 	# Reconnect to new server
 	sio.close()
 	_connect_to_configured_server()
+
+# --- Log/State Reset Helpers ---
+# Clear chat scrollback and any ephemeral pending state. Used for explicit
+# user-initiated reconnects to provide a clean slate.
+func _clear_log_and_reset() -> void:
+	if is_instance_valid(log_display):
+		if log_display.has_method("clear"):
+			log_display.clear()
+		else:
+			# Fallback for engines without clear()
+			log_display.text = ""
+	_has_logged_anything = false
+	# Prevent any in-flight ack timeout from appending lines after clearing
+	_pending_ack.clear()

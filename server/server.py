@@ -11,6 +11,15 @@ What this file does (in plain English):
 - If AI isn't configured, we still send a friendly fallback message so the game works offline.
 
 You can change the NPC's name/personality by editing the 'prompt' and the emitted 'name'.
+
+Maintenance tip: you can reset the saved world state from the command line without starting the server.
+Run either of these from the repo root:
+
+    python server/server.py -Purge --yes
+    python server/server.py --purge
+
+The flag deletes server/world_state.json and writes a fresh default file, then exits. Add -y/--yes to skip
+the interactive confirmation in non-interactive environments (CI, containers).
 """
 
 # --- Async server selection & monkey patching (MUST be first, after __future__) ---
@@ -32,6 +41,60 @@ import atexit
 from typing import Any, cast
 import re
 import random
+# Early maintenance: handle CLI purge before heavy initialization
+try:
+    _argv_early = sys.argv[1:]
+except Exception:
+    _argv_early = []
+
+def _early_cli_purge_check():
+    """Delete persisted world state and exit if -purge/--purge flag is provided.
+
+    This runs very early to avoid spinning up the server or configuring AI when the
+    user only wants to reset the state file.
+    """
+    try:
+        argv = _argv_early
+        if not argv:
+            return
+        # Accept various casings and both single- and double-dash forms
+        has_purge = any(str(a).strip().lower() in ('-purge', '--purge') for a in argv)
+        if not has_purge:
+            return
+        auto_yes = any(str(a).strip().lower() in ('-y', '--yes') for a in argv)
+        if not auto_yes:
+            print("Are you sure you want to purge the world? This cannot be undone.")
+            try:
+                ans = input("Type 'Y' to confirm or 'N' to cancel: ")
+            except Exception:
+                print("No interactive input available; aborting purge. Use --yes to skip confirmation.")
+                sys.exit(1)
+            if str(ans).strip().lower() not in ('y', 'yes'):
+                print("Purge cancelled.")
+                sys.exit(0)
+        # Compute path relative to this file and execute purge via service helper
+        try:
+            from admin_service import execute_purge  # local import to avoid heavy deps early
+        except Exception as e:
+            print(f"Failed to initialize purge helper: {e}")
+            sys.exit(1)
+        state_path = os.path.join(os.path.dirname(__file__), 'world_state.json')
+        try:
+            _ = execute_purge(state_path)
+            print("World purged and reset to factory defaults.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Failed to purge world: {e}")
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        # If anything unexpected happens here, fail fast with a clear message
+        print(f"Unexpected error during early purge handling: {e}")
+        sys.exit(1)
+
+# Invoke early purge check before loading env, AI, Flask, or world
+_early_cli_purge_check()
 # Optional .env support
 try:
     from dotenv import load_dotenv  # type: ignore
