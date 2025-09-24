@@ -196,6 +196,8 @@ def _print_command_help() -> None:
     "  tell <Player or NPC> <message>       - speak directly to one person/NPC (room hears it)",
     "  whisper <Player or NPC> <message>    - private message; NPC always replies; not broadcast",
     "  roll <dice> [| Private]             - roll dice publicly or privately (e.g., 2d6+1)",
+    "  gesture <verb>                      - perform an emote (e.g., 'gesture wave' -> you wave)",
+    "  gesture <verb> to <target>          - targeted emote (e.g., 'gesture bow to Innkeeper')",
         "  interact with <Object>            - list possible interactions for an object and choose one",
         "  /rename <new name>                  - change your display name",
         "  /describe <text>                    - update your character description",
@@ -290,6 +292,8 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("whisper <Player or NPC> <message>                — private message; NPC always replies; not broadcast")
     lines.append("roll <dice> [| Private]                         — roll dice publicly or privately (e.g., 2d6+1)")
     lines.append("interact with <Object>                          — list possible interactions for an object and pick one")
+    lines.append("gesture <verb>                                  — perform an emote, e.g., gesture wave -> [i]You wave[/i]")
+    lines.append("gesture <verb> to <Player or NPC>               — targeted emote, e.g., gesture bow to Innkeeper")
     lines.append("/rename <new name>                               — change your display name")
     lines.append("/describe <text>                                 — update your character description")
     lines.append("/sheet                                           — show your character sheet")
@@ -1342,6 +1346,110 @@ def handle_message(data):
                 broadcast_to_room(player_obj.room_id, {
                     'type': 'system',
                     'content': f"{pname} pulls out the sacred geometric stones from their pocket and rolls {res_text}."
+                }, exclude_sid=sid)
+            return
+
+        # --- GESTURE command (non-slash) ---
+        if text_lower == "gesture" or text_lower.startswith("gesture "):
+            if sid not in world.players:
+                emit('message', {'type': 'error', 'content': 'Please authenticate first to gesture.'})
+                return
+            raw = player_message.strip()
+            verb = raw[len("gesture"):].strip()
+            if not verb:
+                emit('message', {'type': 'error', 'content': 'Usage: gesture <verb>'})
+                return
+            # Check for targeted form: "<verb> to <target>" (optionally starting with "a ")
+            player_obj = world.players.get(sid)
+            room = world.rooms.get(player_obj.room_id) if player_obj else None
+            lower_v = verb.lower()
+            to_idx = lower_v.find(" to ")
+            if to_idx != -1:
+                left = verb[:to_idx].strip()
+                target_raw = verb[to_idx + 4:].strip()
+                if not target_raw:
+                    emit('message', {'type': 'error', 'content': "Usage: gesture <verb> to <Player or NPC>"})
+                    return
+                # Drop a leading article "a " for natural phrasing: gesture a bow -> bow
+                if left.lower().startswith('a '):
+                    left = left[2:].strip()
+                if not left:
+                    emit('message', {'type': 'error', 'content': 'Please provide a verb before "to".'})
+                    return
+            
+                # Resolve target: prefer player in room; then NPC
+                psid, pname = _resolve_player_in_room(world, room, _strip_quotes(target_raw)) if room else (None, None)
+                target_is_player = bool(psid and pname)
+                npc_name_resolved = None
+                if not target_is_player and room:
+                    npcs = _resolve_npcs_in_room(room, [_strip_quotes(target_raw)])
+                    if npcs:
+                        npc_name_resolved = npcs[0]
+
+                if not target_is_player and not npc_name_resolved:
+                    emit('message', {'type': 'system', 'content': f"You don't see '{target_raw}' here."})
+                    return
+
+                # Conjugation helper (third person only for room broadcast)
+                def conjugate_third_person(word: str) -> str:
+                    w = word.strip()
+                    if not w:
+                        return w
+                    lw = w.lower()
+                    if len(lw) > 1 and lw.endswith('y') and lw[-2] not in 'aeiou':
+                        return w[:-1] + 'ies'
+                    if lw.endswith(('s', 'sh', 'ch', 'x', 'z')):
+                        return w + 'es'
+                    return w + 's'
+
+                parts = left.split()
+                first = conjugate_third_person(parts[0])
+                tail = " ".join(parts[1:])
+                action_third = (first + (" " + tail if tail else "")).strip()
+                action_second = left  # second person uses the raw phrase without article
+                pname_self = player_obj.sheet.display_name if player_obj else 'Someone'
+                # Sender view
+                emit('message', {'type': 'system', 'content': f"[i]You {action_second} to {pname or npc_name_resolved}[/i]"})
+                # Broadcast to room
+                if player_obj:
+                    broadcast_to_room(player_obj.room_id, {
+                        'type': 'system',
+                        'content': f"[i]{pname_self} {action_third} to {pname or npc_name_resolved}[/i]"
+                    }, exclude_sid=sid)
+
+                # If target is NPC, have them react like in tell
+                if npc_name_resolved:
+                    # Feed a descriptive message to the NPC reply engine
+                    _send_npc_reply(npc_name_resolved, f"performs a gesture: '{left}' to you.", sid)
+                return
+            # Very small English present-tense conjugation for third person singular
+            def conjugate_third_person(word: str) -> str:
+                w = word.strip()
+                if not w:
+                    return w
+                lw = w.lower()
+                # ends with 'y' and not a vowel before -> 'ies'
+                if len(lw) > 1 and lw.endswith('y') and lw[-2] not in 'aeiou':
+                    return w[:-1] + 'ies'
+                # ends with s, sh, ch, x, z -> add 'es'
+                if lw.endswith(('s', 'sh', 'ch', 'x', 'z')):
+                    return w + 'es'
+                # default add 's'
+                return w + 's'
+            # Conjugate only the first word; leave the rest as provided
+            parts = verb.split()
+            first = conjugate_third_person(parts[0])
+            tail = " ".join(parts[1:])
+            action = (first + (" " + tail if tail else "")).strip()
+            player_obj = world.players.get(sid)
+            pname = player_obj.sheet.display_name if player_obj else 'Someone'
+            # Tell the sender (second-person variant for clarity)
+            emit('message', {'type': 'system', 'content': f"[i]You {verb}[/i]"})
+            # Broadcast third-person to room
+            if player_obj:
+                broadcast_to_room(player_obj.room_id, {
+                    'type': 'system',
+                    'content': f"[i]{pname} {action}[/i]"
                 }, exclude_sid=sid)
             return
 

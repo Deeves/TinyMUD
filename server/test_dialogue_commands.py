@@ -167,3 +167,39 @@ def test_whisper_npc_is_private_to_sender(server_ctx):
     b_msgs = server_ctx.targeted.get("sidB", [])
     # Filter messages that would be caused by this action: no player or npc messages with this content should appear
     assert not any((m.get("type") in ("player", "npc")) and ("hush now" in m.get("content", "")) for m in b_msgs)
+
+
+def test_gesture_broadcast_and_sender_view(server_ctx):
+    # Alice performs a gesture; she should see a second-person italic line
+    # and Bob should see a third-person italic broadcast with conjugated verb.
+    server_ctx.send_as("sidA", "gesture wave")
+    # Sender view
+    a_msgs = server_ctx.sent_by_sid.get("sidA", [])
+    assert any(m.get("type") == "system" and m.get("content") == "[i]You wave[/i]" for m in a_msgs)
+    # Bob's broadcast
+    b_msgs = server_ctx.targeted.get("sidB", [])
+    assert any(m.get("type") == "system" and m.get("content") == "[i]Alice waves[/i]" for m in b_msgs)
+
+
+def test_targeted_gesture_to_player(server_ctx):
+    # Alice gestures to Bob; both see appropriate lines, no NPC involvement
+    server_ctx.send_as("sidA", "gesture a bow to Bob")
+    # Sender sees second-person
+    a_msgs = server_ctx.sent_by_sid.get("sidA", [])
+    assert any(m.get("type") == "system" and m.get("content") == "[i]You bow to Bob[/i]" for m in a_msgs)
+    # Bob sees third-person with conjugated verb
+    b_msgs = server_ctx.targeted.get("sidB", [])
+    assert any(m.get("type") == "system" and m.get("content") == "[i]Alice bows to Bob[/i]" for m in b_msgs)
+
+
+def test_targeted_gesture_to_npc_triggers_reply(server_ctx):
+    # Alice gestures to Innkeeper; NPC should reply (offline fallback ok)
+    server_ctx.send_as("sidA", "gesture a bow to Innkeeper")
+    # Sender second-person line
+    a_msgs = server_ctx.sent_by_sid.get("sidA", [])
+    assert any(m.get("type") == "system" and "[i]You bow to Innkeeper[/i]" == m.get("content") for m in a_msgs)
+    # Room sees third-person line
+    b_msgs = server_ctx.targeted.get("sidB", [])
+    assert any(m.get("type") == "system" and "[i]Alice bows to Innkeeper[/i]" == m.get("content") for m in b_msgs)
+    # NPC reply should appear locally to Alice
+    assert any(m.get("type") == "npc" for m in a_msgs), "Expected NPC to react to the gesture"
