@@ -12,5 +12,9 @@ config_version=5
 
 config/name="AI Multi User Dungeon"
 run/main_scene="uid://ba8tqqbwwdoco"
-config/features=PackedStringArray("4.5", "Forward Plus")
+config/features=PackedStringArray("4.5")
 config/icon="res://icon.svg"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

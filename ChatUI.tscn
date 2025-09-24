@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3 uid="uid://ba8tqqbwwdoco"]
 
 [ext_resource type="Script" uid="uid://4be784juhajl" path="res://src/chat_ui.gd" id="1_f5dq2"]
-[ext_resource type="FontFile" path="res://assets/fonts/PerfectDOSVGA437.ttf" id="2_41vka"]
+[ext_resource type="FontFile" uid="uid://bfxpq0elhrmp8" path="res://assets/fonts/classic/PerfectDOSVGA437.ttf" id="2_41vka"]
 
 [node name="ChatUi" type="Control"]
 layout_mode = 3
@@ -34,7 +34,6 @@ bbcode_enabled = true
 text = "TinyMUD V2.0.2 | "
 scroll_following = true
 context_menu_enabled = true
-threaded = true
 selection_enabled = true
 
 [node name="LineEdit" type="LineEdit" parent="."]

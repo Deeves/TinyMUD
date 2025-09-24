@@ -97,6 +97,9 @@ func _ready():
 	log_display.bbcode_enabled = true
 	log_display.autowrap_mode = TextServer.AUTOWRAP_WORD
 	log_display.scroll_following = true
+	# Export builds on some GPUs/drivers can crash when RichTextLabel runs threaded.
+	# Make sure threading is disabled regardless of scene defaults.
+	log_display.threaded = false
 	# Avoid the log attempting to grow with content height if containers allow it
 	# (defaults are typically fine, this is just a safety)
 	if log_display.has_method("set_fit_content"):
