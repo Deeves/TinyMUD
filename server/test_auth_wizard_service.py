@@ -62,3 +62,36 @@ def test_login_flow(ctx):
     handled, emits, broadcasts = _run(w, sid2, 'pw', sessions, admins, state_path, auth_sessions)
     assert handled
     assert sid2 in w.players
+
+
+def test_choose_list_users(ctx):
+    w, state_path, sessions, admins, auth_sessions = ctx
+    sid = 's_list'
+    # Initially no users
+    begin_choose(auth_sessions, sid)
+    handled, emits, _ = _run(w, sid, 'list', sessions, admins, state_path, auth_sessions)
+    assert handled
+    joined = "\n".join([e.get('content','') for e in emits])
+    assert 'No characters exist' in joined
+    # Create two users via create flow (seed through wizard for realism)
+    sid_seed = 'seedA'
+    begin_choose(auth_sessions, sid_seed)
+    _run(w, sid_seed, 'create', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed, 'Ada', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed, 'pw', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed, 'Adventurer A', sessions, admins, state_path, auth_sessions)
+    # Second
+    sid_seed2 = 'seedB'
+    begin_choose(auth_sessions, sid_seed2)
+    _run(w, sid_seed2, 'create', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed2, 'Bob', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed2, 'pw', sessions, admins, state_path, auth_sessions)
+    _run(w, sid_seed2, 'Adventurer B', sessions, admins, state_path, auth_sessions)
+    # Back to list on original sid; should see both names, order not critical but sorted in impl
+    auth_sessions.pop(sid, None)
+    begin_choose(auth_sessions, sid)
+    handled, emits, _ = _run(w, sid, 'list', sessions, admins, state_path, auth_sessions)
+    assert handled
+    text = "\n".join(e.get('content','') for e in emits)
+    assert 'Existing characters:' in text
+    assert 'Ada' in text and 'Bob' in text

@@ -28,7 +28,7 @@ def begin_register(auth_sessions: Dict[str, dict], sid: str) -> List[dict]:
 def begin_choose(auth_sessions: Dict[str, dict], sid: str) -> List[dict]:
     """Initialize an interactive auth session with a 'choose' prompt."""
     auth_sessions[sid] = {"mode": None, "step": "choose", "temp": {}}
-    return [{'type': 'system', 'content': 'Type "create" to forge a new character or "login" to sign in.'}]
+    return [{'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters.'}]
 
 
 def handle_interactive_auth(
@@ -67,7 +67,21 @@ def handle_interactive_auth(
             sess['step'] = 'name'
             emits.append({'type': 'system', 'content': 'Creation selected. Choose a display name (2-32 chars):'})
             return True, emits, broadcasts
-        emits.append({'type': 'system', 'content': 'Type "create" to forge a new character or "login" to sign in.'})
+        # New option: list users/characters
+        if text_lower in ("list", "users", "list users", "characters", "list characters"):
+            try:
+                users_map = getattr(world, 'users', {}) or {}
+                names = sorted([u.display_name for u in users_map.values() if getattr(u, 'display_name', None)])
+            except Exception:
+                names = []
+            if not names:
+                emits.append({'type': 'system', 'content': 'No characters exist yet.'})
+            else:
+                emits.append({'type': 'system', 'content': 'Existing characters: ' + ", ".join(names)})
+            # Stay in choose step and re-prompt with options
+            emits.append({'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters.'})
+            return True, emits, broadcasts
+        emits.append({'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters.'})
         return True, emits, broadcasts
 
     # Common cancel/back handling

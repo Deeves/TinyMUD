@@ -277,7 +277,7 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("/auth login <name> | <password>                   — log in to your character")
     lines.append("/auth list_admins                                 — list admin users")
     if not is_player:
-        lines.append("create | login                                   — interactive flows without /auth")
+        lines.append("create | login | list                          — interactive flows without /auth")
     lines.append("")
 
     # Player commands (only meaningful once logged in, but list for visibility)
@@ -758,7 +758,7 @@ def handle_connect():
     except Exception:
         pass
     emit('message', {'type': 'system', 'content': 'Welcome, traveler.'})
-    emit('message', {'type': 'system', 'content': 'Type "create" to forge a new character or "login" to sign in. You can also use /auth commands if you prefer.'})
+    emit('message', {'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters. You can also use /auth commands if you prefer.'})
 
 
 @socketio.on('disconnect')
