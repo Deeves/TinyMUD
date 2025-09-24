@@ -35,6 +35,7 @@ var _reconnect_timer: SceneTreeTimer
 var _reconnect_attempts: int = 0
 const RECONNECT_BASE_DELAY := 1.5
 const RECONNECT_MAX_DELAY := 10.0
+var _wrap_cols_cache: int = -1
 
 # --- UX helpers ---
 var _last_sent_message: String = ""
@@ -122,6 +123,17 @@ func _ready():
 
 	_connect_to_configured_server()
 
+	# Keep wrap cache up to date on size/theme changes
+	_refresh_wrap_cache()
+	if has_signal("resized"):
+		resized.connect(_refresh_wrap_cache)
+	if is_instance_valid(log_display) and log_display.has_signal("resized"):
+		log_display.resized.connect(_refresh_wrap_cache)
+	if has_signal("theme_changed"):
+		theme_changed.connect(_refresh_wrap_cache)
+	if is_instance_valid(log_display) and log_display.has_signal("theme_changed"):
+		log_display.theme_changed.connect(_refresh_wrap_cache)
+
 func _on_transport_opened():
 	# Underlying WebSocket engine is open; print immediately before any namespace events
 	append_to_log("[color=light blue]Connected.[/color]")
@@ -171,6 +183,14 @@ func _on_event(event_name: String, data: Variant) -> void:
 			append_to_log("[color=purple]Unknown message type: %s[/color]" % data["type"])
 
 func _handle_system_message(content: String) -> void:
+	# Help tables need monospace to keep columns aligned; detect and render as code
+	if _looks_like_help_table(content):
+		append_to_log("[color=green][code]%s[/code][/color]" % _normalize_help_text(content))
+		return
+	# Detect ASCII art style banners: many lines, heavy use of punctuation, few letters
+	if _looks_like_ascii_art(content):
+		append_to_log("[color=green][code]%s[/code][/color]" % content.strip_edges())
+		return
 	append_to_log("[color=green]%s[/color]" % content)
 	var c := content.to_lower()
 	if c.find("welcome back,") != -1 or c.find("character created. welcome,") != -1:
@@ -213,6 +233,238 @@ func _handle_system_message(content: String) -> void:
 		_expecting_password = false
 		input_box.secret = false
 
+
+# Heuristic to decide if a system message is ASCII art. We avoid relying on server
+# tags to keep transport simple.
+func _looks_like_ascii_art(text: String) -> bool:
+	# Basic shape: at least 6 lines and average line length >= 20
+	var lines := text.split("\n")
+	if lines.size() < 6:
+		return false
+	var long_count := 0
+	var symbol_count := 0
+	var letter_count := 0
+	for l_raw in lines:
+		var l := String(l_raw)
+		if l.length() >= 20:
+			long_count += 1
+		for i in l:
+			var ch := String(i)
+			if ch.is_valid_identifier():
+				# Count ASCII letters and digits as letters bucket
+				letter_count += 1
+			else:
+				# Punctuation, spaces, symbols
+				symbol_count += 1
+	# Many long lines and symbol density should dominate letters
+	var enough_long := long_count >= int(lines.size() * 0.5)
+	var symbol_ratio := 0.0
+	if symbol_count + letter_count > 0:
+		symbol_ratio = float(symbol_count) / float(symbol_count + letter_count)
+	return enough_long and symbol_ratio >= 0.7
+
+# Heuristic to decide if a system message is the multi-column /help output.
+# Characteristics: many lines, repeated pipes or wide dashes, and known headers.
+func _looks_like_help_table(text: String) -> bool:
+	var lines := text.split("\n")
+	if lines.size() < 10:
+		return false
+	var header_hint := false
+	var pipe_lines := 0
+	var double_space_lines := 0
+	var dash_lines := 0
+	for l_raw in lines:
+		var l := String(l_raw)
+		var lower := l.to_lower()
+		if lower.find("commands") != -1 or lower.find("tips") != -1 or lower.begins_with("auth") or lower.begins_with("player") or lower.begins_with("admin") or lower.begins_with("network"):
+			header_hint = true
+		# Many help rows use vertical bars and double-spaces for crude columns
+		if l.find("|") != -1:
+			pipe_lines += 1
+		if l.find("  ") != -1:
+			double_space_lines += 1
+		if l.find("—") != -1 or l.find("–") != -1:
+			dash_lines += 1
+	var structural := (pipe_lines >= 3 or double_space_lines >= 6 or dash_lines >= 3)
+	return header_hint and structural
+
+# Normalize unicode punctuation so monospace fonts align consistently
+func _normalize_help_text(text: String) -> String:
+	var s := String(text)
+	# Normalize newlines first
+	s = s.replace("\r\n", "\n")
+	s = s.replace("\r", "\n")
+	# Replace em/en dashes with a simple ASCII dash surrounded by spaces for clarity
+	s = s.replace("—", "-")
+	s = s.replace("–", "-")
+	# Replace box-drawing vertical bars with ASCII pipes if present
+	s = s.replace("│", "|")
+	# Normalize any non-breaking or thin spaces to regular spaces
+	s = s.replace("\u00A0", " ")
+	s = s.replace("\u2007", " ")
+	s = s.replace("\u202F", " ")
+	s = s.replace("\u2009", " ")
+	s = s.replace("\u200A", " ")
+	# Expand tabs to spaces to preserve alignment within RichTextLabel
+	s = s.replace("\t", "  ")
+	# Replace fancy bullets with ASCII asterisks
+	s = s.replace("•", "*")
+	# Align crude two-column rows so descriptions line up nicely
+	return _align_help_columns(s)
+
+# Pad a string on the right up to width using spaces
+func _pad_right(src: String, width: int) -> String:
+	if src.length() >= width:
+		return src
+	return src + " ".repeat(width - src.length())
+
+# Align lines that look like "command | - description" so that the dash/description
+# column starts at a uniform position. Also applies conservative manual wrapping so
+# continuation lines are indented under the description column.
+func _align_help_columns(text: String) -> String:
+	var lines: Array = text.split("\n")
+	var pairs: Array = []
+	var max_left := 0
+	# Detect separator index for each line and compute max left width
+	for l_raw in lines:
+		var l := String(l_raw)
+		var idx := -1
+		# Prefer pipe as column marker; fall back to " - " sequence
+		idx = l.find("|")
+		if idx == -1:
+			idx = l.find(" - ")
+		if idx != -1:
+			var left := l.substr(0, idx).strip_edges() # ok to trim both sides
+			var right := l.substr(idx)
+			pairs.append({"left": left, "right": right})
+			if left.length() > max_left:
+				max_left = left.length()
+		else:
+			pairs.append(null) # keep positions aligned
+	# Rebuild with alignment and simple wrapping
+	var out_lines: Array = []
+	var wrap_width := _get_wrap_width_chars() # dynamic chars-per-line estimate (cached)
+	for i in range(lines.size()):
+		var l2 := String(lines[i])
+		var meta: Variant = pairs[i]
+		if meta == null:
+			out_lines.append(l2)
+			continue
+		var left := String(meta["left"]) if meta != null else ""
+		var right := String(meta["right"]) if meta != null else ""
+		# Normalize right column start to a clear separator
+		# If it begins with a pipe, keep it; otherwise insert " | "
+		var sep := " | "
+		if right.begins_with("|"):
+			# keep existing pipe, strip any extra spacing and dash variants
+			right = _lstrip_chars(right.substr(1), " \t")
+		else:
+			# remove the leading dash spacing if coming from " - " find
+			right = _lstrip_chars(right, " -\t")
+		# Ensure a simple dash marker before description
+		right = "- " + right
+		var left_pad := _pad_right(left, max_left + 2)
+		var combined := left_pad + sep + right
+		# Manual wrap: if the line is very long, break at spaces and indent continuation
+		if combined.length() > wrap_width:
+			var words: Array = combined.split(" ")
+			var cur: String = ""
+			var indent := _spaces((max_left + 2) + sep.length() + 2) # align under description
+			for w in words:
+				var ws: String = String(w)
+				var candidate: String
+				if cur == "":
+					candidate = ws
+				else:
+					candidate = cur + " " + ws
+				if candidate.length() > wrap_width:
+					out_lines.append(cur)
+					cur = indent + w
+				else:
+					cur = candidate
+			if cur != "":
+				out_lines.append(cur)
+		else:
+			out_lines.append(combined)
+	return "\n".join(out_lines)
+
+# Estimate how many monospace characters fit across the log view.
+# Uses the RichTextLabel width and the mono font's measured width when available,
+# with a safe fallback based on the current font size.
+func _compute_wrap_width_chars() -> int:
+	var width_px: float = 800.0
+	if is_instance_valid(log_display):
+		width_px = max(0.0, float(log_display.size.x))
+		# Subtract theme stylebox horizontal content margins for more accurate content width
+		var sb: StyleBox = log_display.get_theme_stylebox("normal")
+		width_px -= _get_stylebox_h_margins(sb)
+	# Try to get the monospace font used by [code] in RichTextLabel
+	var font_size: int = current_font_size
+	var mono_font: Font = null
+	if is_instance_valid(log_display):
+		mono_font = log_display.get_theme_font("mono_font")
+	# Derive average char width
+	var char_px: float = max(6.0, float(font_size) * 0.6) # fallback heuristic
+	if mono_font != null and mono_font.has_method("get_string_size"):
+		var sample := "M".repeat(40)
+		var size_v := mono_font.get_string_size(sample, font_size)
+		if typeof(size_v) == TYPE_VECTOR2 and size_v.x > 0.0:
+			char_px = max(1.0, size_v.x / float(sample.length()))
+	# Convert pixels to columns, keep within a sensible range.
+	var cols: int = int(floor(width_px / char_px))
+	# Leave a tiny margin to avoid accidental wrap due to borders/padding
+	cols = cols - 2
+	# Clamp to avoid degenerate cases
+	cols = clamp(cols, 60, 320)
+	return cols
+
+# Cached wrap width computation and invalidation
+func _get_wrap_width_chars() -> int:
+	if _wrap_cols_cache > 0:
+		return _wrap_cols_cache
+	_wrap_cols_cache = _compute_wrap_width_chars()
+	return _wrap_cols_cache
+
+func _refresh_wrap_cache() -> void:
+	_wrap_cols_cache = _compute_wrap_width_chars()
+
+# Sum horizontal content margins from a StyleBox if available
+func _get_stylebox_h_margins(sb: StyleBox) -> float:
+	if sb == null:
+		return 0.0
+	var l := 0.0
+	var r := 0.0
+	if sb.has_method("get_content_margin"):
+		l = float(sb.get_content_margin(SIDE_LEFT))
+		r = float(sb.get_content_margin(SIDE_RIGHT))
+	elif sb.has_method("get_margin"):
+		l = float(sb.get_margin(SIDE_LEFT))
+		r = float(sb.get_margin(SIDE_RIGHT))
+	return l + r
+
+# Left-strip all characters in 'chars' from the start of 's'
+func _lstrip_chars(s: String, chars: String) -> String:
+	var out := s
+	var changed := true
+	while changed and out.length() > 0:
+		changed = false
+		for i in range(chars.length()):
+			var ch := String(chars[i])
+			if out.begins_with(ch):
+				out = out.substr(1)
+				changed = true
+				break
+	return out
+
+# Return a string of N spaces; avoids relying on String.repeat availability
+func _spaces(n: int) -> String:
+	if n <= 0:
+		return ""
+	var buf := ""
+	for _i in range(n):
+		buf += " "
+	return buf
+
 func _handle_player_message(pname: String, text: String) -> void:
 	append_to_log("[color=yellow]%s says:[/color] %s" % [pname, text])
 
@@ -232,28 +484,6 @@ func _on_text_submitted(player_text: String):
 	_last_sent_message = "" if was_password else player_text
 	# Don't echo auth commands as speech
 	if player_text.begins_with("/"):
-		# Client-side /help: show quick tips without round-trip
-		var low := player_text.strip_edges().to_lower()
-		var suppress_echo := false
-		if low == "/help":
-			var lines := [
-				"[b]Client Help[/b]",
-				"Type plain text to chat. Use 'say <text>' for NPC replies.",
-				"[b]Auth[/b]: /auth create <name> | <password> | <description> | /auth login <name> | <password>",
-				"[b]Basics[/b]: look | /rename <new> | /describe <text> | /sheet",
-				"[b]Admin[/b]: /teleport <room name>  |  /teleport <player> | <room name>",
-				"         /bring <player>  |  /kick <player>",
-				"[b]Network[/b]: /reconnect — retry connection now",
-				"Note: room names accept fuzzy matches (prefix/substring).",
-			]
-			for l in lines:
-				append_to_log(l)
-			input_box.clear()
-			input_box.grab_focus()
-			# Also fetch the authoritative, context-aware help from the server
-			# by letting the '/help' command continue to be emitted below.
-			# Avoid echoing '/help' as a gray line since we already printed tips.
-			suppress_echo = true
 		# Client-side command: /quit — graceful exit without sending to server
 		if player_text.strip_edges().to_lower() == "/quit":
 			append_to_log("[color=gray]Exiting. Safe travels![/color]")
@@ -261,9 +491,9 @@ func _on_text_submitted(player_text: String):
 			input_box.editable = false
 			return
 		# For /auth commands, echo with no special coloring but sanitize any password
-		if not suppress_echo and player_text.strip_edges().to_lower().begins_with("/auth"):
+		if player_text.strip_edges().to_lower().begins_with("/auth"):
 			append_to_log(_sanitize_auth_echo(player_text))
-		elif not suppress_echo:
+		else:
 			append_to_log("[color=gray]" + player_text + "[/color]")
 		# Client-side /reconnect command
 		if player_text.strip_edges().to_lower() == "/reconnect":
@@ -403,6 +633,7 @@ func _on_options_closed():
 func _on_text_size_changed(value: float) -> void:
 	current_font_size = int(value)
 	_apply_font_size(current_font_size)
+	_refresh_wrap_cache()
 
 func _on_bg_color_changed(color: Color) -> void:
 	current_bg_color = color
@@ -420,6 +651,12 @@ func _apply_font_size(p_size: int) -> void:
 	local_theme.set_default_font_size(p_size)
 	local_theme.set_font("normal_font", "RichTextLabel", base_font)
 	local_theme.set_font_size("normal_font_size", "RichTextLabel", p_size)
+
+	# Ensure the monospace face (if assigned) respects sizing
+	var mono_font: Font = log_display.get_theme_font("mono_font")
+	if mono_font != null:
+		local_theme.set_font("mono_font", "RichTextLabel", mono_font)
+		local_theme.set_font_size("mono_font_size", "RichTextLabel", p_size)
 
 	# Ensure styled variants match the same size
 	var bold_font: Font = log_display.get_theme_font("bold_font")
@@ -505,6 +742,7 @@ func _on_theme_option_changed(new_theme_name: String) -> void:
 	# Re-apply current size to ensure theme font resources use our size
 	_apply_font_size(current_font_size)
 	_save_settings()
+	_refresh_wrap_cache()
 
 # --- Theme application ---
 func _apply_theme_by_name(theme_name_value: String) -> void:
@@ -559,6 +797,12 @@ func _apply_modern_inter_theme() -> void:
 	t.set_font("bold_font", "RichTextLabel", bold_font)
 	t.set_font("italics_font", "RichTextLabel", italic_font)
 	t.set_font("bold_italics_font", "RichTextLabel", bold_italic_font)
+	# Provide a bundled monospace for [code] blocks and help tables
+	var mono_path := "res://assets/fonts/classic/PerfectDOSVGA437.ttf"
+	var mono_font: Font = load(mono_path)
+	if mono_font != null:
+		# Godot's RichTextLabel uses 'mono_font' when rendering [code]
+		t.set_font("mono_font", "RichTextLabel", mono_font)
 	# Core controls that show text
 	t.set_font("font", "LineEdit", base_font)
 	t.set_font("font", "Button", base_font)
@@ -569,6 +813,8 @@ func _apply_modern_inter_theme() -> void:
 	t.set_font("font", "ColorPickerButton", base_font)
 	# Apply to Chat UI subtree
 	self.theme = t
+	# Theme change affects font metrics
+	_refresh_wrap_cache()
 
 func _on_password_censor_toggled(enabled: bool) -> void:
 	censor_passwords = enabled

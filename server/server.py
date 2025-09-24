@@ -180,90 +180,128 @@ from interaction_service import begin_interaction as _interact_begin, handle_int
 
 def _print_command_help() -> None:
     """Print a quick reference of available in-game commands to the console."""
-    lines = [
-        "\n=== Server Command Quick Reference ===",
-        "Auth:",
-        "  /auth create <name> | <password> | <description>  - create an account & character",
-        "  /auth login <name> | <password>                   - log in to your character",
-        "",
-    "Player commands (after auth):",
-        "  look | l                             - describe your current room",
-        "  look at <name>                       - inspect a Player, NPC, or Object in the room",
-    "  move through <name>                  - go via a named door or travel point",
-    "  move up stairs | move down stairs    - use stairs, if present",
-    "  say <message>                        - say something; anyone present may respond",
-    "  say to <npc>[ and <npc>...]: <msg>  - address one or multiple NPCs directly",
-    "  tell <Player or NPC> <message>       - speak directly to one person/NPC (room hears it)",
-    "  whisper <Player or NPC> <message>    - private message; NPC always replies; not broadcast",
-    "  roll <dice> [| Private]             - roll dice publicly or privately (e.g., 2d6+1)",
-    "  gesture <verb>                      - perform an emote (e.g., 'gesture wave' -> you wave)",
-    "  gesture <verb> to <target>          - targeted emote (e.g., 'gesture bow to Innkeeper')",
-        "  interact with <Object>            - list possible interactions for an object and choose one",
-        "  /rename <new name>                  - change your display name",
-        "  /describe <text>                    - update your character description",
-        "  /sheet                              - show your character sheet",
-        "  /help                               - list available commands",
-        "",
-    "Admin commands (first created user is admin):",
-    "  /auth promote <name>                - elevate a user to admin",
-    "  /auth demote <name>                 - revoke a user's admin rights",
-    "  /auth list_admins                   - list admin users",
-        "  /kick <playerName>                  - disconnect a player",
-    "  /setup                              - start world setup (create first room & NPC)",
-    "  /teleport <room name>               - teleport yourself to a room (fuzzy; 'here' allowed)",
-    "  /teleport <player> | <room name>    - teleport another player (fuzzy; 'here' = your room)",
-    "  /bring <player>                     - bring a player to your current room",
-        "  /purge                              - reset world to factory default (confirmation required)",
-    "  /worldstate                         - print the redacted contents of world_state.json",
-    "  /safety <G|PG-13|R|OFF>            - set AI content safety level (admins)",
-        "",
-    "Room management:",
-    "  /room create <id> | <description>   - create a new room",
-    "  /room setdesc <id> | <description>  - update a room's description",
-    "  /room rename <room name> | <new room name>",
-    "  /room adddoor <room name> | <door name> | <target room name>",
-    "  /room removedoor <room name> | <door name>",
-    "  /room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>",
-    "  /room setstairs <room name> | <up room name or -> | <down room name or ->",
-    "  /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>",
-    "  /room linkstairs <room_a> | <up|down> | <room_b>",
-        "",
-    "Object management:",
-    "  /object createtemplateobject           - start a wizard to create and save an Object template",
-    "  /object createobject <room> | <name> | <desc> | <tag, tag, ...>  - create an Object in a room (supports 'here')",
-    "  /object createobject <room> | <name> | <desc> | <template_key>   - create from saved template (overrides name/desc)",
-    "  /object listtemplates                  - list saved object template keys",
-    "  /object viewtemplate <key>             - show a template's JSON by key",
-    "  /object deletetemplate <key>           - delete a template by key",
-    "",
-        "NPC management:",
-    "  /npc add <room name> | <npc name> | <desc>  - add an NPC to a room (and set description)",
-        "  /npc remove <npc name>                    - remove an NPC from your current room",
-        "  /npc setdesc <npc name> | <desc>          - set an NPC's description",
-    "  /npc setrelation <name> | <relationship> | <target> [| mutual] - link two entities; optional mutual makes it bidirectional",
-    "  /npc familygen <room name> | <target npc> | <relationship>  - [Experimental] AI-generate a related NPC, set mutual link, place in room",
-    "  /npc removerelations <name> | <target>    - remove any relationships in both directions",
-    "",
-    "Tips:",
-    "  - Use quotes around names with spaces: \"oak door\", \"Red Dragon\".",
-    "  - Use the | character to separate parts: /auth create Alice | pw | Adventurer.",
-    "  - You can use 'here' for room arguments: /teleport here, /object createobject here | name | desc | tag.",
-    "  - Names are fuzzy-resolved: exact > unique prefix > unique substring.",
-    "  - /say talks to the room, /tell talks to one target (room hears), /whisper is fully private.",
-        "======================================\n",
-    ]
+    def fmt(items: list[tuple[str, str]], indent: int = 2) -> list[str]:
+        pad = max((len(a) for a, _ in items), default=0)
+        rows = []
+        for a, b in items:
+            rows.append(" " * indent + a.ljust(pad) + "  - " + b)
+        return rows
+
+    lines: list[str] = []
+    lines.append("\n=== Server Command Quick Reference ===")
+
+    # Auth
+    lines.append("Auth:")
+    lines += fmt([
+        ("/auth create <name> | <password> | <description>", "create an account & character"),
+        ("/auth login <name> | <password>", "log in to your character"),
+        ("/auth list_admins", "list admin users"),
+    ])
+    lines.append("")
+
+    # Player basics
+    lines.append("Player commands (after auth):")
+    lines += fmt([
+        ("look | l", "describe your current room"),
+        ("look at <name>", "inspect a Player, NPC, or Object in the room"),
+        ("move through <name>", "go via a named door or travel point"),
+        ("move up stairs | move down stairs", "use stairs, if present"),
+        ("say <message>", "say something; anyone present may respond"),
+        ("say to <npc>[ and <npc>...]: <msg>", "address one or multiple NPCs directly"),
+        ("tell <Player or NPC> <message>", "speak directly to one person/NPC (room hears it)"),
+        ("whisper <Player or NPC> <message>", "private message; NPC always replies; not broadcast"),
+        ("roll <dice> [| Private]", "roll dice publicly or privately (e.g., 2d6+1)"),
+        ("gesture <verb>", "perform an emote (e.g., 'gesture wave' -> you wave)"),
+        ("gesture <verb> to <target>", "targeted emote (e.g., 'gesture bow to Innkeeper')"),
+        ("interact with <Object>", "list possible interactions for an object and choose one"),
+        ("/rename <new name>", "change your display name"),
+        ("/describe <text>", "update your character description"),
+        ("/sheet", "show your character sheet"),
+        ("/help", "list available commands"),
+    ])
+    lines.append("")
+
+    # Admin
+    lines.append("Admin commands (first created user is admin):")
+    lines += fmt([
+        ("/auth promote <name>", "elevate a user to admin"),
+        ("/auth demote <name>", "revoke a user's admin rights"),
+        ("/auth list_admins", "list admin users"),
+        ("/kick <playerName>", "disconnect a player"),
+        ("/setup", "start world setup (create first room & NPC)"),
+        ("/teleport <room name>", "teleport yourself to a room (fuzzy; 'here' allowed)"),
+        ("/teleport <player> | <room name>", "teleport another player (fuzzy; 'here' = your room)"),
+        ("/bring <player>", "bring a player to your current room"),
+        ("/purge", "reset world to factory default (confirmation required)"),
+        ("/worldstate", "print the redacted contents of world_state.json"),
+        ("/safety <G|PG-13|R|OFF>", "set AI content safety level (admins)"),
+    ])
+    lines.append("")
+
+    # Room management
+    lines.append("Room management:")
+    lines += fmt([
+        ("/room create <id> | <description>", "create a new room"),
+        ("/room setdesc <id> | <description>", "update a room's description"),
+        ("/room rename <room name> | <new room name>", "rename a room id (updates links)"),
+        ("/room adddoor <room name> | <door name> | <target room name>", "add a named door and link target"),
+        ("/room removedoor <room name> | <door name>", "remove a named door"),
+        ("/room lockdoor <door name> | <name, name, ...>", "lock to players or relationships"),
+        ("relationship: <type> with <name>", "...as an alternative lock rule"),
+        ("/room setstairs <room name> | <up room name or -> | <down room name or ->", "configure stairs"),
+        ("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>", "link two doors across rooms"),
+        ("/room linkstairs <room_a> | <up|down> | <room_b>", "link stairs between rooms"),
+    ])
+    lines.append("")
+
+    # Object management
+    lines.append("Object management:")
+    lines += fmt([
+        ("/object createtemplateobject", "start a wizard to create and save an Object template"),
+        ("/object createobject <room> | <name> | <desc> | <tag, tag, ...>", "create an Object in a room (supports 'here')"),
+        ("/object createobject <room> | <name> | <desc> | <template_key>", "create from saved template (overrides name/desc)"),
+        ("/object listtemplates", "list saved object template keys"),
+        ("/object viewtemplate <key>", "show a template's JSON by key"),
+        ("/object deletetemplate <key>", "delete a template by key"),
+    ])
+    lines.append("")
+
+    # NPC management
+    lines.append("NPC management:")
+    lines += fmt([
+        ("/npc add <room name> | <npc name> | <desc>", "add an NPC to a room and set description"),
+        ("/npc remove <npc name>", "remove an NPC from your current room"),
+        ("/npc setdesc <npc name> | <desc>", "set an NPC's description"),
+        ("/npc setrelation <name> | <relationship> | <target> [| mutual]", "link two entities; optional mutual"),
+        ("/npc familygen <room name> | <target npc> | <relationship>", "[Experimental] AI-generate a related NPC"),
+        ("/npc removerelations <name> | <target>", "remove relationships in both directions"),
+    ])
+    lines.append("")
+
+    # Tips
+    lines.append("Tips:")
+    lines.append("  - Use quotes around names with spaces: \"oak door\", \"Red Dragon\".")
+    lines.append("  - Use the | character to separate parts: /auth create Alice | pw | Adventurer.")
+    lines.append("  - You can use 'here' for room arguments: /teleport here, /object createobject here | name | desc | tag.")
+    lines.append("  - Names are fuzzy-resolved: exact > unique prefix > unique substring.")
+    lines.append("  - /say talks to the room, /tell talks to one target (room hears), /whisper is fully private.")
+    lines.append("======================================\n")
     print("\n".join(lines))
 
 
 def _build_help_text(sid: str | None) -> str:
-    """Return BBCode-formatted help text tailored to the current user.
+    """Return BBCode-formatted help text tailored to the current user with aligned columns.
 
-    - Unauthenticated: shows how to create/login and basic look/help.
-    - Player: shows movement, look, say, and profile commands.
-    - Admins: includes admin, room, and NPC management commands.
+    - Unauthenticated: shows a quick start plus auth and basics.
+    - Player: shows movement, talking, interactions, and profile commands.
+    - Admins: includes admin, room, object, and NPC management commands.
     """
     is_player = bool(sid and sid in world.players)
     is_admin = bool(sid and sid in admins)
+
+    def fmt(items: list[tuple[str, str]]) -> list[str]:
+        pad = max((len(a) for a, _ in items), default=0)
+        return [a.ljust(pad) + "  — " + b for a, b in items]
 
     lines: list[str] = []
 
@@ -271,74 +309,95 @@ def _build_help_text(sid: str | None) -> str:
     lines.append("[b]Commands[/b]")
     lines.append("")
 
+    # Quick start for new users
+    if not is_player:
+        lines.append("[b]Quick start[/b]")
+        lines += fmt([
+            ("create", "interactive account creation (same as /auth create)"),
+            ("login", "interactive login (same as /auth login)"),
+            ("list", "show existing characters you can log into"),
+        ])
+        lines.append("")
+
     # Auth section (always visible)
     lines.append("[b]Auth[/b]")
-    lines.append("/auth create <name> | <password> | <description>  — create an account & character")
-    lines.append("/auth login <name> | <password>                   — log in to your character")
-    lines.append("/auth list_admins                                 — list admin users")
-    if not is_player:
-        lines.append("create | login | list                          — interactive flows without /auth")
+    lines += fmt([
+        ("/auth create <name> | <password> | <description>", "create an account & character"),
+        ("/auth login <name> | <password>", "log in to your character"),
+        ("/auth list_admins", "list admin users"),
+    ])
     lines.append("")
 
-    # Player commands (only meaningful once logged in, but list for visibility)
+    # Player commands (listed for visibility even before login)
     lines.append("[b]Player[/b]")
-    lines.append("look | l                                         — describe your current room")
-    lines.append("look at <name>                                   — inspect a Player, NPC, or Object in the room")
-    lines.append("move through <name>                              — go via a named door or travel point")
-    lines.append("move up stairs | move down stairs                — use stairs, if present")
-    lines.append("say <message>                                    — say something; anyone present may respond")
-    lines.append("say to <npc>[ and <npc>...]: <msg>              — address one or multiple NPCs directly")
-    lines.append("tell <Player or NPC> <message>                   — speak directly to one person/NPC (room hears it)")
-    lines.append("whisper <Player or NPC> <message>                — private message; NPC always replies; not broadcast")
-    lines.append("roll <dice> [| Private]                         — roll dice publicly or privately (e.g., 2d6+1)")
-    lines.append("interact with <Object>                          — list possible interactions for an object and pick one")
-    lines.append("gesture <verb>                                  — perform an emote, e.g., gesture wave -> [i]You wave[/i]")
-    lines.append("gesture <verb> to <Player or NPC>               — targeted emote, e.g., gesture bow to Innkeeper")
-    lines.append("/rename <new name>                               — change your display name")
-    lines.append("/describe <text>                                 — update your character description")
-    lines.append("/sheet                                           — show your character sheet")
-    lines.append("/help                                            — show this help")
-    lines.append("")
+    lines += fmt([
+        ("look | l", "describe your current room"),
+        ("look at <name>", "inspect a Player, NPC, or Object in the room"),
+        ("move through <name>", "go via a named door or travel point"),
+        ("move up stairs | move down stairs", "use stairs, if present"),
+        ("say <message>", "say something; anyone present may respond"),
+        ("say to <npc>[ and <npc>...]: <msg>", "address one or multiple NPCs directly"),
+        ("tell <Player or NPC> <message>", "speak directly to one person/NPC (room hears it)"),
+        ("whisper <Player or NPC> <message>", "private message; NPC always replies; not broadcast"),
+        ("roll <dice> [| Private]", "roll dice publicly or privately (e.g., 2d6+1)"),
+        ("interact with <Object>", "list possible interactions for an object and pick one"),
+        ("gesture <verb>", "perform an emote (e.g., gesture wave -> You wave)"),
+        ("gesture <verb> to <Player or NPC>", "targeted emote (e.g., gesture bow to Innkeeper)"),
+        ("/rename <new name>", "change your display name"),
+        ("/describe <text>", "update your character description"),
+        ("/sheet", "show your character sheet"),
+        ("/help", "show this help"),
+    ])
 
     # Admin commands (only if current user is admin)
     if is_admin:
+        lines.append("")
         lines.append("[b]Admin[/b]")
-        lines.append("/auth promote <name>                             — elevate a user to admin")
-        lines.append("/auth demote <name>                              — revoke a user's admin rights")
-        lines.append("/kick <playerName>                               — disconnect a player")
-        lines.append("/setup                                           — start world setup (create first room & NPC)")
-        lines.append("/teleport <room name>                            — teleport yourself (fuzzy; 'here' allowed)")
-        lines.append("/teleport <player> | <room name>                 — teleport another player (fuzzy; 'here' = your room)")
-        lines.append("/bring <player>                                  — bring a player to your current room")
-        lines.append("/purge                                           — reset world to factory defaults (confirm)")
-        lines.append("/worldstate                                      — print redacted world_state.json")
-        lines.append("/safety <G|PG-13|R|OFF>                         — set AI content safety level")
+        lines += fmt([
+            ("/auth promote <name>", "elevate a user to admin"),
+            ("/auth demote <name>", "revoke a user's admin rights"),
+            ("/kick <playerName>", "disconnect a player"),
+            ("/setup", "start world setup (create first room & NPC)"),
+            ("/teleport <room name>", "teleport yourself (fuzzy; 'here' allowed)"),
+            ("/teleport <player> | <room name>", "teleport another player (fuzzy; 'here' = your room)"),
+            ("/bring <player>", "bring a player to your current room"),
+            ("/purge", "reset world to factory defaults (confirm)"),
+            ("/worldstate", "print redacted world_state.json"),
+            ("/safety <G|PG-13|R|OFF>", "set AI content safety level"),
+        ])
         lines.append("")
         lines.append("[b]Room management[/b]")
-        lines.append("/room create <id> | <description>                — create a new room")
-        lines.append("/room setdesc <id> | <description>               — update a room's description")
-        lines.append("/room rename <room name> | <new room name>       — change a room's internal id (updates links)")
-        lines.append("/room adddoor <room name> | <door name> | <target room name>")
-        lines.append("/room removedoor <room name> | <door name>")
-        lines.append("/room lockdoor <door name> | <name, name, ...>  or  relationship: <type> with <name>")
-        lines.append("/room setstairs <room name> | <up room name or -> | <down room name or ->")
-        lines.append("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>")
-        lines.append("/room linkstairs <room_a> | <up|down> | <room_b>")
+        lines += fmt([
+            ("/room create <id> | <description>", "create a new room"),
+            ("/room setdesc <id> | <description>", "update a room's description"),
+            ("/room rename <room name> | <new room name>", "change a room's internal id (updates links)"),
+            ("/room adddoor <room name> | <door name> | <target room name>", "add a door and link a target room"),
+            ("/room removedoor <room name> | <door name>", "remove a named door"),
+            ("/room lockdoor <door name> | <name, name, ...>", "lock to players or relationships"),
+            ("relationship: <type> with <name>", "...as an alternative lock rule"),
+            ("/room setstairs <room name> | <up room name or -> | <down room name or ->", "configure stairs"),
+            ("/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>", "link two doors across rooms"),
+            ("/room linkstairs <room_a> | <up|down> | <room_b>", "link stairs between rooms"),
+        ])
         lines.append("")
         lines.append("[b]Object management[/b]")
-        lines.append("/object createtemplateobject                     — start a wizard to create and save an Object template")
-        lines.append("/object createobject <room> | <name> | <desc> | <tags or template_key> — create an Object in a room (supports 'here')")
-        lines.append("/object listtemplates                            — list saved object template keys")
-        lines.append("/object viewtemplate <key>                       — show a template's JSON by key")
-        lines.append("/object deletetemplate <key>                     — delete a template by key")
+        lines += fmt([
+            ("/object createtemplateobject", "start a wizard to create and save an Object template"),
+            ("/object createobject <room> | <name> | <desc> | <tags or template_key>", "create an Object in a room (supports 'here')"),
+            ("/object listtemplates", "list saved object template keys"),
+            ("/object viewtemplate <key>", "show a template's JSON by key"),
+            ("/object deletetemplate <key>", "delete a template by key"),
+        ])
         lines.append("")
         lines.append("[b]NPC management[/b]")
-        lines.append("/npc add <room name> | <npc name> | <desc>       — add an NPC to a room and set description")
-        lines.append("/npc remove <npc name>                           — remove an NPC from your current room")
-        lines.append("/npc setdesc <npc name> | <desc>                 — set an NPC's description")
-        lines.append("/npc setrelation <name> | <relationship> | <target> [| mutual] — link two entities; optional mutual makes it bidirectional")
-        lines.append("/npc familygen <room name> | <target npc> | <relationship>    — [Experimental] AI-generate a related NPC, set mutual link, place in room")
-        lines.append("/npc removerelations <name> | <target>           — remove any relationships in both directions")
+        lines += fmt([
+            ("/npc add <room name> | <npc name> | <desc>", "add an NPC to a room and set description"),
+            ("/npc remove <npc name>", "remove an NPC from your current room"),
+            ("/npc setdesc <npc name> | <desc>", "set an NPC's description"),
+            ("/npc setrelation <name> | <relationship> | <target> [| mutual]", "link two entities; optional mutual"),
+            ("/npc familygen <room name> | <target npc> | <relationship>", "[Experimental] AI-generate a related NPC, set mutual link, place in room"),
+            ("/npc removerelations <name> | <target>", "remove any relationships in both directions"),
+        ])
 
     # Tips (always shown)
     lines.append("")
