@@ -816,7 +816,41 @@ def handle_connect():
             emit('message', {'type': 'system', 'content': ASCII_ART})
     except Exception:
         pass
-    emit('message', {'type': 'system', 'content': 'Welcome, traveler.'})
+    # Welcome banner: if the world has been set up and named, include it in the greeting.
+    try:
+        welcome_text = 'Welcome, traveler.'
+        if getattr(world, 'setup_complete', False):
+            nm = getattr(world, 'world_name', None)
+            if isinstance(nm, str) and nm.strip():
+                nm_clean = nm.strip()
+                welcome_text = f"Welcome to {nm_clean}, Traveler."
+                emit('message', {'type': 'system', 'content': welcome_text})
+                # Follow with an immersive one-paragraph introduction using world description and conflict
+                try:
+                    desc = getattr(world, 'world_description', None)
+                    conflict = getattr(world, 'world_conflict', None)
+                    parts = []
+                    # Always start with arrival line mentioning the world name for flavor
+                    lead = f"You arrive in [b]{nm_clean}[/b]."
+                    parts.append(lead)
+                    if isinstance(desc, str) and desc.strip():
+                        parts.append(desc.strip())
+                    if isinstance(conflict, str) and conflict.strip():
+                        parts.append(f"Yet all is not well: {conflict.strip()}")
+                    if len(parts) > 1:
+                        paragraph = " ".join(parts)
+                        emit('message', {'type': 'system', 'content': f"[i]{paragraph}[/i]"})
+                except Exception:
+                    pass
+                # Skip the generic welcome emit since we already emitted the named one
+                pass
+            else:
+                emit('message', {'type': 'system', 'content': welcome_text})
+        else:
+            emit('message', {'type': 'system', 'content': welcome_text})
+    except Exception:
+        # Fallback to original static greeting on any unexpected error
+        emit('message', {'type': 'system', 'content': 'Welcome, traveler.'})
     emit('message', {'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters. You can also use /auth commands if you prefer.'})
 
 
