@@ -4,11 +4,7 @@ TinyMUD is a thought experiment in revisiting the concept of a minimalistic, ext
 
 ## Features
 
-- **Minimalistic Design**: TinyMUD focuses on the core aspects of MUD gameplay, providing a simple yet powerful foundation for developers.
-- **Extensibility**: The modular architecture allows for easy addition of new features and mechanics, enabling developers to customize their game worlds.
-- **Lightweight**: The TinyMUD client is less than 10mb in size, as small as a .png file.
-- **Cutting Edge Technology**: Leveraging Godot 4, TinyMUD aims to provide the most state-of-the-art and feature-rich multiplayer text adventure platform possible.
-- **AI Integration**: The server can optionally integrate with Gemini (or other AI models) to provide dynamic NPC interactions, enhancing the gameplay experience.
+- Crafting spots: Any Object can advertise a crafting action by adding an object tag of the form `craft spot:<template_key>`. When players interact with the object, a "Craft <Template Display Name>" action appears. Choosing it spawns a fresh instance of the referenced template into the room. If the template key is missing, an error is shown. This aligns with the service pattern—interactions are handled in `interaction_service.py`.
 
 ## Big picture
 

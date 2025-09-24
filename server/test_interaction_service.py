@@ -267,3 +267,122 @@ def test_container_second_search_is_blocked(monkeypatch):
     count_after_second = sum(1 for o in list(chest.container_small_slots) + list(chest.container_large_slots) if o)
     assert count_after_second == count_after_first
 
+
+def test_craft_spot_lists_craft_action_and_spawns():
+    w, sid, room = _setup_world_with_player_and_room()
+    # Prepare a template that can be crafted here
+    from world import Object
+    sword_tpl = Object(display_name="Iron Sword", object_tags={"one-hand", "weapon"})
+    w.object_templates["iron_sword"] = sword_tpl
+    # Place a crafting station object with the dynamic tag
+    anvil = Object(display_name="Anvil", object_tags={"Immovable", "craft spot:iron_sword"})
+    room.objects[anvil.uuid] = anvil
+    sessions = {}
+    # Begin interaction and expect a Craft action
+    ok, err, emits = begin_interaction(w, sid, room, "anvil", sessions)
+    assert ok and err is None and emits
+    menu = emits[0]['content']
+    assert "Craft Iron Sword" in menu or "Craft iron_sword" in menu
+    # Choose the craft option by name
+    handled, emits2, _b = handle_interaction_input(w, sid, "Craft Iron Sword", sessions)
+    assert handled
+    # Should report crafting and spawn the object in the room
+    combined = "\n".join(e.get('content', '') for e in emits2)
+    assert "craft" in combined.lower()
+    names = [o.display_name for o in room.objects.values()]
+    assert any(n == "Iron Sword" for n in names)
+
+
+def test_craft_spot_missing_template_reports_error():
+    w, sid, room = _setup_world_with_player_and_room()
+    from world import Object
+    bench = Object(display_name="Workbench", object_tags={"Immovable", "craft spot:missing_key"})
+    room.objects[bench.uuid] = bench
+    sessions = {}
+    ok, err, emits = begin_interaction(w, sid, room, "workbench", sessions)
+    assert ok
+    # Even if action is listed, attempting should error due to missing template
+    handled, emits2, _b = handle_interaction_input(w, sid, "Craft missing_key", sessions)
+    assert handled
+    assert any(e.get('type') == 'error' for e in emits2)
+
+
+def test_craft_requires_components_in_inventory():
+    w, sid, room = _setup_world_with_player_and_room()
+    from world import Object
+    # Define a recipe requiring Hammer and Bronze Ingot
+    hammer = Object(display_name="Hammer")
+    ingot = Object(display_name="Bronze Ingot")
+    sword_tpl = Object(display_name="Bronze Sword", crafting_recipe=[hammer, ingot])
+    w.object_templates["bronze_sword"] = sword_tpl
+    station = Object(display_name="Forge", object_tags={"Immovable", "craft spot:bronze_sword"})
+    room.objects[station.uuid] = station
+    sessions = {}
+    ok, err, _ = begin_interaction(w, sid, room, "forge", sessions)
+    assert ok
+    # First attempt without components should error
+    handled, emits1, _b = handle_interaction_input(w, sid, "Craft Bronze Sword", sessions)
+    assert handled
+    assert any(e.get('type') == 'error' and 'required components' in e.get('content', '').lower() for e in emits1)
+    # Add only Hammer -> still error (missing Bronze Ingot)
+    inv = w.players[sid].sheet.inventory
+    inv.slots[1] = Object(display_name="Hammer", object_tags={"one-hand"})
+    sessions2 = {}
+    ok2, err2, _ = begin_interaction(w, sid, room, "forge", sessions2)
+    assert ok2
+    handled2, emits2, _b2 = handle_interaction_input(w, sid, "Craft Bronze Sword", sessions2)
+    assert handled2
+    combined2 = "\n".join(e.get('content', '') for e in emits2)
+    assert 'bronze ingot' in combined2.lower()
+    # Add Bronze Ingot as well -> craft succeeds
+    inv.slots[0] = Object(display_name="Bronze Ingot", object_tags={"one-hand"})
+    sessions3 = {}
+    ok3, err3, _ = begin_interaction(w, sid, room, "forge", sessions3)
+    assert ok3
+    handled3, emits3, _b3 = handle_interaction_input(w, sid, "Craft Bronze Sword", sessions3)
+    assert handled3
+    assert any('you craft a bronze sword' in e.get('content', '').lower() for e in emits3)
+    assert any(o.display_name == "Bronze Sword" for o in room.objects.values())
+    # Components should be consumed: both Hammer and Bronze Ingot removed
+    hands = [inv.slots[0], inv.slots[1]]
+    assert not any(it and getattr(it, 'display_name', '') in ("Hammer", "Bronze Ingot") for it in hands)
+
+
+def test_craft_consumes_quantity_duplicates():
+    w, sid, room = _setup_world_with_player_and_room()
+    from world import Object
+    # Recipe requires two Nails
+    nails1 = Object(display_name="Nails")
+    nails2 = Object(display_name="Nails")
+    stool_tpl = Object(display_name="Wooden Stool", crafting_recipe=[nails1, nails2])
+    w.object_templates["stool"] = stool_tpl
+    bench = Object(display_name="Workbench", object_tags={"Immovable", "craft spot:stool"})
+    room.objects[bench.uuid] = bench
+    # Place two Nails in inventory (small slots)
+    inv = w.players[sid].sheet.inventory
+    inv.slots[2] = Object(display_name="Nails", object_tags={"one-hand"})
+    inv.slots[3] = Object(display_name="Nails", object_tags={"one-hand"})
+    sessions = {}
+    ok, err, _ = begin_interaction(w, sid, room, "workbench", sessions)
+    assert ok
+    handled, emits, _b = handle_interaction_input(w, sid, "Craft Wooden Stool", sessions)
+    assert handled
+    assert any('you craft a wooden stool' in e.get('content', '').lower() for e in emits)
+    # Both Nails should be consumed
+    assert inv.slots[2] is None and inv.slots[3] is None
+
+
+def test_craft_with_empty_recipe_succeeds():
+    w, sid, room = _setup_world_with_player_and_room()
+    from world import Object
+    tpl = Object(display_name="Wooden Stick")
+    w.object_templates["stick"] = tpl
+    bench = Object(display_name="Workbench", object_tags={"Immovable", "craft spot:stick"})
+    room.objects[bench.uuid] = bench
+    sessions = {}
+    ok, err, _ = begin_interaction(w, sid, room, "workbench", sessions)
+    assert ok
+    handled, emits, _b = handle_interaction_input(w, sid, "Craft Wooden Stick", sessions)
+    assert handled
+    assert any('you craft a wooden stick' in e.get('content', '').lower() for e in emits)
+

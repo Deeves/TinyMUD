@@ -48,14 +48,49 @@ def _unique_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
-def _actions_for_object(obj) -> list[str]:
+def _actions_for_object(world, obj) -> list[str]:
+    """Return available actions for an object, including dynamic ones.
+
+    In addition to static tag→action mappings, this inspects tags for
+    parameterized affordances like 'craft spot:<template_key>' and adds a
+    corresponding Craft action when a template is available.
+    """
     actions: list[str] = []
     try:
         tags = set(getattr(obj, 'object_tags', []) or [])
-        for t in tags:
+        # Static tag-based actions
+        for t in list(tags):
             tstr = str(t)
             if tstr in _TAG_TO_ACTIONS:
                 actions.extend(_TAG_TO_ACTIONS[tstr])
+        # Dynamic: craft spot:<template_key>
+        for t in list(tags):
+            try:
+                tstr = str(t)
+            except Exception:
+                continue
+            low = tstr.strip().lower()
+            if low.startswith('craft spot:'):
+                key_raw = tstr.split(':', 1)[1].strip()
+                if not key_raw:
+                    continue
+                store = getattr(world, 'object_templates', {}) or {}
+                key_match = None
+                if key_raw in store:
+                    key_match = key_raw
+                else:
+                    for k in store.keys():
+                        if k.lower() == key_raw.lower():
+                            key_match = k
+                            break
+                # Prefer the template's display name when known; else show the key
+                label_name = key_raw
+                try:
+                    if key_match and store.get(key_match):
+                        label_name = getattr(store[key_match], 'display_name', key_match) or key_match
+                except Exception:
+                    label_name = key_raw
+                actions.append(f"Craft {label_name}")
     except Exception:
         pass
     # Always allow cancelling
@@ -85,7 +120,7 @@ def begin_interaction(world, sid: str, room, object_name: str, sessions: Dict[st
             return False, "Did you mean: " + ", ".join(suggestions) + "?", []
         return False, f"You don't see '{object_name}' here.", []
 
-    actions = _actions_for_object(obj)
+    actions = _actions_for_object(world, obj)
     # Stash session state
     sessions[sid] = {
         'step': 'choose',
@@ -204,6 +239,124 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         if not ok:
             return True, [{'type': 'error', 'content': err or 'You cannot go that way.'}], []
         return True, emits_m, broadcasts_m
+
+    # Craft action(s): derived from 'craft spot:<template_key>' tags
+    if chosen.lower().startswith('craft'):
+        # Recompute dynamic mapping in case actions list was truncated by UI
+        target_key: str | None = None
+        target_label: str | None = None
+        try:
+            tags = set(getattr(obj, 'object_tags', []) or []) if obj else set()
+        except Exception:
+            tags = set()
+        store = getattr(world, 'object_templates', {}) or {}
+        # Build candidates [(label, key)]
+        candidates: list[tuple[str, str]] = []
+        for t in list(tags):
+            tstr = str(t)
+            if tstr.lower().startswith('craft spot:'):
+                key_raw = tstr.split(':', 1)[1].strip()
+                if not key_raw:
+                    continue
+                key_match = None
+                if key_raw in store:
+                    key_match = key_raw
+                else:
+                    for k in store.keys():
+                        if k.lower() == key_raw.lower():
+                            key_match = k
+                            break
+                label_name = key_raw
+                if key_match and store.get(key_match):
+                    try:
+                        label_name = getattr(store[key_match], 'display_name', key_match) or key_match
+                    except Exception:
+                        label_name = key_match
+                candidates.append((f"Craft {label_name}", key_match or key_raw))
+        # Resolve which candidate the user picked
+        if len(candidates) == 1 and chosen.lower() == 'craft':
+            target_label, target_key = candidates[0]
+        else:
+            low = chosen.lower()
+            for lbl, key in candidates:
+                if lbl.lower() == low or lbl.lower().startswith(low):
+                    target_label, target_key = lbl, key
+                    break
+        if not target_key:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': 'This crafting spot is misconfigured or offers nothing to craft.'}], []
+        # Locate template and spawn a fresh instance into the current room
+        tmpl = store.get(target_key) or next((store[k] for k in store.keys() if k.lower() == target_key.lower()), None)
+        if not tmpl:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': f"Crafting failed: template '{target_key}' not found."}], []
+        try:
+            # If the template specifies a crafting_recipe, require the player to have
+            # each listed component in their inventory (match by display_name, case-insensitive).
+            # The station (craft spot object) itself is not a component; only crafting_recipe items.
+            # If any component is missing, report what's needed and abort.
+            try:
+                required = [getattr(o, 'display_name', None) for o in (getattr(tmpl, 'crafting_recipe', []) or [])]
+                required = [str(n).strip() for n in required if n and str(n).strip()]
+            except Exception:
+                required = []
+            if required:
+                # Gather inventory names across all slots
+                inv_names: list[str] = []
+                if inv is not None:
+                    for it in (inv.slots or []):
+                        if it and getattr(it, 'display_name', None):
+                            inv_names.append(str(getattr(it, 'display_name')).strip())
+                # Count and compare case-insensitively
+                from collections import Counter
+                req_counts = Counter([n.lower() for n in required])
+                have_counts = Counter([n.lower() for n in inv_names])
+                missing_list: list[str] = []
+                for nm, cnt in req_counts.items():
+                    if have_counts.get(nm, 0) < cnt:
+                        # Use original-cased name for message when available
+                        # Find an example casing from required list
+                        example = next((r for r in required if r.lower() == nm), nm)
+                        deficit = cnt - have_counts.get(nm, 0)
+                        if deficit == 1:
+                            missing_list.append(example)
+                        else:
+                            missing_list.append(f"{deficit}x {example}")
+                if missing_list:
+                    sessions.pop(sid, None)
+                    return True, [{'type': 'error', 'content': 'You lack the required components to craft this: ' + ", ".join(missing_list)}], []
+                # Consume components: remove the needed number of items from inventory slots.
+                # Strategy: scan slots left-to-right and null out matching items until counts satisfied.
+                if inv is not None:
+                    to_remove = dict(req_counts)
+                    for idx in range(0, len(inv.slots)):
+                        if all(v <= 0 for v in to_remove.values()):
+                            break
+                        it = inv.slots[idx]
+                        if not it or not getattr(it, 'display_name', None):
+                            continue
+                        nm = str(getattr(it, 'display_name')).strip().lower()
+                        if to_remove.get(nm, 0) > 0:
+                            # Remove this item
+                            inv.slots[idx] = None
+                            to_remove[nm] -= 1
+                    # Safety check: if for some reason we couldn't remove all, abort
+                    if any(v > 0 for v in to_remove.values()):
+                        sessions.pop(sid, None)
+                        return True, [{'type': 'error', 'content': 'Crafting failed: inventory changed and components are no longer available.'}], []
+            from world import Object as _Obj
+            made = _Obj.from_dict(tmpl.to_dict()) if hasattr(tmpl, 'to_dict') else _Obj.from_dict(tmpl)
+            # Place in room (simple initial rule: spawns into the world at the spot)
+            if room is None:
+                # Fallback if room missing
+                sessions.pop(sid, None)
+                return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+            room.objects[made.uuid] = made
+            sessions.pop(sid, None)
+            return True, [{'type': 'system', 'content': f"You craft a {getattr(made, 'display_name', 'mystery item')}."}], []
+        except Exception as e:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': f'Crafting failed: {e}'}], []
 
     def _place_in_hand(o) -> tuple[bool, str | None, int | None]:
         # Prefer right hand (1), then left hand (0)
