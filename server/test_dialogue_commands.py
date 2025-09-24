@@ -108,6 +108,19 @@ def test_say_broadcast_to_room(server_ctx):
     assert all(m.get("type") != "player" or m.get("content") != "Hello room" for m in server_ctx.sent_by_sid.get("sidA", []))
 
 
+def test_quoted_text_becomes_say(server_ctx):
+    # Quoted text should be treated exactly like a say message
+    server_ctx.send_as("sidA", '"Hello room"')
+    b_msgs = server_ctx.targeted.get("sidB", [])
+    assert b_msgs, "Bob should receive at least one message from quoted say"
+    last = b_msgs[-1]
+    assert last.get("type") == "player"
+    assert last.get("name") == "Alice"
+    assert last.get("content") == "Hello room"
+    # No local echo to Alice
+    assert not any(m.get("type") == "player" and m.get("content") == "Hello room" for m in server_ctx.sent_by_sid.get("sidA", []))
+
+
 def test_say_to_targets_triggers_npc_replies(server_ctx):
     # Targeted say should trigger NPC replies regardless of random chance.
     server_ctx.send_as("sidA", "say to Innkeeper and Gate Guard: Greetings")

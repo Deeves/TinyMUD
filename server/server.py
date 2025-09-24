@@ -1159,6 +1159,22 @@ def handle_message(data):
                     pass
                 return
 
+        # Convenience: if the input is just a quoted string, treat it as a say message.
+        # Examples: "Hello there" -> say Hello there; 'Howdy' -> say Howdy
+        # Apply only in normal chat flow (not during setup/auth/object/interaction wizards which returned earlier).
+        try:
+            s = player_message.strip()
+            m = re.fullmatch(r'"([^"\n\r]+)"', s)
+            m2 = m or re.fullmatch(r"'([^'\n\r]+)'", s)
+            if m2:
+                inner = (m2.group(1) or '').strip()
+                if inner:
+                    player_message = f"say {inner}"
+                    text_lower = player_message.lower()
+        except Exception:
+            # Best-effort; ignore on any unexpected error
+            pass
+
         # Movement: through doors or stairs
         if sid and sid in world.players:
             try:
