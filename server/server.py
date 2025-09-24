@@ -179,12 +179,28 @@ from interaction_service import begin_interaction as _interact_begin, handle_int
 
 
 def _print_command_help() -> None:
-    """Print a quick reference of available in-game commands to the console."""
+    """Print a quick reference of available in-game commands to the console.
+
+    The description column is aligned by enforcing a fixed command-column width.
+    Commands longer than this width are truncated with an ellipsis so the
+    description starts at a predictable column in all sections.
+    """
+    # Chosen to keep lines readable in typical 100–120 char consoles.
+    CMD_COL_MAX = 42
+
+    def _fmt_cmd(s: str, width: int) -> str:
+        """Return s padded/truncated to exactly width using ASCII ellipsis if needed."""
+        if len(s) <= width:
+            return s.ljust(width)
+        if width <= 3:
+            return s[:width]
+        # Reserve 3 chars for ASCII ellipsis
+        return s[: width - 3] + "..."
+
     def fmt(items: list[tuple[str, str]], indent: int = 2) -> list[str]:
-        pad = max((len(a) for a, _ in items), default=0)
         rows = []
         for a, b in items:
-            rows.append(" " * indent + a.ljust(pad) + "  - " + b)
+            rows.append(" " * indent + _fmt_cmd(a, CMD_COL_MAX) + "  - " + b)
         return rows
 
     lines: list[str] = []
@@ -299,9 +315,20 @@ def _build_help_text(sid: str | None) -> str:
     is_player = bool(sid and sid in world.players)
     is_admin = bool(sid and sid in admins)
 
+    # Use the same fixed column across sections so the description column aligns.
+    CMD_COL_MAX = 42
+
+    def _fmt_cmd(s: str, width: int) -> str:
+        # Keep alignment stable; use ASCII ellipsis when too long.
+        if len(s) <= width:
+            return s.ljust(width)
+        if width <= 3:
+            return s[:width]
+        return s[: width - 3] + "..."
+
     def fmt(items: list[tuple[str, str]]) -> list[str]:
-        pad = max((len(a) for a, _ in items), default=0)
-        return [a.ljust(pad) + "  — " + b for a, b in items]
+        # Use ASCII separator for consistent width across renderers
+        return [_fmt_cmd(a, CMD_COL_MAX) + "  - " + b for a, b in items]
 
     lines: list[str] = []
 
