@@ -994,6 +994,17 @@ def handle_message(data):
             temp = sess.get("temp", {})
             text_stripped = player_message.strip()
             text_lower2 = text_stripped.lower()
+            
+            # Treat several tokens as explicit "skip" in addition to true Enter (blank input),
+            # because some clients may not send empty messages.
+            def _is_skip(s: str) -> bool:
+                sl = (s or "").strip().lower()
+                return sl == "" or sl in ("skip", "none", "-")
+
+            # Local echo helper: show user's raw entry as a plain system line (no 'You ' prefix)
+            def _echo_raw(s: str) -> None:
+                if s and not _is_skip(s):
+                    emit('message', {'type': 'system', 'content': s})
             # Allow cancel
             if text_lower2 in ("cancel",):
                 object_template_sessions.pop(sid_str, None)
@@ -1007,17 +1018,15 @@ def handle_message(data):
                 prompts = {
                     'template_key': "Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:",
                     'display_name': "Enter display name (required), e.g., Bronze Sword:",
-                    'description': "Enter a short description (optional, Enter to skip):",
+                    'description': "Enter a short description (required):",
                     'object_tags': "Enter comma-separated tags (optional; default: one-hand). Examples: weapon,cutting damage,one-hand:",
-                    'material_tag': "Enter material tag (optional), e.g., bronze (Enter to skip):",
-                    'value': "Enter value in coins (optional integer; Enter to skip):",
-                    'durability': "Enter durability (optional integer; Enter to skip):",
-                    'quality': "Enter quality (optional), e.g., average (Enter to skip):",
-                    'link_target_room_id': "If this is a travel point, enter a room id/name to link (supports 'here', fuzzy). Otherwise Enter to skip:",
-                    'link_to_object_uuid': "If this links to another object UUID, enter it (optional; Enter to skip):",
+                    'material_tag': "Enter material tag (optional), e.g., bronze (Enter to skip or type 'skip'):",
+                    'value': "Enter value in coins (optional integer; Enter to skip or type 'skip'):",
+                    'durability': "Enter durability (optional integer; Enter to skip or type 'skip'):",
+                    'quality': "Enter quality (optional), e.g., average (Enter to skip or type 'skip'):",
                     'loot_location_hint': "Enter loot location hint as JSON object or a plain name (optional). Examples: {\"display_name\": \"Old Chest\"} or Old Chest. Enter to skip:",
-                    'crafting_recipe': "Enter crafting recipe as JSON array of objects or comma-separated names (optional). Examples: [{\"display_name\":\"Bronze Ingot\"}],Hammer or Enter to skip:",
-                    'deconstruct_recipe': "Enter deconstruct recipe as JSON array of objects or comma-separated names (optional). Enter to skip:",
+                    'crafting_recipe': "Enter crafting recipe as JSON array of objects or comma-separated names (optional). Examples: [{\"display_name\":\"Bronze Ingot\"}],Hammer or Enter to skip (or type 'skip'):",
+                    'deconstruct_recipe': "Enter deconstruct recipe as JSON array of objects or comma-separated names (optional). Enter to skip (or type 'skip'):",
                     'confirm': "Type 'save' to save this template, or 'cancel' to abort.",
                 }
                 emit('message', {'type': 'system', 'content': prompts.get(current, '...')})
@@ -1046,12 +1055,18 @@ def handle_message(data):
                 _ask_next('description')
                 return
             if step == 'description':
-                temp['description'] = text_stripped if text_stripped else ""
+                # Now required: must provide non-empty text
+                if not text_stripped or _is_skip(text_stripped):
+                    emit('message', {'type': 'error', 'content': 'Description is required.'})
+                    _ask_next('description')
+                    return
+                temp['description'] = text_stripped
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 _ask_next('object_tags')
                 return
             if step == 'object_tags':
-                if text_stripped:
+                if not _is_skip(text_stripped):
                     tags = [t.strip() for t in text_stripped.split(',') if t.strip()]
                 else:
                     tags = ['one-hand']
@@ -1060,12 +1075,13 @@ def handle_message(data):
                 _ask_next('material_tag')
                 return
             if step == 'material_tag':
-                temp['material_tag'] = text_stripped if text_stripped else None
+                temp['material_tag'] = None if _is_skip(text_stripped) else text_stripped
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 _ask_next('value')
                 return
             if step == 'value':
-                if not text_stripped:
+                if _is_skip(text_stripped):
                     temp['value'] = None
                 else:
                     try:
@@ -1077,7 +1093,7 @@ def handle_message(data):
                 _ask_next('durability')
                 return
             if step == 'durability':
-                if not text_stripped:
+                if _is_skip(text_stripped):
                     temp['durability'] = None
                 else:
                     try:
@@ -1085,33 +1101,25 @@ def handle_message(data):
                     except Exception:
                         emit('message', {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
                         return
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 _ask_next('quality')
                 return
             if step == 'quality':
-                temp['quality'] = text_stripped if text_stripped else None
+                temp['quality'] = None if _is_skip(text_stripped) else text_stripped
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
-                _ask_next('link_target_room_id')
+                # Skip link-to-object step entirely; admins can link later via room/object commands
+                _ask_next('loot_location_hint')
                 return
-            if step == 'link_target_room_id':
-                if not text_stripped:
-                    temp['link_target_room_id'] = None
-                else:
-                    rok, rerr, rid = _resolve_room_id_fuzzy(sid, text_stripped)
-                    if not rok:
-                        emit('message', {'type': 'error', 'content': rerr or 'Unable to resolve room id. Try again or press Enter to skip.'})
-                        return
-                    temp['link_target_room_id'] = rid
-                sess['temp'] = temp
-                _ask_next('link_to_object_uuid')
-                return
+            # Back-compat: if a session somehow has this old step, auto-skip to next
             if step == 'link_to_object_uuid':
-                temp['link_to_object_uuid'] = text_stripped if text_stripped else None
+                temp['link_to_object_uuid'] = None
                 sess['temp'] = temp
                 _ask_next('loot_location_hint')
                 return
             if step == 'loot_location_hint':
-                if not text_stripped:
+                if _is_skip(text_stripped):
                     temp['loot_location_hint'] = None
                 else:
                     odata = None
@@ -1126,11 +1134,12 @@ def handle_message(data):
                         # Not JSON: treat as a plain name
                         odata = {"display_name": text_stripped}
                     temp['loot_location_hint'] = odata
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 _ask_next('crafting_recipe')
                 return
             def _parse_recipe_input(s: str):
-                if not s:
+                if _is_skip(s):
                     return []
                 try:
                     parsed = _json.loads(s)
@@ -1154,11 +1163,13 @@ def handle_message(data):
 
             if step == 'crafting_recipe':
                 temp['crafting_recipe'] = _parse_recipe_input(text_stripped)
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 _ask_next('deconstruct_recipe')
                 return
             if step == 'deconstruct_recipe':
                 temp['deconstruct_recipe'] = _parse_recipe_input(text_stripped)
+                _echo_raw(text_stripped)
                 sess['temp'] = temp
                 # Show summary then confirm
                 try:
@@ -1170,8 +1181,6 @@ def handle_message(data):
                         'value': temp.get('value'),
                         'durability': temp.get('durability'),
                         'quality': temp.get('quality'),
-                        'link_target_room_id': temp.get('link_target_room_id'),
-                        'link_to_object_uuid': temp.get('link_to_object_uuid'),
                         'loot_location_hint': temp.get('loot_location_hint'),
                         'crafting_recipe': temp.get('crafting_recipe', []),
                         'deconstruct_recipe': temp.get('deconstruct_recipe', []),
