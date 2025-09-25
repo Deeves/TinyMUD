@@ -216,3 +216,27 @@ def test_targeted_gesture_to_npc_triggers_reply(server_ctx):
     assert any(m.get("type") == "system" and "[i]Alice bows to Innkeeper[/i]" == m.get("content") for m in b_msgs)
     # NPC reply should appear locally to Alice
     assert any(m.get("type") == "npc" for m in a_msgs), "Expected NPC to react to the gesture"
+
+
+def test_invalid_payload_shape_emits_error(monkeypatch):
+    # Import fresh server; ensure model disabled
+    import importlib
+    srv = importlib.import_module('server')
+    setattr(srv, 'model', None)
+
+    # Capture emits to the implicit current sid
+    captured = []
+    def fake_emit(event_name: str, payload=None, **kwargs):
+        if event_name == "message" and payload is not None:
+            captured.append(payload)
+    monkeypatch.setattr(srv, "emit", fake_emit, raising=True)
+    # get_sid isn't used for invalid shape path, but keep it defined
+    monkeypatch.setattr(srv, "get_sid", lambda: "sidZ", raising=True)
+
+    # Send bad payloads
+    srv.handle_message(None)
+    srv.handle_message({})
+    srv.handle_message({"wrong": "field"})
+
+    # We should have at least one error emission
+    assert any(p.get('type') == 'error' and 'Invalid payload' in p.get('content','') for p in captured)

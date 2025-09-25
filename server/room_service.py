@@ -755,6 +755,13 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
 
 def _save_silent(world, state_path: str) -> None:
     try:
-        world.save_to_file(state_path)
+        from persistence_utils import save_world as _save
+    except Exception:
+        _save = None
+    try:
+        if _save is not None:
+            _save(world, state_path, debounced=True)
+        else:
+            world.save_to_file(state_path)
     except Exception:
         pass

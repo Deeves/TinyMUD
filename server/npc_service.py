@@ -24,6 +24,7 @@ import json
 import re
 
 from world import CharacterSheet
+from ai_utils import safety_settings_for_level as _shared_safety_settings
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
     parse_pipe_parts as _parse_pipe_parts,
@@ -63,36 +64,22 @@ def _get_gemini_model():
         return None
     try:
         genai.configure(api_key=api_key)  # type: ignore[attr-defined]
-        _GEN_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite')  # type: ignore[attr-defined]
+        _GEN_MODEL = genai.GenerativeModel('gemini-flash-lite-latest')  # type: ignore[attr-defined]
         return _GEN_MODEL
     except Exception:
         return None
 
 
 def _safety_settings_for_level(level: str | None):
-    """Build Gemini safety settings list based on world.safety_level.
+    """Backwards-compatible wrapper delegating to shared ai_utils.
 
-    If SDK enums aren't available, return None to use defaults.
+    Returns a list suitable for Gemini's safety_settings, or None if the SDK
+    isn't available or an error occurs.
     """
-    if HarmCategory is None or HarmBlockThreshold is None:
+    try:
+        return _shared_safety_settings(level)
+    except Exception:
         return None
-    lvl = (level or 'G').upper()
-
-    def mk(threshold):
-        cats = []
-        for nm in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUAL', 'HARM_CATEGORY_SEXUAL_AND_MINORS', 'HARM_CATEGORY_DANGEROUS_CONTENT']:
-            c = getattr(HarmCategory, nm, None)
-            if c is not None:
-                cats.append({'category': c, 'threshold': threshold})
-        return cats or None
-
-    if lvl == 'OFF':
-        return mk(HarmBlockThreshold.BLOCK_NONE)
-    if lvl == 'R':
-        return mk(getattr(HarmBlockThreshold, 'BLOCK_ONLY_HIGH', HarmBlockThreshold.BLOCK_NONE))
-    if lvl in ('PG-13', 'PG13', 'PG'):
-        return mk(getattr(HarmBlockThreshold, 'BLOCK_MEDIUM_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
-    return mk(getattr(HarmBlockThreshold, 'BLOCK_LOW_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
@@ -619,7 +606,15 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
 
 
 def _save_silent(world, state_path: str) -> None:
+    # Debounced persistence to reduce I/O during admin operations
     try:
-        world.save_to_file(state_path)
+        from persistence_utils import save_world as _save
+    except Exception:
+        _save = None
+    try:
+        if _save is not None:
+            _save(world, state_path, debounced=True)
+        else:
+            world.save_to_file(state_path)
     except Exception:
         pass

@@ -36,6 +36,7 @@ except Exception:
 
 import sys
 import os
+import logging
 import socket
 import atexit
 from typing import Any, cast
@@ -146,6 +147,8 @@ except Exception:
     _SAFETY_OFF_LIST = None
 from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
+from ai_utils import safety_settings_for_level as _safety_settings_for_level
+from debounced_saver import DebouncedSaver
 from world import World, CharacterSheet, Room, User
 from look_service import format_look as _format_look, resolve_object_in_room as _resolve_object_in_room, format_object_summary as _format_object_summary
 from account_service import create_account_and_login, login_existing
@@ -460,12 +463,17 @@ if not api_key:
         else:
             print("No Gemini API key provided; skipping interactive prompt (non-interactive environment). AI disabled.")
 
-model = None
+model = None           # chat/conversation model (kept for backward-compat in tests)
+plan_model = None      # GOAP planner model
 if api_key and genai is not None:
     try:
         genai.configure(api_key=api_key)  # type: ignore[attr-defined]
-        # Instantiate the model without safety settings; we'll apply per request based on world.safety_level
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')  # type: ignore[attr-defined]
+        # Instantiate models: lightweight chat + stronger planner
+        model = genai.GenerativeModel('gemini-flash-lite-latest')  # type: ignore[attr-defined]
+        try:
+            plan_model = genai.GenerativeModel('gemini-2.5-pro')  # type: ignore[attr-defined]
+        except Exception:
+            plan_model = None
         print("Gemini API configured successfully.")
     except Exception as e:
         print(f"Error configuring the Gemini API, AI disabled: {e}")
@@ -481,8 +489,77 @@ _secret = os.getenv('SECRET_KEY') or 'dev-only-change-me'
 if not os.getenv('SECRET_KEY'):
     print("WARNING: Using default dev SECRET_KEY. Set SECRET_KEY env var in production.")
 app.config['SECRET_KEY'] = _secret  # never commit real secrets; use env vars
+
+# Structured logging (env-driven):
+# - MUD_LOG_LEVEL: DEBUG|INFO|WARNING|ERROR|CRITICAL (default INFO)
+# - MUD_LOG_FORMAT: 'json' or 'text' (default text)
+def _setup_logging() -> None:
+    try:
+        level_name = (os.getenv('MUD_LOG_LEVEL') or 'INFO').strip().upper()
+        level = getattr(logging, level_name, logging.INFO)
+        fmt_mode = (os.getenv('MUD_LOG_FORMAT') or 'text').strip().lower()
+        if fmt_mode == 'json':
+            class _JsonFormatter(logging.Formatter):
+                # Minimal JSON formatter without external deps
+                def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+                    import json as _json
+                    payload = {
+                        'ts': self.formatTime(record, datefmt='%Y-%m-%dT%H:%M:%S'),
+                        'level': record.levelname,
+                        'name': record.name,
+                        'message': record.getMessage(),
+                    }
+                    return _json.dumps(payload, ensure_ascii=False)
+            handler = logging.StreamHandler()
+            handler.setFormatter(_JsonFormatter())
+            root = logging.getLogger()
+            root.handlers = [handler]
+            root.setLevel(level)
+        else:
+            logging.basicConfig(level=level, format='[%(levelname)s] %(message)s')
+    except Exception:
+        # Fall back silently on any logging setup error
+        pass
+
+_setup_logging()
 # Wrap our app with SocketIO to add WebSocket functionality.
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=_ASYNC_MODE)
+def _env_str(name: str, default: str) -> str:
+    try:
+        v = os.getenv(name)
+        return default if v is None else str(v)
+    except Exception:
+        return default
+
+# Socket.IO heartbeat tuning (configurable)
+_PING_INTERVAL = int(_env_str('MUD_PING_INTERVAL_MS', '25000')) / 1000.0  # default 25s
+_PING_TIMEOUT = int(_env_str('MUD_PING_TIMEOUT_MS', '60000')) / 1000.0    # default 60s
+
+def _parse_cors_origins(s: str | None) -> str | list[str]:
+    """Return '*' (allow all) or a list of allowed origins from CSV env.
+
+    - MUD_CORS_ALLOWED_ORIGINS not set -> '*'
+    - Set to '*' (or empty after strip) -> '*'
+    - Otherwise, split by comma and strip whitespace.
+    """
+    try:
+        if s is None:
+            return '*'
+        val = s.strip()
+        if not val or val == '*':
+            return '*'
+        parts = [p.strip() for p in val.split(',') if p.strip()]
+        return parts or '*'
+    except Exception:
+        return '*'
+
+_CORS_ALLOWED = _parse_cors_origins(os.getenv('MUD_CORS_ALLOWED_ORIGINS'))
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_CORS_ALLOWED,
+    async_mode=_ASYNC_MODE,
+    ping_interval=_PING_INTERVAL,
+    ping_timeout=_PING_TIMEOUT,
+)
 if _ASYNC_MODE == "threading":
     print("WARNING: eventlet not installed. Falling back to Werkzeug + long-polling. "
           "The Godot client requires WebSocket; please 'pip install eventlet' and restart.")
@@ -497,7 +574,8 @@ def _save_world():
     world.save_to_file(STATE_PATH)
 
 
-atexit.register(_save_world)
+_saver = DebouncedSaver(lambda: world.save_to_file(STATE_PATH), interval_ms=int(_env_str('MUD_SAVE_DEBOUNCE_MS', '300')))
+atexit.register(_save_world)  # one last immediate save on process exit
 admins = set()  # set of admin player sids (derived from logged-in users)
 sessions: dict[str, str] = {}  # sid -> user_id
 _pending_confirm: dict[str, str] = {}  # sid -> action (e.g., 'purge')
@@ -505,6 +583,517 @@ auth_sessions: dict[str, dict] = {}  # sid -> { mode: 'create'|'login', step: st
 world_setup_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
 object_template_sessions: dict[str, dict] = {}  # sid -> { step: str, temp: dict }
 interaction_sessions: dict[str, dict] = {}  # sid -> { step: 'choose', obj_uuid: str, actions: list[str] }
+
+
+# --- Simple per-SID token-bucket rate limiter ---
+class _SimpleRateLimiter:
+    """Tiny token-bucket limiter keyed by sid.
+
+    Defaults can be tuned via env:
+      - MUD_RATE_CAPACITY: max burst tokens (default 5)
+      - MUD_RATE_REFILL_PER_SEC: tokens per second (default 2)
+    """
+    _buckets: dict[str, dict] = {}
+    _capacity = int(_env_str('MUD_RATE_CAPACITY', '5'))
+    _refill_per_sec = float(_env_str('MUD_RATE_REFILL_PER_SEC', '2'))
+
+    def __init__(self, sid: str | None) -> None:
+        self.sid = sid or 'anon'
+
+    @classmethod
+    def get(cls, sid: str | None) -> "_SimpleRateLimiter":
+        return cls(sid)
+
+    def allow(self) -> bool:
+        # Feature gate: disabled unless explicitly enabled via env
+        try:
+            if (os.getenv('MUD_RATE_ENABLE') or '0').strip().lower() not in ('1', 'true', 'yes', 'on'):
+                return True
+        except Exception:
+            return True
+        import time as _time
+        sid = self.sid
+        now = _time.time()
+        b = self._buckets.get(sid)
+        if not b:
+            b = {'t': now, 'tokens': float(self._capacity)}
+            self._buckets[sid] = b
+        # Refill
+        elapsed = max(0.0, now - float(b['t']))
+        b['t'] = now
+        b['tokens'] = min(float(self._capacity), float(b['tokens']) + elapsed * float(self._refill_per_sec))
+        if b['tokens'] >= 1.0:
+            b['tokens'] -= 1.0
+            return True
+        return False
+
+
+# --- NPC Needs & Heartbeat (Hunger/Thirst with AP) ---
+# Design notes:
+# - We keep the heartbeat opt-in via env MUD_TICK_ENABLE=1 to avoid affecting tests.
+# - Every TICK_SECONDS we slightly reduce NPC hunger/thirst, regen 1 AP (to AP_MAX),
+#   request a plan if needed, and execute one queued action per AP.
+# - Planning prefers AI JSON output when configured; otherwise a tiny offline planner is used.
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        val = os.getenv(name)
+        if val is None:
+            return default
+        return int(str(val).strip())
+    except Exception:
+        return default
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        val = os.getenv(name)
+        if val is None:
+            return default
+        return float(str(val).strip())
+    except Exception:
+        return default
+
+TICK_SECONDS = _env_int('MUD_TICK_SECONDS', 60)       # default 60-second world heartbeat
+AP_MAX = _env_int('MUD_AP_MAX', 3)                    # cap AP regen to keep NPC pace modest
+NEED_DROP_PER_TICK = _env_float('MUD_NEED_DROP', 1.0) # per tick reduction (small drip)
+NEED_THRESHOLD = _env_float('MUD_NEED_THRESHOLD', 25.0)     # when below and no plan -> think
+
+
+def _clamp_need(v: float) -> float:
+    try:
+        return max(0.0, min(100.0, float(v)))
+    except Exception:
+        return 0.0
+
+
+def _parse_tag_value(tags: set[str] | list[str] | None, key: str) -> int | None:
+    """Return the integer suffix from a tag like 'Edible: 20' or 'Drinkable: 15'.
+
+    - Matching is case-insensitive for the key and tolerant of spaces: 'Edible : 20' is ok.
+    - Returns None if no matching tag or if the suffix is not a valid integer.
+    """
+    if not tags:
+        return None
+    try:
+        key_low = key.strip().lower()
+        for t in list(tags):
+            try:
+                s = str(t)
+            except Exception:
+                continue
+            parts = s.split(':', 1)
+            if len(parts) != 2:
+                continue
+            left, right = parts[0].strip().lower(), parts[1].strip()
+            if left == key_low and right:
+                # accept bare +/- digits
+                r = right
+                if r.startswith('+'):
+                    r = r[1:]
+                if r.lstrip('-').isdigit():
+                    try:
+                        return int(r)
+                    except Exception:
+                        return None
+        return None
+    except Exception:
+        return None
+
+
+def _nutrition_from_tags_or_fields(obj) -> tuple[int, int]:
+    """Return (satiation, hydration) preferring tag-driven values over legacy fields.
+
+    - If an 'Edible' tag exists without a numeric suffix, treat satiation as 0 (require a number).
+    - If a 'Drinkable' tag exists without a numeric suffix, treat hydration as 0.
+    - If no respective tags are present, fall back to obj.satiation_value/obj.hydration_value when available.
+    """
+    try:
+        tags = set(getattr(obj, 'object_tags', []) or [])
+    except Exception:
+        tags = set()
+    sv_tag = _parse_tag_value(tags, 'Edible')
+    hv_tag = _parse_tag_value(tags, 'Drinkable')
+    # If tag keys exist but without value, enforce "require int" by yielding 0 instead of falling back
+    has_edible_key = any(str(t).split(':', 1)[0].strip().lower() == 'edible' for t in tags)
+    has_drink_key = any(str(t).split(':', 1)[0].strip().lower() == 'drinkable' for t in tags)
+
+    sv_field = int(getattr(obj, 'satiation_value', 0) or 0)
+    hv_field = int(getattr(obj, 'hydration_value', 0) or 0)
+
+    # If ANY nutrition-related tag is present, we are in "tag mode":
+    # - Use tag-provided numbers when present
+    # - Treat missing numbers as 0
+    # - Do NOT fall back to legacy fields when tags exist (prevents surprising mixes)
+    if has_edible_key or has_drink_key:
+        sv = sv_tag if sv_tag is not None else 0
+        hv = hv_tag if hv_tag is not None else 0
+    else:
+        # No nutrition tags at all -> use legacy fields
+        sv = sv_field
+        hv = hv_field
+    return int(sv or 0), int(hv or 0)
+
+
+def _npc_find_room_for(npc_name: str) -> str | None:
+    # Search rooms where this NPC is present
+    try:
+        for rid, room in world.rooms.items():
+            if npc_name in (room.npcs or set()):
+                return rid
+    except Exception:
+        pass
+    return None
+
+
+def _npc_find_inventory_slot(inv, obj) -> int | None:
+    # Try any slot that can hold this object
+    try:
+        for i in range(8):
+            if inv.can_place(i, obj):
+                return i
+    except Exception:
+        pass
+    return None
+
+
+def _npc_exec_get_object(npc_name: str, room_id: str, object_name: str) -> tuple[bool, str]:
+    """Pick up an object from the room into the NPC's inventory (first compatible slot)."""
+    room = world.rooms.get(room_id)
+    sheet = _ensure_npc_sheet(npc_name)
+    if not room:
+        return False, "room not found"
+    # Choose an object by case-insensitive name match (prefix>substring)
+    candidates = list((room.objects or {}).values())
+    def _score(o, q):
+        n = getattr(o, 'display_name', '') or ''
+        nl = n.lower(); ql = q.lower()
+        if nl == ql:
+            return 3
+        if nl.startswith(ql):
+            return 2
+        if ql in nl:
+            return 1
+        return 0
+    best = None; best_s = 0
+    for o in candidates:
+        s = _score(o, object_name)
+        if s > best_s:
+            best, best_s = o, s
+    # Fallback: if no name score, prefer first edible/drinkable when need exists
+    if best is None:
+        def _is_nutritious(o):
+            sv, hv = _nutrition_from_tags_or_fields(o)
+            return (sv > 0) or (hv > 0)
+        best = next((o for o in candidates if _is_nutritious(o)), None)
+    if best is None:
+        return False, "object not found"
+    # Try place in inventory
+    slot = _npc_find_inventory_slot(sheet.inventory, best)
+    if slot is None:
+        return False, "no free slot"
+    # Remove from room and place into inventory (copy by reference; object is unique instance in world)
+    try:
+        room.objects.pop(best.uuid, None)
+    except Exception:
+        pass
+    ok = sheet.inventory.place(slot, best)
+    if not ok:
+        # Put it back if placement failed for any reason
+        room.objects[best.uuid] = best
+        return False, "cannot carry"
+    # Announce
+    broadcast_to_room(room_id, {
+        'type': 'system',
+        'content': f"[i]{npc_name} picks up the {best.display_name}[/i]"
+    })
+    return True, best.uuid
+
+
+def _npc_exec_consume_object(npc_name: str, room_id: str, object_uuid: str) -> tuple[bool, str]:
+    """Consume an object in inventory, applying satiation/hydration and removing it."""
+    sheet = _ensure_npc_sheet(npc_name)
+    inv = sheet.inventory
+    idx = None
+    obj = None
+    for i, it in enumerate(inv.slots):
+        if it and getattr(it, 'uuid', None) == object_uuid:
+            idx = i; obj = it; break
+    if idx is None or obj is None:
+        return False, "object not in inventory"
+    # Apply effects (prefer tag-driven nutrition over legacy fields)
+    sv, hv = _nutrition_from_tags_or_fields(obj)
+    sheet.hunger = _clamp_need(sheet.hunger + float(sv))
+    sheet.thirst = _clamp_need(sheet.thirst + float(hv))
+    # Remove the item (consumed)
+    try:
+        inv.remove(idx)
+    except Exception:
+        pass
+    # Announce
+    which = []
+    if sv:
+        which.append('eats')
+    if hv and not sv:
+        which.append('drinks')
+    action_word = 'consumes' if not which else which[0]
+    broadcast_to_room(room_id, {
+        'type': 'system',
+        'content': f"[i]{npc_name} {action_word} the {getattr(obj, 'display_name', 'item')}[/i]"
+    })
+    return True, "ok"
+
+
+def _npc_exec_do_nothing(npc_name: str, room_id: str) -> tuple[bool, str]:
+    broadcast_to_room(room_id, {'type': 'system', 'content': f"[i]{npc_name} pauses to think.[/i]"})
+    return True, "ok"
+
+
+def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
+    tool = (action or {}).get('tool')
+    args = (action or {}).get('args') or {}
+    ok = False
+    try:
+        if tool == 'get_object':
+            ok, _ = _npc_exec_get_object(npc_name, room_id, str(args.get('object_name') or ''))
+        elif tool == 'consume_object':
+            ok, _ = _npc_exec_consume_object(npc_name, room_id, str(args.get('object_uuid') or ''))
+        elif tool == 'do_nothing':
+            ok, _ = _npc_exec_do_nothing(npc_name, room_id)
+    except Exception as e:
+        print(f"NPC action error for {npc_name}: {e}")
+        ok = False
+    # Spend AP regardless to avoid spins; failed actions are just wasted time.
+    if not ok:
+        try:
+            broadcast_to_room(room_id, {'type': 'system', 'content': f"[i]{npc_name} hesitates.[/i]"})
+        except Exception:
+            pass
+
+
+def _npc_offline_plan(npc_name: str, room: Room, sheet: CharacterSheet) -> list[dict]:
+    """Simple GOAP: prefer edible when hungry, drinkable when thirsty.
+    Returns a list of actions: [{tool, args}...]
+    """
+    plan: list[dict] = []
+    # Prefer using items already in inventory first
+    def find_inv(predicate) -> object | None:
+        for it in sheet.inventory.slots:
+            if it and predicate(it):
+                return it
+        return None
+    # If hunger low, try to eat
+    if sheet.hunger < NEED_THRESHOLD:
+        inv_food = find_inv(lambda o: _nutrition_from_tags_or_fields(o)[0] > 0)
+        if inv_food:
+            plan.append({'tool': 'consume_object', 'args': {'object_uuid': getattr(inv_food, 'uuid', '')}})
+        else:
+            # find edible in room
+            food = next((o for o in (room.objects or {}).values() if _nutrition_from_tags_or_fields(o)[0] > 0), None)
+            if food:
+                plan.append({'tool': 'get_object', 'args': {'object_name': getattr(food, 'display_name', '')}})
+                plan.append({'tool': 'consume_object', 'args': {'object_uuid': getattr(food, 'uuid', '')}})
+    # If thirst low, try to drink
+    if sheet.thirst < NEED_THRESHOLD:
+        inv_drink = find_inv(lambda o: _nutrition_from_tags_or_fields(o)[1] > 0)
+        if inv_drink:
+            plan.append({'tool': 'consume_object', 'args': {'object_uuid': getattr(inv_drink, 'uuid', '')}})
+        else:
+            # Be consistent with tag-aware nutrition parsing for liquids as well
+            water = next((o for o in (room.objects or {}).values() if _nutrition_from_tags_or_fields(o)[1] > 0), None)
+            if water:
+                plan.append({'tool': 'get_object', 'args': {'object_name': getattr(water, 'display_name', '')}})
+                plan.append({'tool': 'consume_object', 'args': {'object_uuid': getattr(water, 'uuid', '')}})
+    if not plan:
+        plan.append({'tool': 'do_nothing', 'args': {}})
+    return plan
+
+
+def npc_think(npc_name: str) -> None:
+    """Build or fetch a plan for the NPC and store it in its sheet.plan_queue.
+
+    Prefers AI JSON output when model is configured; otherwise uses _npc_offline_plan.
+    """
+    room_id = _npc_find_room_for(npc_name)
+    if not room_id:
+        return
+    room = world.rooms.get(room_id)
+    if room is None:
+        return
+    sheet = _ensure_npc_sheet(npc_name)
+    # If no connected players are present in this room, skip API usage and use the offline planner.
+    try:
+        if not getattr(room, 'players', None) or len(room.players) == 0:
+            sheet.plan_queue = _npc_offline_plan(npc_name, room, sheet)
+            return
+    except Exception:
+        # On any unexpected error resolving presence, fall back to offline plan as well
+        sheet.plan_queue = _npc_offline_plan(npc_name, room, sheet)
+        return
+    # If no AI planner, use offline planner
+    if plan_model is None:
+        plan = _npc_offline_plan(npc_name, room, sheet)
+        sheet.plan_queue = plan
+        return
+    # Build a compact JSON-spec prompt
+    try:
+        items_room = []
+        for o in (room.objects or {}).values():
+            # Ensure numeric tag presence for planner clarity
+            sv, hv = _nutrition_from_tags_or_fields(o)
+            tags_base = sorted(list(getattr(o, 'object_tags', set()) or []))
+            tags_aug = list(tags_base)
+            if sv > 0 and not any(str(t).lower().startswith('edible:') for t in tags_aug):
+                tags_aug.append(f'Edible: {sv}')
+            if hv > 0 and not any(str(t).lower().startswith('drinkable:') for t in tags_aug):
+                tags_aug.append(f'Drinkable: {hv}')
+            items_room.append({
+                'uuid': getattr(o, 'uuid', ''),
+                'name': getattr(o, 'display_name', ''),
+                'satiation_value': sv,
+                'hydration_value': hv,
+                'tags': tags_aug,
+            })
+        items_inv = []
+        for it in sheet.inventory.slots:
+            if it:
+                sv, hv = _nutrition_from_tags_or_fields(it)
+                tags_base = sorted(list(getattr(it, 'object_tags', set()) or []))
+                tags_aug = list(tags_base)
+                if sv > 0 and not any(str(t).lower().startswith('edible:') for t in tags_aug):
+                    tags_aug.append(f'Edible: {sv}')
+                if hv > 0 and not any(str(t).lower().startswith('drinkable:') for t in tags_aug):
+                    tags_aug.append(f'Drinkable: {hv}')
+                items_inv.append({
+                    'uuid': getattr(it, 'uuid', ''),
+                    'name': getattr(it, 'display_name', ''),
+                    'satiation_value': sv,
+                    'hydration_value': hv,
+                    'tags': tags_aug,
+                })
+        system_prompt = (
+            "You are an autonomous NPC in a text MUD. You have needs (hunger/thirst, 0-100; higher is better).\n"
+            "Plan a short sequence of 1-4 actions to satisfy your low needs using only the tools below.\n"
+            "Always return ONLY JSON: an array of {\"tool\": str, \"args\": object}. No prose.\n"
+            "Tools:\n"
+            "- get_object(object_name: str): pick up an object in the current room by name.\n"
+            "- consume_object(object_uuid: str): consume an item in your inventory.\n"
+            "- do_nothing(): if nothing relevant is needed.\n"
+        )
+        user_prompt = {
+            'npc': {'name': npc_name, 'hunger': sheet.hunger, 'thirst': sheet.thirst},
+            'room_objects': items_room,
+            'inventory': items_inv,
+            'instructions': 'Return JSON only. Prefer edible/drinkable items with positive satiation/hydration.'
+        }
+        import json as _json
+        prompt = system_prompt + "\n" + _json.dumps(user_prompt, ensure_ascii=False)
+        # Reuse the shared helper for safety settings (handles SDK availability differences)
+        try:
+            safety = _safety_settings_for_level(getattr(world, 'safety_level', 'G'))
+        except Exception:
+            safety = None
+        try:
+            ai_response = plan_model.generate_content(prompt, safety_settings=safety) if safety is not None else plan_model.generate_content(prompt)
+            text = getattr(ai_response, 'text', None) or str(ai_response)
+            # Parse JSON array
+            import json as _json
+            plan = _json.loads(text)
+            if isinstance(plan, list):
+                # sanitize minimal
+                cleaned = []
+                for el in plan[:4]:
+                    t = (el or {}).get('tool'); a = (el or {}).get('args') or {}
+                    if isinstance(t, str) and isinstance(a, dict):
+                        cleaned.append({'tool': t, 'args': a})
+                if cleaned:
+                    sheet.plan_queue = cleaned
+                    return
+        except Exception as e:
+            print(f"npc_think AI parse error for {npc_name}: {e}")
+        # Fallback on any failure
+        sheet.plan_queue = _npc_offline_plan(npc_name, room, sheet)
+    except Exception:
+        # As a last resort, set a do-nothing plan
+        sheet.plan_queue = [{'tool': 'do_nothing', 'args': {}}]
+
+
+def _world_tick() -> None:
+    """World heartbeat loop: adjust needs, regen AP, plan and execute NPC actions."""
+    print("World heartbeat started.")
+    while True:
+        try:
+            # Proper sleep for current async mode (eventlet or threading)
+            try:
+                socketio.sleep(TICK_SECONDS)
+            except Exception:
+                import time as _time
+                _time.sleep(TICK_SECONDS)
+
+            mutated = False
+            # Iterate over a stable snapshot of rooms and their NPC names
+            for rid, room in list(world.rooms.items()):
+                for npc_name in list(room.npcs or set()):
+                    try:
+                        sheet = _ensure_npc_sheet(npc_name)
+                    except Exception:
+                        continue
+                    # Degrade needs slightly
+                    pre_h, pre_t = sheet.hunger, sheet.thirst
+                    sheet.hunger = _clamp_need(sheet.hunger - NEED_DROP_PER_TICK)
+                    sheet.thirst = _clamp_need(sheet.thirst - NEED_DROP_PER_TICK)
+                    # Regen AP
+                    try:
+                        sheet.action_points = int(min(AP_MAX, max(0, (sheet.action_points or 0) + 1)))
+                    except Exception:
+                        sheet.action_points = 1
+                    # If low and no plan, think
+                    if (sheet.hunger < NEED_THRESHOLD or sheet.thirst < NEED_THRESHOLD) and not sheet.plan_queue:
+                        try:
+                            npc_think(npc_name)
+                        except Exception as _e:
+                            # Keep the loop going even if planning for one NPC fails
+                            pass
+                    # Execute one action per AP (but avoid long loops)
+                    steps = min(sheet.action_points or 0, max(0, len(sheet.plan_queue or [])))
+                    for _ in range(steps):
+                        if not sheet.plan_queue:
+                            break
+                        action = sheet.plan_queue.pop(0)
+                        _npc_execute_action(npc_name, rid, action)
+                        # Spend 1 AP
+                        sheet.action_points = max(0, (sheet.action_points or 0) - 1)
+                        mutated = True
+                    # If no actions executed but needs changed, mark mutated for persistence
+                    if sheet.hunger != pre_h or sheet.thirst != pre_t:
+                        mutated = True
+            if mutated:
+                # Debounced persistence after a tick of world changes
+                _saver.debounce()
+        except Exception as e:
+            print(f"Heartbeat loop error: {e}")
+            # Continue loop regardless
+            continue
+
+
+def _maybe_start_heartbeat() -> None:
+    """Start world heartbeat if enabled via env MUD_TICK_ENABLE=1."""
+    try:
+        if os.getenv('MUD_TICK_ENABLE', '0').strip().lower() in ('1', 'true', 'yes', 'on'):
+            if hasattr(socketio, 'start_background_task'):
+                try:
+                    socketio.start_background_task(_world_tick)
+                except Exception:
+                    # Fallback: start a daemon thread
+                    import threading
+                    t = threading.Thread(target=_world_tick, name='world-heartbeat', daemon=True)
+                    t.start()
+            else:
+                # No background task helper; start a daemon thread
+                import threading
+                t = threading.Thread(target=_world_tick, name='world-heartbeat', daemon=True)
+                t.start()
+    except Exception:
+        pass
 
 
 # --- Debug / Creative Mode bootstrap ---
@@ -587,6 +1176,9 @@ _maybe_prompt_creative_mode()
 # Print command help after initialization so admins see it in the console.
 _print_command_help()
 
+# Start heartbeat (opt-in via env)
+_maybe_start_heartbeat()
+
 
 # --- Helper function to get SID ---
 def get_sid() -> str | None:
@@ -636,6 +1228,9 @@ def _resolve_room_id_fuzzy(sid: str | None, typed: str) -> tuple[bool, str | Non
 
 
 # --- Helper: broadcast payload to all players in a world room (except one) ---
+MESSAGE_IN = 'message_to_server'
+MESSAGE_OUT = 'message'
+
 def broadcast_to_room(room_id: str, payload: dict, exclude_sid: str | None = None) -> None:
     room = world.rooms.get(room_id)
     if not room:
@@ -646,7 +1241,7 @@ def broadcast_to_room(room_id: str, payload: dict, exclude_sid: str | None = Non
             continue
         try:
             # Target a specific client session by sid
-            socketio.emit('message', payload, to=psid)
+            socketio.emit(MESSAGE_OUT, payload, to=psid)
         except Exception:
             # Best-effort broadcast; ignore per-client errors
             pass
@@ -675,7 +1270,7 @@ def _ensure_npc_sheet(npc_name: str) -> CharacterSheet:
         npc_sheet = CharacterSheet(display_name=npc_name, description=default_desc)
         world.npc_sheets[npc_name] = npc_sheet
         try:
-            world.save_to_file(STATE_PATH)
+            _saver.debounce()
         except Exception:
             pass
     return npc_sheet
@@ -764,7 +1359,7 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, priv
             'name': npc_name,
             'content': f"[i]{npc_name} considers your words.[/i] 'I hear you, {player_name}. Try 'look' to survey your surroundings.'"
         }
-        emit('message', npc_payload)
+        emit(MESSAGE_OUT, npc_payload)
         if (not private_to_sender_only) and sid and sid in world.players:
             player_obj = world.players.get(sid)
             if player_obj:
@@ -773,29 +1368,7 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, priv
 
     # Build safety settings per world configuration
     def _safety_for_level() -> list | None:
-        # If enums missing, return None and let SDK defaults apply
-        if 'HarmCategory' not in globals() or HarmCategory is None or 'HarmBlockThreshold' not in globals() or HarmBlockThreshold is None:
-            return None
-        lvl = getattr(world, 'safety_level', 'G') or 'G'
-        lvl = str(lvl).upper()
-        # Helper to construct list with given threshold
-        def mk(threshold):
-            cats = []
-            for nm in ['HARM_CATEGORY_HARASSMENT','HARM_CATEGORY_HATE_SPEECH','HARM_CATEGORY_SEXUAL','HARM_CATEGORY_SEXUAL_AND_MINORS','HARM_CATEGORY_DANGEROUS_CONTENT']:
-                c = getattr(HarmCategory, nm, None)
-                if c is not None:
-                    cats.append({'category': c, 'threshold': threshold})
-            return cats if cats else None
-        if lvl == 'OFF':
-            return mk(HarmBlockThreshold.BLOCK_NONE)
-        if lvl == 'R':
-            # Low filtering: block only at highest threshold
-            return mk(getattr(HarmBlockThreshold, 'BLOCK_ONLY_HIGH', HarmBlockThreshold.BLOCK_NONE))
-        if lvl in ('PG-13','PG13','PG'):
-            # Medium filtering: block medium and above if available
-            return mk(getattr(HarmBlockThreshold, 'BLOCK_MEDIUM_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
-        # Default High (G): block low and above (most strict) if available; else leave SDK default
-        return mk(getattr(HarmBlockThreshold, 'BLOCK_LOW_AND_ABOVE', HarmBlockThreshold.BLOCK_NONE))
+        return _safety_settings_for_level(getattr(world, 'safety_level', 'G'))
 
     try:
         safety = _safety_for_level()
@@ -810,14 +1383,14 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, priv
             'name': npc_name,
             'content': content_text
         }
-        emit('message', npc_payload)
+        emit(MESSAGE_OUT, npc_payload)
         if (not private_to_sender_only) and sid and sid in world.players:
             player_obj = world.players.get(sid)
             if player_obj:
                 broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
     except Exception as e:
         print(f"An error occurred while generating content for {npc_name}: {e}")
-        emit('message', {
+        emit(MESSAGE_OUT, {
             'type': 'error',
             'content': f"{npc_name} seems distracted and doesn't respond. (Error: {e})"
         })
@@ -840,7 +1413,7 @@ def handle_connect():
     # Show banner then prompt the client to login or create a character
     try:
         if ASCII_ART:
-            emit('message', {'type': 'system', 'content': ASCII_ART})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': ASCII_ART})
     except Exception:
         pass
     # Welcome banner: if the world has been set up and named, include it in the greeting.
@@ -851,7 +1424,7 @@ def handle_connect():
             if isinstance(nm, str) and nm.strip():
                 nm_clean = nm.strip()
                 welcome_text = f"Welcome to {nm_clean}, Traveler."
-                emit('message', {'type': 'system', 'content': welcome_text})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': welcome_text})
                 # Follow with an immersive one-paragraph introduction using world description and conflict
                 try:
                     desc = getattr(world, 'world_description', None)
@@ -866,19 +1439,25 @@ def handle_connect():
                         parts.append(f"Yet all is not well: {conflict.strip()}")
                     if len(parts) > 1:
                         paragraph = " ".join(parts)
-                        emit('message', {'type': 'system', 'content': f"[i]{paragraph}[/i]"})
+                        emit(MESSAGE_OUT, {'type': 'system', 'content': f"[i]{paragraph}[/i]"})
                 except Exception:
                     pass
                 # Skip the generic welcome emit since we already emitted the named one
                 pass
             else:
-                emit('message', {'type': 'system', 'content': welcome_text})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': welcome_text})
         else:
-            emit('message', {'type': 'system', 'content': welcome_text})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': welcome_text})
     except Exception:
         # Fallback to original static greeting on any unexpected error
-        emit('message', {'type': 'system', 'content': 'Welcome, traveler.'})
-    emit('message', {'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters. You can also use /auth commands if you prefer.'})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': 'Welcome, traveler.'})
+    emit(MESSAGE_OUT, {'type': 'system', 'content': 'Type "create" to forge a new character, "login" to sign in, or "list" to see existing characters. You can also use /auth commands if you prefer.'})
+    # Send a lightweight config so clients can mirror server limits
+    try:
+        MAX_LEN = int(_env_str('MUD_MAX_MESSAGE_LEN', '1000'))
+        emit(MESSAGE_OUT, {'type': 'system', 'content': f'[config] MAX_MESSAGE_LEN={MAX_LEN}'})
+    except Exception:
+        pass
 
 
 @socketio.on('disconnect')
@@ -912,8 +1491,7 @@ def handle_disconnect():
     except Exception:
         pass
 
-
-@socketio.on('message_to_server')
+@socketio.on(MESSAGE_IN)
 def handle_message(data):
     """Main chat handler. Triggered when the client emits 'message_to_server'.
 
@@ -921,7 +1499,22 @@ def handle_message(data):
     We can extend later (e.g., { 'content': 'go tavern' }).
     """
     global world
+    # Validate payload shape defensively to avoid KeyErrors or unexpected types
+    if not isinstance(data, dict) or 'content' not in data:
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Invalid payload; expected { "content": string }.'})
+        return
     player_message = data['content']
+
+    # Basic per-sid rate limiting and message size cap
+    MAX_LEN = int(_env_str('MUD_MAX_MESSAGE_LEN', '1000'))
+    if isinstance(player_message, str) and len(player_message) > MAX_LEN:
+        emit(MESSAGE_OUT, {'type': 'error', 'content': f'Message too long (>{MAX_LEN} chars).'});
+        return
+    # Optional rate limiting (disabled by default; enable with MUD_RATE_ENABLE=1)
+    _rate = _SimpleRateLimiter.get(get_sid())
+    if not _rate.allow():
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'You are sending messages too quickly. Please slow down.'})
+        return
 
     # Handle simple MUD commands first (easy to extend—see docs/adding-locations.md)
     sid = get_sid()
@@ -966,24 +1559,24 @@ def handle_message(data):
                                 disconnect(psid, namespace="/")
                     except Exception:
                         pass
-                    emit('message', {'type': 'system', 'content': 'World purged and reset to factory default.'})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': 'World purged and reset to factory default.'})
                     return
                 else:
-                    emit('message', {'type': 'error', 'content': 'Unknown confirmation action.'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Unknown confirmation action.'})
                     return
             elif text_lower in ("n", "no"):
                 _pending_confirm.pop(sid, None)
-                emit('message', {'type': 'system', 'content': 'Action cancelled.'})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'Action cancelled.'})
                 return
             else:
-                emit('message', {'type': 'system', 'content': "Please confirm with 'Y' to proceed or 'N' to cancel."})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': "Please confirm with 'Y' to proceed or 'N' to cancel."})
                 return
         # Handle world setup wizard if active for this sid (delegated to setup_service)
         if sid and sid in world_setup_sessions:
             handled, emits_list = _setup_handle(world, STATE_PATH, sid, player_message, world_setup_sessions)
             if handled:
                 for payload in emits_list:
-                    emit('message', payload)
+                    emit(MESSAGE_OUT, payload)
                 return
 
         # Handle object template creation wizard if active for this sid
@@ -1004,11 +1597,11 @@ def handle_message(data):
             # Local echo helper: show user's raw entry as a plain system line (no 'You ' prefix)
             def _echo_raw(s: str) -> None:
                 if s and not _is_skip(s):
-                    emit('message', {'type': 'system', 'content': s})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': s})
             # Allow cancel
             if text_lower2 in ("cancel",):
                 object_template_sessions.pop(sid_str, None)
-                emit('message', {'type': 'system', 'content': 'Object template creation cancelled.'})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'Object template creation cancelled.'})
                 return
 
             def _ask_next(current: str) -> None:
@@ -1019,9 +1612,11 @@ def handle_message(data):
                     'template_key': "Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:",
                     'display_name': "Enter display name (required), e.g., Bronze Sword:",
                     'description': "Enter a short description (required):",
-                    'object_tags': "Enter comma-separated tags (optional; default: one-hand). Examples: weapon,cutting damage,one-hand:",
+                    'object_tags': "Enter comma-separated tags (optional; default: small). Examples: weapon,cutting damage,small:",
                     'material_tag': "Enter material tag (optional), e.g., bronze (Enter to skip or type 'skip'):",
                     'value': "Enter value in coins (optional integer; Enter to skip or type 'skip'):",
+                    'satiation_value': "Enter hunger satiation value (optional int; Enter to skip), e.g., 25 for food:",
+                    'hydration_value': "Enter thirst hydration value (optional int; Enter to skip), e.g., 25 for drink:",
                     'durability': "Enter durability (optional integer; Enter to skip or type 'skip'):",
                     'quality': "Enter quality (optional), e.g., average (Enter to skip or type 'skip'):",
                     'loot_location_hint': "Enter loot location hint as JSON object or a plain name (optional). Examples: {\"display_name\": \"Old Chest\"} or Old Chest. Enter to skip:",
@@ -1029,17 +1624,17 @@ def handle_message(data):
                     'deconstruct_recipe': "Enter deconstruct recipe as JSON array of objects or comma-separated names (optional). Enter to skip (or type 'skip'):",
                     'confirm': "Type 'save' to save this template, or 'cancel' to abort.",
                 }
-                emit('message', {'type': 'system', 'content': prompts.get(current, '...')})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': prompts.get(current, '...')})
 
             import json as _json
             # Step handlers
             if step == 'template_key':
                 key = re.sub(r"[^A-Za-z0-9_]+", "_", text_stripped)
                 if not key:
-                    emit('message', {'type': 'error', 'content': 'Template key cannot be empty.'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Template key cannot be empty.'})
                     return
                 if key in getattr(world, 'object_templates', {}):
-                    emit('message', {'type': 'error', 'content': f"Template key '{key}' already exists. Choose another."})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': f"Template key '{key}' already exists. Choose another."})
                     return
                 temp['key'] = key
                 sess['temp'] = temp
@@ -1048,7 +1643,7 @@ def handle_message(data):
             if step == 'display_name':
                 name = text_stripped
                 if len(name) < 1:
-                    emit('message', {'type': 'error', 'content': 'Display name is required.'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Display name is required.'})
                     return
                 temp['display_name'] = name
                 sess['temp'] = temp
@@ -1057,7 +1652,7 @@ def handle_message(data):
             if step == 'description':
                 # Now required: must provide non-empty text
                 if not text_stripped or _is_skip(text_stripped):
-                    emit('message', {'type': 'error', 'content': 'Description is required.'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Description is required.'})
                     _ask_next('description')
                     return
                 temp['description'] = text_stripped
@@ -1069,7 +1664,7 @@ def handle_message(data):
                 if not _is_skip(text_stripped):
                     tags = [t.strip() for t in text_stripped.split(',') if t.strip()]
                 else:
-                    tags = ['one-hand']
+                    tags = ['small']
                 temp['object_tags'] = list(dict.fromkeys(tags))
                 sess['temp'] = temp
                 _ask_next('material_tag')
@@ -1087,7 +1682,31 @@ def handle_message(data):
                     try:
                         temp['value'] = int(text_stripped)
                     except Exception:
-                        emit('message', {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        return
+                sess['temp'] = temp
+                _ask_next('satiation_value')
+                return
+            if step == 'satiation_value':
+                if _is_skip(text_stripped):
+                    temp['satiation_value'] = None
+                else:
+                    try:
+                        temp['satiation_value'] = int(text_stripped)
+                    except Exception:
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        return
+                sess['temp'] = temp
+                _ask_next('hydration_value')
+                return
+            if step == 'hydration_value':
+                if _is_skip(text_stripped):
+                    temp['hydration_value'] = None
+                else:
+                    try:
+                        temp['hydration_value'] = int(text_stripped)
+                    except Exception:
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
                         return
                 sess['temp'] = temp
                 _ask_next('durability')
@@ -1099,7 +1718,7 @@ def handle_message(data):
                     try:
                         temp['durability'] = int(text_stripped)
                     except Exception:
-                        emit('message', {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please enter an integer or press Enter to skip.'})
                         return
                 _echo_raw(text_stripped)
                 sess['temp'] = temp
@@ -1176,9 +1795,11 @@ def handle_message(data):
                     preview = {
                         'display_name': temp.get('display_name'),
                         'description': temp.get('description', ''),
-                        'object_tag': temp.get('object_tags', ['one-hand']),
+                        'object_tags': temp.get('object_tags', ['small']),
                         'material_tag': temp.get('material_tag'),
                         'value': temp.get('value'),
+                        'satiation_value': temp.get('satiation_value'),
+                        'hydration_value': temp.get('hydration_value'),
                         'durability': temp.get('durability'),
                         'quality': temp.get('quality'),
                         'loot_location_hint': temp.get('loot_location_hint'),
@@ -1188,12 +1809,12 @@ def handle_message(data):
                     raw = _json.dumps(preview, ensure_ascii=False, indent=2)
                 except Exception:
                     raw = '(error building preview)'
-                emit('message', {'type': 'system', 'content': f"Preview of template object:\n{raw}"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"Preview of template object:\n{raw}"})
                 _ask_next('confirm')
                 return
             if step == 'confirm':
                 if text_lower2 not in ('save', 'y', 'yes'):
-                    emit('message', {'type': 'system', 'content': "Not saved. Type 'save' to save or 'cancel' to abort."})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': "Not saved. Type 'save' to save or 'cancel' to abort."})
                     return
                 # Build Object from collected data
                 try:
@@ -1208,12 +1829,23 @@ def handle_message(data):
                     llh_obj = _Obj.from_dict(llh_dict) if llh_dict else None
                     craft_objs = [_Obj.from_dict(o) for o in crafting_list]
                     decon_objs = [_Obj.from_dict(o) for o in decon_list]
+                    # Convert numeric nutrition values into explicit tags so editors see 'Edible: N'/'Drinkable: N'.
+                    tags_final = list(dict.fromkeys(temp.get('object_tags', ['small'])))
+                    try:
+                        if temp.get('satiation_value') is not None:
+                            tags_final.append(f"Edible: {int(temp['satiation_value'])}")
+                        if temp.get('hydration_value') is not None:
+                            tags_final.append(f"Drinkable: {int(temp['hydration_value'])}")
+                    except Exception:
+                        pass
                     obj = _Obj(
                         display_name=temp.get('display_name'),
                         description=temp.get('description', ''),
-                        object_tags=set(temp.get('object_tags', ['one-hand'])),
+                        object_tags=set(tags_final),
                         material_tag=temp.get('material_tag'),
                         value=temp.get('value'),
+                        satiation_value=temp.get('satiation_value'),
+                        hydration_value=temp.get('hydration_value'),
                         loot_location_hint=llh_obj,
                         durability=temp.get('durability'),
                         quality=temp.get('quality'),
@@ -1231,10 +1863,10 @@ def handle_message(data):
                     except Exception:
                         pass
                     object_template_sessions.pop(sid_str, None)
-                    emit('message', {'type': 'system', 'content': f"Saved object template '{key}'."})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': f"Saved object template '{key}'."})
                     return
                 except Exception as e:
-                    emit('message', {'type': 'error', 'content': f'Failed to save template: {e}'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': f'Failed to save template: {e}'})
                     return
             # If step is unknown, prompt the first step
             _ask_next('template_key')
@@ -1244,7 +1876,7 @@ def handle_message(data):
             handled, emits_list, broadcasts_list = _interact_handle(world, sid, player_message, interaction_sessions)
             if handled:
                 for payload in emits_list:
-                    emit('message', payload)
+                    emit(MESSAGE_OUT, payload)
                 # Apply any broadcasts (room_id, payload)
                 try:
                     for room_id, payload in (broadcasts_list or []):
@@ -1266,12 +1898,12 @@ def handle_message(data):
         # Multi-turn auth/creation flow for unauthenticated users
         if sid not in world.players:
             if sid is None:
-                emit('message', {'type': 'error', 'content': 'Not connected.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
                 return
             handled, emits2, broadcasts2 = _auth_handle(world, sid, player_message, sessions, admins, STATE_PATH, auth_sessions)
             if handled:
                 for payload in emits2:
-                    emit('message', payload)
+                    emit(MESSAGE_OUT, payload)
                 for room_id, payload in broadcasts2:
                     broadcast_to_room(room_id, payload, exclude_sid=sid)
                 # If this is the first user and setup not complete, start setup wizard
@@ -1280,9 +1912,9 @@ def handle_message(data):
                         uid = sessions.get(sid)
                         user = world.users.get(uid) if uid else None
                         if user and user.is_admin:
-                            emit('message', {'type': 'system', 'content': 'You are the first adventurer here and have been made an Admin.'})
+                            emit(MESSAGE_OUT, {'type': 'system', 'content': 'You are the first adventurer here and have been made an Admin.'})
                             for p in _setup_begin(world_setup_sessions, sid):
-                                emit('message', p)
+                                emit(MESSAGE_OUT, p)
                             return
                 except Exception:
                     pass
@@ -1318,10 +1950,10 @@ def handle_message(data):
                     door_name = player_message.strip()[len("move through "):].strip()
                     ok, err, emits, broadcasts = move_through_door(world, sid, door_name)
                     if not ok:
-                        emit('message', {'type': 'error', 'content': err or 'Unable to move.'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Unable to move.'})
                         return
                     for payload in emits:
-                        emit('message', payload)
+                        emit(MESSAGE_OUT, payload)
                     for room_id, payload in broadcasts:
                         broadcast_to_room(room_id, payload, exclude_sid=sid)
                     return
@@ -1329,34 +1961,34 @@ def handle_message(data):
                 if text_lower.startswith("interact with "):
                     obj_name = player_message.strip()[len("interact with "):].strip()
                     if not obj_name:
-                        emit('message', {'type': 'error', 'content': 'Usage: interact with <Object>'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: interact with <Object>'})
                         return
                     room = current_room
                     ok, err, emitsI = _interact_begin(world, sid, room, obj_name, interaction_sessions)
                     if not ok:
-                        emit('message', {'type': 'system', 'content': err or 'Unable to interact.'})
+                        emit(MESSAGE_OUT, {'type': 'system', 'content': err or 'Unable to interact.'})
                         return
                     for payload in emitsI:
-                        emit('message', payload)
+                        emit(MESSAGE_OUT, payload)
                     return
                 # move up/down stairs
                 if text_lower in ("move up", "move upstairs", "move up stairs", "go up", "go up stairs"):
                     ok, err, emits, broadcasts = move_stairs(world, sid, 'up')
                     if not ok:
-                        emit('message', {'type': 'error', 'content': err or 'Unable to move up.'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Unable to move up.'})
                         return
                     for payload in emits:
-                        emit('message', payload)
+                        emit(MESSAGE_OUT, payload)
                     for room_id, payload in broadcasts:
                         broadcast_to_room(room_id, payload, exclude_sid=sid)
                     return
                 if text_lower in ("move down", "move downstairs", "move down stairs", "go down", "go down stairs"):
                     ok, err, emits, broadcasts = move_stairs(world, sid, 'down')
                     if not ok:
-                        emit('message', {'type': 'error', 'content': err or 'Unable to move down.'})
+                        emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Unable to move down.'})
                         return
                     for payload in emits:
-                        emit('message', payload)
+                        emit(MESSAGE_OUT, payload)
                     for room_id, payload in broadcasts:
                         broadcast_to_room(room_id, payload, exclude_sid=sid)
                     return
@@ -1368,7 +2000,7 @@ def handle_message(data):
             # Handle bare look / l
             if text_lower in ("look", "l"):
                 desc = _format_look(world, sid)
-                emit('message', {'type': 'system', 'content': desc})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': desc})
                 return
             # Handle "look at <name>" / "l at <name>"
             if text_lower.startswith("look at ") or text_lower.startswith("l at "):
@@ -1382,12 +2014,12 @@ def handle_message(data):
                 except Exception:
                     name_raw = ""
                 if not name_raw:
-                    emit('message', {'type': 'error', 'content': 'Usage: look at <name>'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: look at <name>'})
                     return
                 # Must be authenticated to be in a room
                 player = world.players.get(sid) if sid else None
                 if not player:
-                    emit('message', {'type': 'error', 'content': 'Please authenticate first to look at someone.'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to look at someone.'})
                     return
                 room = world.rooms.get(player.room_id)
                 # Try players first (includes self)
@@ -1413,7 +2045,7 @@ def handle_message(data):
                             rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
                             # If the target player has admin rights, append a subtle aura line
                             admin_aura = "\nRadiates an unspoken authority." if psid in admins else ""
-                            emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
+                            emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
                             return
                     except Exception:
                         pass
@@ -1439,30 +2071,30 @@ def handle_message(data):
                     except Exception:
                         pass
                     rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                    emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
                     return
                 # Try Objects in room
                 obj, suggestions = _resolve_object_in_room(room, name_raw)
                 if obj is not None:
-                    emit('message', {'type': 'system', 'content': _format_object_summary(obj, world)})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': _format_object_summary(obj, world)})
                     return
                 if suggestions:
-                    emit('message', {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
                     return
-                emit('message', {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{name_raw}' here."})
                 return
             # If it was some other look- prefixed text, fall through to normal chat
         
         # --- ROLL command (non-slash) ---
         if text_lower == "roll" or text_lower.startswith("roll "):
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to roll dice.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to roll dice.'})
                 return
             raw = player_message.strip()
             # Remove leading keyword
             arg = raw[4:].strip() if len(raw) > 4 else ""
             if not arg:
-                emit('message', {'type': 'error', 'content': 'Usage: roll <dice expression> [| Private]'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: roll <dice expression> [| Private]'})
                 return
             # Support optional "| Private" suffix (case-insensitive, space around | optional)
             priv = False
@@ -1476,17 +2108,17 @@ def handle_message(data):
             try:
                 result = dice_roll(expr)
             except DiceError as e:
-                emit('message', {'type': 'error', 'content': f'Dice error: {e}'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': f'Dice error: {e}'})
                 return
             # Compose result text (concise)
             res_text = f"{result.expression} = {result.total}"
             player_obj = world.players.get(sid)
             pname = player_obj.sheet.display_name if player_obj else 'Someone'
             if priv:
-                emit('message', {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
                 return
             # Public roll: tell roller and broadcast to room
-            emit('message', {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
             if player_obj:
                 broadcast_to_room(player_obj.room_id, {
                     'type': 'system',
@@ -1497,12 +2129,12 @@ def handle_message(data):
         # --- GESTURE command (non-slash) ---
         if text_lower == "gesture" or text_lower.startswith("gesture "):
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to gesture.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to gesture.'})
                 return
             raw = player_message.strip()
             verb = raw[len("gesture"):].strip()
             if not verb:
-                emit('message', {'type': 'error', 'content': 'Usage: gesture <verb>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: gesture <verb>'})
                 return
             # Check for targeted form: "<verb> to <target>" (optionally starting with "a ")
             player_obj = world.players.get(sid)
@@ -1513,13 +2145,13 @@ def handle_message(data):
                 left = verb[:to_idx].strip()
                 target_raw = verb[to_idx + 4:].strip()
                 if not target_raw:
-                    emit('message', {'type': 'error', 'content': "Usage: gesture <verb> to <Player or NPC>"})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': "Usage: gesture <verb> to <Player or NPC>"})
                     return
                 # Drop a leading article "a " for natural phrasing: gesture a bow -> bow
                 if left.lower().startswith('a '):
                     left = left[2:].strip()
                 if not left:
-                    emit('message', {'type': 'error', 'content': 'Please provide a verb before "to".'})
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please provide a verb before "to".'})
                     return
             
                 # Resolve target: prefer player in room; then NPC
@@ -1532,7 +2164,7 @@ def handle_message(data):
                         npc_name_resolved = npcs[0]
 
                 if not target_is_player and not npc_name_resolved:
-                    emit('message', {'type': 'system', 'content': f"You don't see '{target_raw}' here."})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{target_raw}' here."})
                     return
 
                 # Conjugation helper (third person only for room broadcast)
@@ -1554,7 +2186,7 @@ def handle_message(data):
                 action_second = left  # second person uses the raw phrase without article
                 pname_self = player_obj.sheet.display_name if player_obj else 'Someone'
                 # Sender view
-                emit('message', {'type': 'system', 'content': f"[i]You {action_second} to {pname or npc_name_resolved}[/i]"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"[i]You {action_second} to {pname or npc_name_resolved}[/i]"})
                 # Broadcast to room
                 if player_obj:
                     broadcast_to_room(player_obj.room_id, {
@@ -1589,7 +2221,7 @@ def handle_message(data):
             player_obj = world.players.get(sid)
             pname = player_obj.sheet.display_name if player_obj else 'Someone'
             # Tell the sender (second-person variant for clarity)
-            emit('message', {'type': 'system', 'content': f"[i]You {verb}[/i]"})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"[i]You {verb}[/i]"})
             # Broadcast third-person to room
             if player_obj:
                 broadcast_to_room(player_obj.room_id, {
@@ -1602,14 +2234,14 @@ def handle_message(data):
         is_say, targets, say_msg = _parse_say(player_message)
         if is_say:
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to speak.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to speak.'})
                 return
             # During setup wizard, keep say local (no broadcast, no NPC)
             if sid in world_setup_sessions:
-                emit('message', {'type': 'system', 'content': say_msg or ''})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': say_msg or ''})
                 return
             if not say_msg:
-                emit('message', {'type': 'error', 'content': "What do you say? Add text after 'say'."})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': "What do you say? Add text after 'say'."})
                 return
             player_obj = world.players.get(sid)
             room = world.rooms.get(player_obj.room_id) if player_obj else None
@@ -1626,7 +2258,7 @@ def handle_message(data):
             if targets is not None and len(targets) > 0:
                 resolved = _resolve_npcs_in_room(room, targets)
                 if not resolved:
-                    emit('message', {'type': 'system', 'content': 'No such NPCs here respond.'})
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': 'No such NPCs here respond.'})
                     return
                 # Group conversation: each targeted NPC replies
                 for npc_name in resolved:
@@ -1683,16 +2315,16 @@ def handle_message(data):
         is_tell, tell_target_raw, tell_msg = _parse_tell(player_message)
         if is_tell:
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to speak.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to speak.'})
                 return
             if sid in world_setup_sessions:
-                emit('message', {'type': 'system', 'content': tell_msg or ''})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': tell_msg or ''})
                 return
             if not tell_target_raw:
-                emit('message', {'type': 'error', 'content': "Usage: tell <Player or NPC> <message>"})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': "Usage: tell <Player or NPC> <message>"})
                 return
             if not tell_msg:
-                emit('message', {'type': 'error', 'content': 'What do you say? Add a message after the name.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'What do you say? Add a message after the name.'})
                 return
             player_obj = world.players.get(sid)
             room = world.rooms.get(player_obj.room_id) if player_obj else None
@@ -1708,7 +2340,7 @@ def handle_message(data):
                     npc_name_resolved = npcs[0]
 
             if not target_is_player and not target_is_npc:
-                emit('message', {'type': 'system', 'content': f"You don't see '{tell_target_raw}' here."})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{tell_target_raw}' here."})
                 return
 
             # Broadcast the player's tell to the room (everyone hears it)
@@ -1749,17 +2381,17 @@ def handle_message(data):
         is_whisper, whisper_target_raw, whisper_msg = _parse_whisper(player_message)
         if is_whisper:
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to speak.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to speak.'})
                 return
             if sid in world_setup_sessions:
                 # Keep setup wizard quiet
-                emit('message', {'type': 'system', 'content': whisper_msg or ''})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': whisper_msg or ''})
                 return
             if not whisper_target_raw:
-                emit('message', {'type': 'error', 'content': "Usage: whisper <Player or NPC> <message>"})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': "Usage: whisper <Player or NPC> <message>"})
                 return
             if not whisper_msg:
-                emit('message', {'type': 'error', 'content': 'What do you whisper? Add a message after the name.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'What do you whisper? Add a message after the name.'})
                 return
             player_obj = world.players.get(sid)
             room = world.rooms.get(player_obj.room_id) if player_obj else None
@@ -1767,11 +2399,11 @@ def handle_message(data):
             psid, pname = _resolve_player_in_room(world, room, whisper_target_raw)
             if psid and pname:
                 # Tell sender
-                emit('message', {'type': 'system', 'content': f"You whisper to {pname}: {whisper_msg}"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You whisper to {pname}: {whisper_msg}"})
                 # Tell receiver privately
                 try:
                     sender_name = player_obj.sheet.display_name if player_obj else 'Someone'
-                    socketio.emit('message', {
+                    socketio.emit(MESSAGE_OUT, {
                         'type': 'system',
                         'content': f"{sender_name} whispers to you: {whisper_msg}"
                     }, to=psid)
@@ -1786,18 +2418,18 @@ def handle_message(data):
                     npc_name_resolved = npcs[0]
             if npc_name_resolved:
                 # Tell sender
-                emit('message', {'type': 'system', 'content': f"You whisper to {npc_name_resolved}: {whisper_msg}"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You whisper to {npc_name_resolved}: {whisper_msg}"})
                 # NPC always replies privately to the sender
                 _send_npc_reply(npc_name_resolved, whisper_msg, sid, private_to_sender_only=True)
                 return
-            emit('message', {'type': 'system', 'content': f"You don't see '{whisper_target_raw}' here."})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{whisper_target_raw}' here."})
             return
 
         # For ordinary chat (non-command, non-look)
         if sid and sid in world.players and player_message.strip():
             # During setup wizard, do NOT broadcast or trigger NPCs; keep local only
             if sid in world_setup_sessions:
-                emit('message', {'type': 'system', 'content': player_message})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': player_message})
                 return
             speaker = world.players.get(sid)
             if speaker:
@@ -1826,7 +2458,7 @@ def handle_command(sid: str | None, text: str) -> None:
     # Parse command and args
     parts = text[1:].strip().split()
     if not parts:
-        emit('message', {'type': 'error', 'content': 'Empty command.'})
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Empty command.'})
         return
 
     cmd = parts[0].lower()
@@ -1835,11 +2467,11 @@ def handle_command(sid: str | None, text: str) -> None:
     # Player convenience: /look and /look at <name>
     if cmd == 'look':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if not args:
             # same as bare look
-            emit('message', {'type': 'system', 'content': _format_look(world, sid)})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': _format_look(world, sid)})
             return
         # Support: /look at <name>
         if len(args) >= 2 and args[0].lower() == 'at':
@@ -1847,7 +2479,7 @@ def handle_command(sid: str | None, text: str) -> None:
             # Must be in a room
             player = world.players.get(sid)
             if not player:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'})
                 return
             room = world.rooms.get(player.room_id)
             # Try players first (includes self)
@@ -1872,7 +2504,7 @@ def handle_command(sid: str | None, text: str) -> None:
                         # Append admin aura if the inspected player is an admin
                         admin_aura = "\nRadiates an unspoken authority." if psid in admins else ""
                         rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                        emit('message', {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
+                        emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{p.sheet.display_name}[/b]\n{p.sheet.description}{admin_aura}{rel_text}"})
                         return
                 except Exception:
                     pass
@@ -1898,75 +2530,75 @@ def handle_command(sid: str | None, text: str) -> None:
                 except Exception:
                     pass
                 rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                emit('message', {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
                 return
             # Try Objects
             obj, suggestions = _resolve_object_in_room(room, name)
             if obj is not None:
-                emit('message', {'type': 'system', 'content': _format_object_summary(obj, world)})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': _format_object_summary(obj, world)})
                 return
             if suggestions:
-                emit('message', {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"})
                 return
-            emit('message', {'type': 'system', 'content': f"You don't see '{name}' here."})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{name}' here."})
             return
         # Otherwise, unrecognized look usage
-        emit('message', {'type': 'error', 'content': 'Usage: /look  or  /look at <name>'})
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /look  or  /look at <name>'})
         return
 
     # /help: context-aware help for auth/player/admin
     if cmd == 'help':
         help_text = _build_help_text(sid)
-        emit('message', {'type': 'system', 'content': help_text})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': help_text})
         return
 
     # --- Auth workflow: /auth create and /auth login ---
     if cmd == 'auth':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if len(args) == 0:
-            emit('message', {'type': 'system', 'content': 'Usage: /auth <create|login> ...'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Usage: /auth <create|login> ...'})
             return
         sub = args[0].lower()
         # Admin-only subcommand
         if sub == 'promote':
             if sid not in admins:
-                emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Admin command. Admin rights required.'})
                 return
             if len(args) < 2:
-                emit('message', {'type': 'error', 'content': 'Usage: /auth promote <name>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth promote <name>'})
                 return
             target_name = _strip_quotes(" ".join(args[1:]).strip())
             ok, err, emits2 = promote_user(world, sessions, admins, target_name, STATE_PATH)
             if err:
-                emit('message', {'type': 'error', 'content': err})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err})
                 return
             for payload in emits2:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             return
         if sub == 'list_admins':
             # Anyone connected can list admins for transparency
             names = list_admins(world)
             if not names:
-                emit('message', {'type': 'system', 'content': 'No admin users found.'})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'No admin users found.'})
             else:
-                emit('message', {'type': 'system', 'content': 'Admins: ' + ", ".join(names)})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'Admins: ' + ", ".join(names)})
             return
         if sub == 'demote':
             if sid not in admins:
-                emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Admin command. Admin rights required.'})
                 return
             if len(args) < 2:
-                emit('message', {'type': 'error', 'content': 'Usage: /auth demote <name>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth demote <name>'})
                 return
             target_name = _strip_quotes(" ".join(args[1:]).strip())
             ok, err, emits2 = demote_user(world, sessions, admins, target_name, STATE_PATH)
             if err:
-                emit('message', {'type': 'error', 'content': err})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err})
                 return
             for payload in emits2:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             return
         if sub == 'create':
             # Usage: /auth create <display_name> | <password> | <description>
@@ -1975,25 +2607,25 @@ def handle_command(sid: str | None, text: str) -> None:
                 display_name, rest = [p.strip() for p in joined.split('|', 1)]
                 password, description = [p.strip() for p in rest.split('|', 1)]
             except Exception:
-                emit('message', {'type': 'error', 'content': 'Usage: /auth create <display_name> | <password> | <description>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth create <display_name> | <password> | <description>'})
                 return
             display_name = _strip_quotes(display_name)
             password = _strip_quotes(password)
             if len(display_name) < 2 or len(display_name) > 32:
-                emit('message', {'type': 'error', 'content': 'Display name must be 2-32 characters.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Display name must be 2-32 characters.'})
                 return
             if len(password) < 3:
-                emit('message', {'type': 'error', 'content': 'Password too short (min 3).'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Password too short (min 3).'})
                 return
             if world.get_user_by_display_name(display_name):
-                emit('message', {'type': 'error', 'content': 'That display name is already taken.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'That display name is already taken.'})
                 return
             ok, err, emits2, broadcasts2 = create_account_and_login(world, sid, display_name, password, description, sessions, admins, STATE_PATH)
             if not ok:
-                emit('message', {'type': 'error', 'content': err or 'Failed to create user.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Failed to create user.'})
                 return
             for payload in emits2:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             for room_id, payload in broadcasts2:
                 broadcast_to_room(room_id, payload, exclude_sid=sid)
             # Possibly start setup wizard
@@ -2003,8 +2635,8 @@ def handle_command(sid: str | None, text: str) -> None:
                     user = world.users.get(uid) if uid else None
                     if user and user.is_admin:
                         world_setup_sessions[sid] = {"step": "world_name", "temp": {}}
-                        emit('message', {'type': 'system', 'content': 'You are the first adventurer here and have been made an Admin.'})
-                        emit('message', {'type': 'system', 'content': 'Let\'s set up your world! What\'s the name of this world?'})
+                        emit(MESSAGE_OUT, {'type': 'system', 'content': 'You are the first adventurer here and have been made an Admin.'})
+                        emit(MESSAGE_OUT, {'type': 'system', 'content': 'Let\'s set up your world! What\'s the name of this world?'})
                         return
             except Exception:
                 pass
@@ -2015,85 +2647,85 @@ def handle_command(sid: str | None, text: str) -> None:
                 joined = " ".join(args[1:])
                 display_name, password = [p.strip() for p in joined.split('|', 1)]
             except Exception:
-                emit('message', {'type': 'error', 'content': 'Usage: /auth login <display_name> | <password>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth login <display_name> | <password>'})
                 return
             display_name = _strip_quotes(display_name)
             password = _strip_quotes(password)
             ok, err, emits2, broadcasts2 = login_existing(world, sid, display_name, password, sessions, admins)
             if not ok:
-                emit('message', {'type': 'error', 'content': err or 'Invalid name or password.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Invalid name or password.'})
                 return
             for payload in emits2:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             for room_id, payload in broadcasts2:
                 broadcast_to_room(room_id, payload, exclude_sid=sid)
             return
-        emit('message', {'type': 'error', 'content': 'Unknown /auth subcommand. Use create or login.'})
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Unknown /auth subcommand. Use create or login.'})
         return
 
     # Player convenience commands (non-admin): /rename, /describe, /sheet
     if cmd == 'rename':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if sid not in world.players:
-            emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'})
             return
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /rename <new name>'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /rename <new name>'})
             return
         new_name = " ".join(args).strip()
         if len(new_name) < 2 or len(new_name) > 32:
-            emit('message', {'type': 'error', 'content': 'Name must be between 2 and 32 characters.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Name must be between 2 and 32 characters.'})
             return
         player = world.players.get(sid)
         if not player:
-            emit('message', {'type': 'error', 'content': 'Player not found.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Player not found.'})
             return
         player.sheet.display_name = new_name
         try:
             world.save_to_file(STATE_PATH)
         except Exception:
             pass
-        emit('message', {'type': 'system', 'content': f'You are now known as {new_name}.'})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': f'You are now known as {new_name}.'})
         return
 
     if cmd == 'describe':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if sid not in world.players:
-            emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'})
             return
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /describe <text>'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /describe <text>'})
             return
         text = " ".join(args).strip()
         if len(text) > 300:
-            emit('message', {'type': 'error', 'content': 'Description too long (max 300 chars).'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Description too long (max 300 chars).'})
             return
         player = world.players.get(sid)
         if not player:
-            emit('message', {'type': 'error', 'content': 'Player not found.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Player not found.'})
             return
         player.sheet.description = text
         try:
             world.save_to_file(STATE_PATH)
         except Exception:
             pass
-        emit('message', {'type': 'system', 'content': 'Description updated.'})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': 'Description updated.'})
         return
 
     if cmd == 'sheet':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if sid not in world.players:
-            emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'})
             return
         player = world.players.get(sid)
         if not player:
-            emit('message', {'type': 'error', 'content': 'Player not found.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Player not found.'})
             return
         inv_text = player.sheet.inventory.describe()
         # Relationship summary: show outgoing and incoming relations by display name when known
@@ -2151,19 +2783,19 @@ def handle_command(sid: str | None, text: str) -> None:
             f"{player.sheet.description}{rel_text}\n\n"
             f"[b]Inventory[/b]\n{inv_text}"
         )
-        emit('message', {'type': 'system', 'content': content})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': content})
         return
 
     # /roll command (slash variant for convenience)
     if cmd == 'roll':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if sid not in world.players:
-            emit('message', {'type': 'error', 'content': 'Please authenticate first with /auth.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'})
             return
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /roll <dice expression> [| Private]'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /roll <dice expression> [| Private]'})
             return
         joined = " ".join(args)
         priv = False
@@ -2176,15 +2808,15 @@ def handle_command(sid: str | None, text: str) -> None:
         try:
             result = dice_roll(expr)
         except DiceError as e:
-            emit('message', {'type': 'error', 'content': f'Dice error: {e}'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': f'Dice error: {e}'})
             return
         res_text = f"{result.expression} = {result.total}"
         player_obj = world.players.get(sid)
         pname = player_obj.sheet.display_name if player_obj else 'Someone'
         if priv:
-            emit('message', {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"You secretly pull out the sacred geometric stones from your pocket and roll {res_text}."})
             return
-        emit('message', {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': f"You pull out the sacred geometric stones from your pocket and roll {res_text}."})
         if player_obj:
             broadcast_to_room(player_obj.room_id, {
                 'type': 'system',
@@ -2195,45 +2827,45 @@ def handle_command(sid: str | None, text: str) -> None:
     # Admin-only commands below
     admin_only_cmds = {'kick', 'room', 'npc', 'purge', 'worldstate', 'teleport', 'bring', 'safety', 'object'}
     if cmd in admin_only_cmds and sid not in admins:
-        emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Admin command. Admin rights required.'})
         return
 
     # /kick <playerName>
     if cmd == 'kick':
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /kick <playerName>'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /kick <playerName>'})
             return
         target_name = _strip_quotes(" ".join(args))
         # Fuzzy resolve player by display name
         okp, perr, target_sid, _resolved_name = _resolve_player_sid_global(world, target_name)
 
         if not okp or target_sid is None:
-            emit('message', {'type': 'error', 'content': perr or f"Player '{target_name}' not found."})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': perr or f"Player '{target_name}' not found."})
             return
 
         if target_sid == sid:
-            emit('message', {'type': 'error', 'content': 'You cannot kick yourself.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'You cannot kick yourself.'})
             return
 
         # Disconnect the target player
         try:
             # Use Flask-SocketIO's disconnect helper to drop the client by sid
             disconnect(target_sid, namespace="/")
-            emit('message', {'type': 'system', 'content': f"Kicked '{target_name}'."})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"Kicked '{target_name}'."})
         except Exception as e:
-            emit('message', {'type': 'error', 'content': f"Failed to kick '{target_name}': {e}"})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': f"Failed to kick '{target_name}': {e}"})
         return
 
     # /teleport (admin): teleport self or another player to a room
     if cmd == 'teleport':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         # Syntax:
         #   /teleport <room_id>
         #   /teleport <playerName> | <room_id>
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /teleport <room_id>  or  /teleport <playerName> | <room_id>'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /teleport <room_id>  or  /teleport <playerName> | <room_id>'})
             return
         target_sid = sid  # default: self
         target_room = None
@@ -2242,36 +2874,36 @@ def handle_command(sid: str | None, text: str) -> None:
                 joined = " ".join(args)
                 player_name, target_room = [ _strip_quotes(p.strip()) for p in joined.split('|', 1) ]
             except Exception:
-                emit('message', {'type': 'error', 'content': 'Usage: /teleport <playerName> | <room_id>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /teleport <playerName> | <room_id>'})
                 return
             # Fuzzy resolve player by name
             okp, perr, tsid, _pname = _resolve_player_sid_global(world, player_name)
             if not okp or not tsid:
-                emit('message', {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
                 return
             target_sid = tsid
         else:
             # Self teleport with one argument
             target_room = _strip_quotes(" ".join(args).strip())
         if not target_room:
-            emit('message', {'type': 'error', 'content': 'Target room id required.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Target room id required.'})
             return
         # Resolve room id fuzzily
         rok, rerr, resolved = _resolve_room_id_fuzzy(sid, target_room)
         if not rok or not resolved:
-            emit('message', {'type': 'error', 'content': rerr or 'Room not found.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': rerr or 'Room not found.'})
             return
         ok, err, emits2, broadcasts2 = teleport_player(world, target_sid, resolved)
         if not ok:
-            emit('message', {'type': 'error', 'content': err or 'Teleport failed.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Teleport failed.'})
             return
         # Send emits to the affected player (could be self or another)
         for payload in emits2:
             try:
                 if target_sid == sid:
-                    emit('message', payload)
+                    emit(MESSAGE_OUT, payload)
                 else:
-                    socketio.emit('message', payload, to=target_sid)
+                    socketio.emit(MESSAGE_OUT, payload, to=target_sid)
             except Exception:
                 pass
         # Broadcast leave/arrive messages
@@ -2279,56 +2911,56 @@ def handle_command(sid: str | None, text: str) -> None:
             broadcast_to_room(room_id, payload, exclude_sid=target_sid)
         # Confirm action if admin teleported someone else
         if target_sid != sid:
-            emit('message', {'type': 'system', 'content': 'Teleport complete.'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Teleport complete.'})
         return
 
     # /bring (admin): bring a player to your current room
     if cmd == 'bring':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if not args:
-            emit('message', {'type': 'error', 'content': 'Usage: /bring <playerName>'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /bring <playerName>'})
             return
         # Support legacy syntax but ignore room id; always use admin's current room
         joined = " ".join(args)
         player_name = _strip_quotes(joined.split('|', 1)[0].strip())
         okp, perr, tsid, _pname = _resolve_player_sid_global(world, player_name)
         if not okp or not tsid:
-            emit('message', {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': perr or f"Player '{player_name}' not found."})
             return
         okh, erh, here_room = _normalize_room_input(sid, 'here')
         if not okh or not here_room:
-            emit('message', {'type': 'error', 'content': erh or 'You are nowhere.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': erh or 'You are nowhere.'})
             return
         ok, err, emits2, broadcasts2 = teleport_player(world, tsid, here_room)
         if not ok:
-            emit('message', {'type': 'error', 'content': err or 'Bring failed.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': err or 'Bring failed.'})
             return
         # Notify affected and broadcasts
         for payload in emits2:
             try:
-                socketio.emit('message', payload, to=tsid)
+                socketio.emit(MESSAGE_OUT, payload, to=tsid)
             except Exception:
                 pass
         for room_id, payload in broadcasts2:
             broadcast_to_room(room_id, payload, exclude_sid=tsid)
-        emit('message', {'type': 'system', 'content': 'Bring complete.'})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': 'Bring complete.'})
         return
 
     # /purge (admin): delete persisted world file and reset to defaults with confirmation
     if cmd == 'purge':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         _pending_confirm[sid] = 'purge'
-        emit('message', purge_prompt())
+        emit(MESSAGE_OUT, purge_prompt())
         return
 
     # /worldstate (admin): print the JSON contents of the persisted world state file (passwords redacted)
     if cmd == 'worldstate':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         try:
             import json
@@ -2338,25 +2970,25 @@ def handle_command(sid: str | None, text: str) -> None:
             sanitized = redact_sensitive(data)
             raw = json.dumps(sanitized, ensure_ascii=False, indent=2)
             # Send as a single system message. Keep raw formatting; client uses RichTextLabel and can display plain text.
-            emit('message', {
+            emit(MESSAGE_OUT, {
                 'type': 'system',
                 'content': f"[b]world_state.json[/b]\n{raw}"
             })
         except FileNotFoundError:
-            emit('message', {'type': 'error', 'content': 'world_state.json not found.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'world_state.json not found.'})
         except Exception as e:
-            emit('message', {'type': 'error', 'content': f'Failed to read world_state.json: {e}'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': f'Failed to read world_state.json: {e}'})
         return
 
     # /safety (admin): set AI content safety level
     if cmd == 'safety':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         # If no argument, show current and usage
         if not args:
             cur = getattr(world, 'safety_level', 'G')
-            emit('message', {'type': 'system', 'content': f"Current safety level: [b]{cur}[/b]\nUsage: /safety <G|PG-13|R|OFF>"})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"Current safety level: [b]{cur}[/b]\nUsage: /safety <G|PG-13|R|OFF>"})
             return
         raw = " ".join(args).strip().upper()
         # Normalize common synonyms
@@ -2369,93 +3001,93 @@ def handle_command(sid: str | None, text: str) -> None:
         elif raw in ("OFF", "NONE", "NO FILTERS", "DISABLE", "DISABLED", "SAFETY FILTERS OFF"):
             level = 'OFF'
         else:
-            emit('message', {'type': 'error', 'content': 'Invalid safety level. Use one of: G, PG-13, R, OFF.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Invalid safety level. Use one of: G, PG-13, R, OFF.'})
             return
         try:
             world.safety_level = level
             world.save_to_file(STATE_PATH)
         except Exception:
             pass
-        emit('message', {'type': 'system', 'content': f"Safety level set to [b]{level}[/b]. This applies to future AI replies."})
+        emit(MESSAGE_OUT, {'type': 'system', 'content': f"Safety level set to [b]{level}[/b]. This applies to future AI replies."})
         return
 
     # /setup (admin): start the world setup wizard if not complete
     if cmd == 'setup':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if sid not in admins:
-            emit('message', {'type': 'error', 'content': 'Admin command. Admin rights required.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Admin command. Admin rights required.'})
             return
         if getattr(world, 'setup_complete', False):
-            emit('message', {'type': 'system', 'content': 'Setup is already complete. Use /purge to reset the world if you want to run setup again.'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Setup is already complete. Use /purge to reset the world if you want to run setup again.'})
             return
         for p in _setup_begin(world_setup_sessions, sid):
-            emit('message', p)
+            emit(MESSAGE_OUT, p)
         return
 
     # /object commands (admin)
     if cmd == 'object':
         if sid is None:
-            emit('message', {'type': 'error', 'content': 'Not connected.'})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'})
             return
         if not args:
-            emit('message', {'type': 'system', 'content': 'Usage: /object <createtemplateobject | createobject <room> | <name> | <desc> | <tags or template_key> | listtemplates | viewtemplate <key> | deletetemplate <key>>'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Usage: /object <createtemplateobject | createobject <room> | <name> | <desc> | <tags or template_key> | listtemplates | viewtemplate <key> | deletetemplate <key>>'})
             return
         sub = args[0].lower()
         # create simple object in current room or from template
         if sub == 'createobject':
             if sid not in world.players:
-                emit('message', {'type': 'error', 'content': 'Please authenticate first to create objects.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first to create objects.'})
                 return
             handled, err, emits3 = _obj_create(world, STATE_PATH, sid, args[1:])
             if err:
-                emit('message', {'type': 'error', 'content': err})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err})
                 return
             for payload in emits3:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             return
         # create wizard
         if sub == 'createtemplateobject':
             sid_str = cast(str, sid)
             object_template_sessions[sid_str] = {"step": "template_key", "temp": {}}
-            emit('message', {'type': 'system', 'content': 'Creating a new Object template. Type cancel to abort at any time.'})
-            emit('message', {'type': 'system', 'content': 'Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Creating a new Object template. Type cancel to abort at any time.'})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': 'Enter a unique template key (letters, numbers, underscores), e.g., sword_bronze:'})
             return
         # list templates
         if sub == 'listtemplates':
             templates = _obj_list_templates(world)
             if not templates:
-                emit('message', {'type': 'system', 'content': 'No object templates saved.'})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'No object templates saved.'})
             else:
-                emit('message', {'type': 'system', 'content': 'Object templates: ' + ", ".join(templates)})
+                emit(MESSAGE_OUT, {'type': 'system', 'content': 'Object templates: ' + ", ".join(templates)})
             return
         # view template <key>
         if sub == 'viewtemplate':
             if len(args) < 2:
-                emit('message', {'type': 'error', 'content': 'Usage: /object viewtemplate <key>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /object viewtemplate <key>'})
                 return
             key = args[1]
             okv, ev, raw = _obj_view_template(world, key)
             if not okv:
-                emit('message', {'type': 'error', 'content': ev or 'Template not found.'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': ev or 'Template not found.'})
                 return
-            emit('message', {'type': 'system', 'content': f"[b]{key}[/b]\n{raw}"})
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{key}[/b]\n{raw}"})
             return
         # delete template <key>
         if sub == 'deletetemplate':
             if len(args) < 2:
-                emit('message', {'type': 'error', 'content': 'Usage: /object deletetemplate <key>'})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /object deletetemplate <key>'})
                 return
             key = args[1]
             handled, err2, emitsD = _obj_delete_template(world, STATE_PATH, key)
             if err2:
-                emit('message', {'type': 'error', 'content': err2})
+                emit(MESSAGE_OUT, {'type': 'error', 'content': err2})
                 return
             for payload in emitsD:
-                emit('message', payload)
+                emit(MESSAGE_OUT, payload)
             return
-        emit('message', {'type': 'error', 'content': 'Unknown /object subcommand. Use createobject, createtemplateobject, listtemplates, viewtemplate, or deletetemplate.'})
+        emit(MESSAGE_OUT, {'type': 'error', 'content': 'Unknown /object subcommand. Use createobject, createtemplateobject, listtemplates, viewtemplate, or deletetemplate.'})
         return
 
     # (Removed duplicate /object handler)
@@ -2464,10 +3096,10 @@ def handle_command(sid: str | None, text: str) -> None:
     if cmd == 'room':
         handled, err, emits2 = handle_room_command(world, STATE_PATH, args, sid)
         if err:
-            emit('message', {'type': 'error', 'content': err})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': err})
             return
         for payload in emits2:
-            emit('message', payload)
+            emit(MESSAGE_OUT, payload)
         if handled:
             return
 
@@ -2475,15 +3107,15 @@ def handle_command(sid: str | None, text: str) -> None:
     if cmd == 'npc':
         handled, err, emits2 = handle_npc_command(world, STATE_PATH, sid, args)
         if err:
-            emit('message', {'type': 'error', 'content': err})
+            emit(MESSAGE_OUT, {'type': 'error', 'content': err})
             return
         for payload in emits2:
-            emit('message', payload)
+            emit(MESSAGE_OUT, payload)
         if handled:
             return
 
     # Unknown command
-    emit('message', {'type': 'error', 'content': f"Unknown command: /{cmd}"})
+    emit(MESSAGE_OUT, {'type': 'error', 'content': f"Unknown command: /{cmd}"})
 
 
 # --- Run the Server ---

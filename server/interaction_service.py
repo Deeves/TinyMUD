@@ -27,8 +27,8 @@ _TAG_TO_ACTIONS: dict[str, list[str]] = {
     # Mobility / world geometry
     "Travel Point": ["Move Through"],
     # Carrying / equipment
-    "one-hand": ["Pick Up"],
-    "two-hand": ["Pick Up"],
+    "small": ["Pick Up"],
+    "large": ["Pick Up"],
     "weapon": ["Wield"],
     # Common affordances (optional future use)
     "Edible": ["Eat"],
@@ -58,12 +58,47 @@ def _actions_for_object(world, obj) -> list[str]:
     actions: list[str] = []
     try:
         tags = set(getattr(obj, 'object_tags', []) or [])
-        # Static tag-based actions
+        # 1) Static tag-based actions (exact tag matches only)
         for t in list(tags):
             tstr = str(t)
             if tstr in _TAG_TO_ACTIONS:
                 actions.extend(_TAG_TO_ACTIONS[tstr])
-        # Dynamic: craft spot:<template_key>
+
+    # 2) Numeric-aware nutrition tags: 'Edible: N' and 'Drinkable: N'
+        def _parse_tag_val(ts: set[str], key: str) -> int | None:
+            keyl = key.lower()
+            for x in ts:
+                s = str(x)
+                parts = s.split(':', 1)
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip().lower() == keyl:
+                    r = parts[1].strip()
+                    if r.startswith('+'):
+                        r = r[1:]
+                    if r.lstrip('-').isdigit():
+                        try:
+                            return int(r)
+                        except Exception:
+                            return None
+            return None
+        has_edible = any(str(t).split(':', 1)[0].strip().lower() == 'edible' for t in tags)
+        has_drink = any(str(t).split(':', 1)[0].strip().lower() == 'drinkable' for t in tags)
+        val_e = _parse_tag_val(tags, 'Edible') if has_edible else None
+        val_d = _parse_tag_val(tags, 'Drinkable') if has_drink else None
+        # If numeric provided, replace plain label with formatted one; if missing, remove the action entirely
+        if has_edible:
+            # Remove any prior Eat variants
+            actions = [a for a in actions if not (a == 'Eat' or a.lower().startswith('eat (+'))]
+            if val_e is not None:
+                actions.append(f"Eat (+{val_e})")
+        if has_drink:
+            actions = [a for a in actions if not (a == 'Drink' or a.lower().startswith('drink (+'))]
+            if val_d is not None:
+                actions.append(f"Drink (+{val_d})")
+
+        # 3) Dynamic: craft spot:<template_key>
+        store = getattr(world, 'object_templates', {}) or {}
         for t in list(tags):
             try:
                 tstr = str(t)
@@ -74,7 +109,6 @@ def _actions_for_object(world, obj) -> list[str]:
                 key_raw = tstr.split(':', 1)[1].strip()
                 if not key_raw:
                     continue
-                store = getattr(world, 'object_templates', {}) or {}
                 key_match = None
                 if key_raw in store:
                     key_match = key_raw
@@ -106,7 +140,6 @@ def _format_choices(title: str, actions: list[str]) -> str:
         lines.append(f"{idx}. {act}")
     lines.append("What do you wish to do?")
     return "\n".join(lines)
-
 
 def begin_interaction(world, sid: str, room, object_name: str, sessions: Dict[str, dict]) -> tuple[bool, str | None, list[dict]]:
     if not sid or sid not in world.players:
@@ -383,8 +416,8 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         if inv is None:
             return False, 'No inventory available.'
         tags = set(getattr(o, 'object_tags', []) or [])
-        # two-hand items go to large, one-hand to small
-        if 'two-hand' in tags:
+        # large items go to large, small to small
+        if 'large' in tags:
             for i in range(6, 8):
                 if inv.slots[i] is None:
                     inv.slots[i] = o
@@ -394,7 +427,7 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                         pass
                     return True, None
             return False, 'No large slot available to stow it.'
-        # default one-hand
+        # default small
         for i in range(2, 6):
             if inv.slots[i] is None:
                 inv.slots[i] = o
@@ -501,10 +534,33 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
             sessions.pop(sid, None)
             return True, [{'type': 'system', 'content': f'You are already holding the {name}.'}], []
 
-    if chosen.lower() in ('eat', 'drink'):
+    if chosen.lower() == 'eat' or chosen.lower().startswith('eat (') or chosen.lower() == 'drink' or chosen.lower().startswith('drink ('):
         if not player or not room:
             sessions.pop(sid, None)
             return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+        # Enforce numeric tag presence before consuming when the tag exists
+        tags_now = set(getattr(obj, 'object_tags', []) or []) if obj else set()
+        def _parse_tag_val2(ts: set[str], key: str) -> int | None:
+            keyl = key.lower()
+            for x in ts:
+                s = str(x)
+                parts = s.split(':', 1)
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip().lower() == keyl:
+                    r = parts[1].strip()
+                    if r.startswith('+'):
+                        r = r[1:]
+                    if r.lstrip('-').isdigit():
+                        try:
+                            return int(r)
+                        except Exception:
+                            return None
+            return None
+        need_key = 'Drinkable' if chosen.lower().startswith('drink') else 'Edible'
+        if any(str(t).split(':', 1)[0].strip().lower() == need_key.lower() for t in tags_now) and _parse_tag_val2(tags_now, need_key) is None:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': f"This item requires a numeric '{need_key}: N' tag to be used."}], []
         # Remove source (room or inventory) and spawn deconstruct outputs into room
         removed = False
         if inv is None:
@@ -539,7 +595,7 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 except Exception:
                     continue
         sessions.pop(sid, None)
-        line = 'drink' if chosen.lower() == 'drink' else 'eat'
+        line = 'drink' if chosen.lower().startswith('drink') else 'eat'
         msg = f'You {line} the {name}.'
         if created_names:
             msg += " You now have: " + ", ".join(created_names) + "."
@@ -618,7 +674,7 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                     # Place into appropriate container slot
                     tags2 = set(getattr(spawned, 'object_tags', []) or [])
                     placed = False
-                    if 'two-hand' in tags2:
+                    if 'large' in tags2:
                         for i in range(0, 2):
                             if getattr(obj, 'container_large_slots', [None, None])[i] is None:
                                 obj.container_large_slots[i] = spawned

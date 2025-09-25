@@ -3,7 +3,7 @@
 Concepts:
 - Controlled Character: A character controlled by a User connected via Socket.IO (identified by a session id `sid`).
 - Character: a character sheet with a display name, description, and inventory that is controlled by AI.
-- Object: an item with a name, description, material type, and interaction tags (e.g., "one-hand", "two-hand").
+- Object: an item with a name, description, material type, and interaction tags (e.g., "small", "large").
 - Inventory: 8 slots with constraints on what items can be stored where.
 - World: serves as the main container for all game entities and logic.
 - Room: a place with a description, that holds objects, entrances, exits, and characters.
@@ -28,7 +28,7 @@ class Object:
     - uuid: stable identifier
     - display_name: human-friendly name (e.g., "Sword")
     - description: flavor text
-    - object_tags: tags such as "weapon", "cutting damage", "one-hand", "Immovable", "Travel Point"
+    - object_tags: tags such as "weapon", "cutting damage", "small", "Immovable", "Travel Point"
     - material_tag: e.g., "bronze"
     - value: integer numeric value (optional)
     - loot_location_hint: an Object indicating where it can usually be found
@@ -44,9 +44,12 @@ class Object:
 
     display_name: str
     description: str = ""
-    object_tags: Set[str] = field(default_factory=lambda: {"one-hand"})
+    object_tags: Set[str] = field(default_factory=lambda: {"small"})
     material_tag: Optional[str] = None
     value: Optional[int] = None
+    # Nutrition for needs system (optional; back-compat defaults to None)
+    satiation_value: Optional[int] = None
+    hydration_value: Optional[int] = None
     loot_location_hint: Optional["Object"] = None
     durability: Optional[int] = None
     quality: Optional[str] = None
@@ -71,6 +74,9 @@ class Object:
             "object_tag": sorted(list(self.object_tags)),
             "material_tag": self.material_tag,
             "value": self.value,
+            # Nutrition properties for needs system (optional)
+            "satiation_value": getattr(self, 'satiation_value', None),
+            "hydration_value": getattr(self, 'hydration_value', None),
             "loot_location_hint": (self.loot_location_hint.to_dict() if self.loot_location_hint else None),
             "durability": self.durability,
             "quality": self.quality,
@@ -128,8 +134,9 @@ class Object:
             tags = set(map(str, data.get("object_tag", [])))
         elif isinstance(data.get("tags"), list):  # legacy
             tags = set(map(str, data.get("tags", [])))
+        # Provide a default when missing
         if not tags:
-            tags = {"one-hand"}
+            tags = {"small"}
 
         # Optional fields with typo back-compat
         durability = data.get("durability")
@@ -182,6 +189,14 @@ class Object:
             link_to_object_uuid=(str(data.get("link_to_object_uuid")) if data.get("link_to_object_uuid") is not None else None),
             uuid=str(data.get("uuid") or uuid.uuid4()),
         )
+        # Optional nutrition fields with back-compat
+        try:
+            sv = data.get("satiation_value")
+            hv = data.get("hydration_value")
+            obj.satiation_value = int(sv) if isinstance(sv, (int, str)) and str(sv).lstrip('-').isdigit() else None  # type: ignore[attr-defined]
+            obj.hydration_value = int(hv) if isinstance(hv, (int, str)) and str(hv).lstrip('-').isdigit() else None  # type: ignore[attr-defined]
+        except Exception:
+            pass
         # Load container fields
         try:
             small_raw = data.get("container_small_slots")
@@ -207,8 +222,8 @@ class Inventory:
     """8 slot inventory with constraints:
     - slot 0: left hand
     - slot 1: right hand
-    - slots 2-5: four small items (must have 'one-hand')
-    - slots 6-7: two large items (must have 'two-hand')
+    - slots 2-5: four small items (must have 'small')
+    - slots 6-7: two large items (must have 'large')
     """
 
     slots: List[Optional[Object]] = field(default_factory=lambda: [None] * 8)
@@ -221,12 +236,16 @@ class Inventory:
         if 'Immovable' in tags or 'Travel Point' in tags:
             return False
         if index in (0, 1):
-            # hands can hold either one-hand or two-hand items (conceptually one hand carrying a two-hand object is allowed here for simplicity)
+            # hands can hold either small or large items (conceptually one hand carrying a large object is allowed here for simplicity)
             return True
         if 2 <= index <= 5:
-            return 'one-hand' in tags and 'two-hand' not in tags
+            # Allow only 'small'; disallow if also marked as 'large'
+            is_small = ('small' in tags)
+            is_large = ('large' in tags)
+            return is_small and not is_large
         if 6 <= index <= 7:
-            return 'two-hand' in tags
+            # Allow only 'large'
+            return ('large' in tags)
         return False
 
     def place(self, index: int, obj: Object) -> bool:
@@ -276,20 +295,41 @@ class CharacterSheet:
     display_name: str
     description: str = "A nondescript adventurer."
     inventory: Inventory = field(default_factory=Inventory)
+    # Needs system (0-100 scale; higher is better). Defaults represent a well-fed, hydrated NPC.
+    hunger: float = 100.0
+    thirst: float = 100.0
+    # Action economy: how many actions an NPC can take per tick. Players ignore this.
+    action_points: int = 0
+    # Queue of planned actions produced by AI or offline planner. Each entry is a dict: {"tool": str, "args": dict}
+    plan_queue: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "display_name": self.display_name,
             "description": self.description,
             "inventory": self.inventory.to_dict(),
+            # Persist needs/planning fields for NPCs and future player use
+            "hunger": self.hunger,
+            "thirst": self.thirst,
+            "action_points": self.action_points,
+            "plan_queue": list(self.plan_queue or []),
         }
 
     @staticmethod
     def from_dict(data: dict) -> "CharacterSheet":
+        # Backfill defaults for worlds saved before needs existed
+        hunger = data.get("hunger")
+        thirst = data.get("thirst")
+        ap = data.get("action_points")
+        pq = data.get("plan_queue")
         return CharacterSheet(
             display_name=data.get("display_name", "Unnamed"),
             description=data.get("description", "A nondescript adventurer."),
             inventory=Inventory.from_dict(data.get("inventory", {})),
+            hunger=float(hunger) if isinstance(hunger, (int, float, str)) and str(hunger).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
+            thirst=float(thirst) if isinstance(thirst, (int, float, str)) and str(thirst).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
+            action_points=int(ap) if isinstance(ap, (int, str)) and str(ap).lstrip('-').isdigit() else 0,
+            plan_queue=list(pq) if isinstance(pq, list) else [],
         )
 
 

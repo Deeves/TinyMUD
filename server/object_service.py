@@ -14,6 +14,7 @@ Great first change ideas:
 """
 
 from typing import List, Tuple
+from persistence_utils import save_world
 
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
@@ -108,13 +109,13 @@ def create_object(world, state_path: str, sid: str | None, args: list[str]) -> t
         new_obj.description = desc
         used_template = True
     else:
-        tags = [t.strip() for t in third.split(',') if t.strip()] if third else ['one-hand']
+        tags = [t.strip() for t in third.split(',') if t.strip()] if third else ['small']
         tags = list(dict.fromkeys(tags))
         new_obj = _Obj(display_name=name, description=desc, object_tags=set(tags))
 
     try:
         room.objects[new_obj.uuid] = new_obj
-        world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass
 
@@ -150,7 +151,7 @@ def delete_template(world, state_path: str, key: str) -> tuple[bool, str | None,
         return True, f"Template '{key}' not found.", emits
     try:
         del store[key]
-        world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
         emits.append({'type': 'system', 'content': f"Deleted template '{key}'."})
     except Exception as e:
         return True, f"Failed to delete template: {e}", emits

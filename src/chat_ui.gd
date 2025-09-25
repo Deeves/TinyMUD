@@ -36,6 +36,7 @@ var _reconnect_attempts: int = 0
 const RECONNECT_BASE_DELAY := 1.5
 const RECONNECT_MAX_DELAY := 10.0
 var _wrap_cols_cache: int = -1
+var MAX_MESSAGE_LEN := 1000 # default; updated from server [config]
 
 # --- UX helpers ---
 var _last_sent_message: String = ""
@@ -191,6 +192,12 @@ func _handle_system_message(content: String) -> void:
 	if _looks_like_ascii_art(content):
 		append_to_log("[color=green][code]%s[/code][/color]" % content.strip_edges())
 		return
+	# Intercept lightweight server config lines like: [config] MAX_MESSAGE_LEN=1234
+	if content.begins_with("[config]"):
+		_parse_server_config(content)
+		# Also show the line to the user for transparency
+		append_to_log("[color=green]%s[/color]" % content)
+		return
 	append_to_log("[color=green]%s[/color]" % content)
 	var c := content.to_lower()
 	if c.find("welcome back,") != -1 or c.find("character created. welcome,") != -1:
@@ -232,6 +239,28 @@ func _handle_system_message(content: String) -> void:
 		_in_auth_flow = false
 		_expecting_password = false
 		input_box.secret = false
+
+# Parse simple key=value pairs from a server system message that starts with "[config]".
+# Currently used to mirror MAX_MESSAGE_LEN on the client side.
+func _parse_server_config(line: String) -> void:
+	var raw := String(line)
+	# Strip the prefix
+	var s := raw.replace("[config]", "").strip_edges()
+	# Split on spaces in case multiple pairs arrive in one line in future
+	var parts: Array = s.split(" ", false)
+	for p_raw in parts:
+		var p := String(p_raw)
+		var eq := p.find("=")
+		if eq <= 0:
+			continue
+		var key := p.substr(0, eq).strip_edges().to_upper()
+		var val := p.substr(eq + 1).strip_edges()
+		match key:
+			"MAX_MESSAGE_LEN":
+				var n := int(val)
+				if n > 0:
+					MAX_MESSAGE_LEN = n
+        
 
 
 # Heuristic to decide if a system message is ASCII art. We avoid relying on server
@@ -473,6 +502,10 @@ func _handle_npc_message(npc_name: String, text: String) -> void:
 
 func _on_text_submitted(player_text: String):
 	if player_text.is_empty():
+		return
+	# Client-side length cap to avoid needless round-trips
+	if player_text.length() > MAX_MESSAGE_LEN:
+		append_to_log("[color=red]Message too long (>" + str(MAX_MESSAGE_LEN) + ") characters. Trim your message.[/color]")
 		return
 	# Track if this submission is a password entry from the interactive flow.
 	# We reset the masking immediately after, but we also use this flag to avoid logging/storing the raw text.

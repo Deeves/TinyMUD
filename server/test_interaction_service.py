@@ -54,7 +54,7 @@ def test_cancel_interaction_via_number():
 
 def test_actions_for_carryable_weapon():
     w, sid, room = _setup_world_with_player_and_room()
-    obj = Object(display_name="Bronze Sword", object_tags={"one-hand", "weapon"})
+    obj = Object(display_name="Bronze Sword", object_tags={"small", "weapon"})
     room.objects[obj.uuid] = obj
     sessions = {}
 
@@ -69,7 +69,7 @@ def test_actions_for_carryable_weapon():
 
 def test_pickup_stow_one_hand_adds_stowed():
     w, sid, room = _setup_world_with_player_and_room()
-    obj = Object(display_name="Dagger", object_tags={"one-hand"})
+    obj = Object(display_name="Dagger", object_tags={"small"})
     room.objects[obj.uuid] = obj
     sessions = {}
 
@@ -94,9 +94,9 @@ def test_pickup_fallback_to_hands_when_no_small_slots():
     # Fill small slots
     inv = w.players[sid].sheet.inventory
     for i in range(2, 6):
-        inv.slots[i] = Object(display_name=f"Pebble{i}", object_tags={"one-hand"})
+        inv.slots[i] = Object(display_name=f"Pebble{i}", object_tags={"small"})
     # Hands empty
-    obj = Object(display_name="Shortsword", object_tags={"one-hand", "weapon"})
+    obj = Object(display_name="Shortsword", object_tags={"small", "weapon"})
     room.objects[obj.uuid] = obj
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "shortsword", sessions)
@@ -112,11 +112,11 @@ def test_pickup_no_space():
     w, sid, room = _setup_world_with_player_and_room()
     inv = w.players[sid].sheet.inventory
     # Fill hands and small slots
-    inv.slots[0] = Object(display_name="RockL", object_tags={"one-hand"})
-    inv.slots[1] = Object(display_name="RockR", object_tags={"one-hand"})
+    inv.slots[0] = Object(display_name="RockL", object_tags={"small"})
+    inv.slots[1] = Object(display_name="RockR", object_tags={"small"})
     for i in range(2, 6):
-        inv.slots[i] = Object(display_name=f"Pebble{i}", object_tags={"one-hand"})
-    obj = Object(display_name="Apple", object_tags={"one-hand", "Edible"})
+        inv.slots[i] = Object(display_name=f"Pebble{i}", object_tags={"small"})
+    obj = Object(display_name="Apple", object_tags={"small", "Edible"})
     room.objects[obj.uuid] = obj
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "apple", sessions)
@@ -130,7 +130,7 @@ def test_pickup_no_space():
 
 def test_wield_from_room_moves_to_hand():
     w, sid, room = _setup_world_with_player_and_room()
-    obj = Object(display_name="Bronze Sword", object_tags={"one-hand", "weapon"})
+    obj = Object(display_name="Bronze Sword", object_tags={"small", "weapon"})
     room.objects[obj.uuid] = obj
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "bronze", sessions)
@@ -145,7 +145,7 @@ def test_wield_from_room_moves_to_hand():
 def test_wield_from_stowed_moves_to_hand_and_removes_stowed():
     w, sid, room = _setup_world_with_player_and_room()
     inv = w.players[sid].sheet.inventory
-    obj = Object(display_name="Club", object_tags={"one-hand", "weapon", "stowed"})
+    obj = Object(display_name="Club", object_tags={"small", "weapon", "stowed"})
     inv.slots[2] = obj
     sessions = {sid: {"step": "choose", "obj_uuid": obj.uuid, "obj_name": obj.display_name, "actions": ["Wield", "Step Away"]}}
     handled, emits2, _b = handle_interaction_input(w, sid, "wield", sessions)
@@ -158,7 +158,7 @@ def test_wield_from_stowed_moves_to_hand_and_removes_stowed():
 def test_wield_when_already_in_hand():
     w, sid, room = _setup_world_with_player_and_room()
     inv = w.players[sid].sheet.inventory
-    obj = Object(display_name="Knife", object_tags={"one-hand", "weapon"})
+    obj = Object(display_name="Knife", object_tags={"small", "weapon"})
     inv.slots[0] = obj
     sessions = {sid: {"step": "choose", "obj_uuid": obj.uuid, "obj_name": obj.display_name, "actions": ["Wield", "Step Away"]}}
     handled, emits2, _b = handle_interaction_input(w, sid, "wield", sessions)
@@ -169,7 +169,7 @@ def test_wield_when_already_in_hand():
 def test_eat_spawns_outputs():
     w, sid, room = _setup_world_with_player_and_room()
     core = Object(display_name="Core")
-    food = Object(display_name="Apple", object_tags={"one-hand", "Edible"}, deconstruct_recipe=[core])
+    food = Object(display_name="Apple", object_tags={"small", "Edible: 10"}, deconstruct_recipe=[core])
     room.objects[food.uuid] = food
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "apple", sessions)
@@ -185,7 +185,7 @@ def test_eat_spawns_outputs():
 def test_drink_spawns_outputs():
     w, sid, room = _setup_world_with_player_and_room()
     empty = Object(display_name="Empty Bottle")
-    drink = Object(display_name="Potion", object_tags={"one-hand", "Drinkable"}, deconstruct_recipe=[empty])
+    drink = Object(display_name="Potion", object_tags={"small", "Drinkable: 5"}, deconstruct_recipe=[empty])
     room.objects[drink.uuid] = drink
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "potion", sessions)
@@ -272,7 +272,7 @@ def test_craft_spot_lists_craft_action_and_spawns():
     w, sid, room = _setup_world_with_player_and_room()
     # Prepare a template that can be crafted here
     from world import Object
-    sword_tpl = Object(display_name="Iron Sword", object_tags={"one-hand", "weapon"})
+    sword_tpl = Object(display_name="Iron Sword", object_tags={"small", "weapon"})
     w.object_templates["iron_sword"] = sword_tpl
     # Place a crafting station object with the dynamic tag
     anvil = Object(display_name="Anvil", object_tags={"Immovable", "craft spot:iron_sword"})
@@ -326,7 +326,7 @@ def test_craft_requires_components_in_inventory():
     assert any(e.get('type') == 'error' and 'required components' in e.get('content', '').lower() for e in emits1)
     # Add only Hammer -> still error (missing Bronze Ingot)
     inv = w.players[sid].sheet.inventory
-    inv.slots[1] = Object(display_name="Hammer", object_tags={"one-hand"})
+    inv.slots[1] = Object(display_name="Hammer", object_tags={"small"})
     sessions2 = {}
     ok2, err2, _ = begin_interaction(w, sid, room, "forge", sessions2)
     assert ok2
@@ -335,7 +335,7 @@ def test_craft_requires_components_in_inventory():
     combined2 = "\n".join(e.get('content', '') for e in emits2)
     assert 'bronze ingot' in combined2.lower()
     # Add Bronze Ingot as well -> craft succeeds
-    inv.slots[0] = Object(display_name="Bronze Ingot", object_tags={"one-hand"})
+    inv.slots[0] = Object(display_name="Bronze Ingot", object_tags={"small"})
     sessions3 = {}
     ok3, err3, _ = begin_interaction(w, sid, room, "forge", sessions3)
     assert ok3
@@ -360,8 +360,8 @@ def test_craft_consumes_quantity_duplicates():
     room.objects[bench.uuid] = bench
     # Place two Nails in inventory (small slots)
     inv = w.players[sid].sheet.inventory
-    inv.slots[2] = Object(display_name="Nails", object_tags={"one-hand"})
-    inv.slots[3] = Object(display_name="Nails", object_tags={"one-hand"})
+    inv.slots[2] = Object(display_name="Nails", object_tags={"small"})
+    inv.slots[3] = Object(display_name="Nails", object_tags={"small"})
     sessions = {}
     ok, err, _ = begin_interaction(w, sid, room, "workbench", sessions)
     assert ok

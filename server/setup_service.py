@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple
 import re
 
 from world import Room, CharacterSheet
+from persistence_utils import save_world
 
 
 def begin_setup(world_setup_sessions: Dict[str, dict], sid: str) -> List[dict]:
@@ -110,7 +111,7 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
             return True, emits
         try:
             world.safety_level = level
-            world.save_to_file(state_path)
+            save_world(world, state_path, debounced=True)
         except Exception:
             pass
         sess['step'] = 'room_id'
@@ -150,7 +151,7 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
             except Exception:
                 pass
         try:
-            world.save_to_file(state_path)
+            save_world(world, state_path, debounced=True)
         except Exception:
             pass
         sess['step'] = 'npc_name'
@@ -164,7 +165,7 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
         if npc_name.lower() in ('skip', 'none'):
             world.setup_complete = True
             try:
-                world.save_to_file(state_path)
+                save_world(world, state_path, debounced=True)
             except Exception:
                 pass
             world_setup_sessions.pop(sid, None)
@@ -203,7 +204,7 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
                 pass
         world.setup_complete = True
         try:
-            world.save_to_file(state_path)
+            save_world(world, state_path, debounced=True)
         except Exception:
             pass
         world_setup_sessions.pop(sid, None)

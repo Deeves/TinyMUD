@@ -9,6 +9,7 @@ other players in the same room. The caller (server.py) is responsible for sendin
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
+from persistence_utils import save_world
 
 
 def create_account_and_login(
@@ -35,7 +36,7 @@ def create_account_and_login(
         grant_admin = (len(world.users) == 0) or bool(getattr(world, 'debug_creative_mode', False))
         user = world.create_user(display_name, password, description, is_admin=grant_admin)
         try:
-            world.save_to_file(state_path)
+            save_world(world, state_path, debounced=True)
         except Exception:
             # Best-effort persistence
             pass
