@@ -107,11 +107,21 @@ def create_object(world, state_path: str, sid: str | None, args: list[str]) -> t
         new_obj.uuid = str(__import__('uuid').uuid4())
         new_obj.display_name = name
         new_obj.description = desc
+        # Do not inherit ownership from templates; start unowned
+        try:
+            new_obj.owner_id = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
         used_template = True
     else:
         tags = [t.strip() for t in third.split(',') if t.strip()] if third else ['small']
         tags = list(dict.fromkeys(tags))
         new_obj = _Obj(display_name=name, description=desc, object_tags=set(tags))
+        # Explicit for clarity; default is None
+        try:
+            new_obj.owner_id = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     try:
         room.objects[new_obj.uuid] = new_obj

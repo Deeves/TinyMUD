@@ -40,6 +40,9 @@ class Object:
     Travel/Linking (optional helpers for movement objects like doors/stairs):
     - link_target_room_id: if this object acts as a travel point to a room
     - link_to_object_uuid: if this object links to another Object (future use)
+    
+    Ownership (optional):
+    - owner_id: stable UUID of a player (user.user_id) or NPC (world.npc_ids[name]) who owns this object
     """
 
     display_name: str
@@ -58,6 +61,8 @@ class Object:
     # Travel helpers
     link_target_room_id: Optional[str] = None
     link_to_object_uuid: Optional[str] = None
+    # Ownership: player.user_id or npc_id; None means unowned
+    owner_id: Optional[str] = None
     # Stable id
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     # Container support (when 'Container' in object_tags): two small and two large slots
@@ -74,6 +79,8 @@ class Object:
             "object_tag": sorted(list(self.object_tags)),
             "material_tag": self.material_tag,
             "value": self.value,
+            # Ownership persistence (player.user_id or npc_id)
+            "owner_id": getattr(self, 'owner_id', None),
             # Nutrition properties for needs system (optional)
             "satiation_value": getattr(self, 'satiation_value', None),
             "hydration_value": getattr(self, 'hydration_value', None),
@@ -197,6 +204,14 @@ class Object:
             obj.hydration_value = int(hv) if isinstance(hv, (int, str)) and str(hv).lstrip('-').isdigit() else None  # type: ignore[attr-defined]
         except Exception:
             pass
+        # Optional ownership field with back-compat (also accept 'ownership')
+        try:
+            owner = data.get("owner_id")
+            if owner is None and "ownership" in data:
+                owner = data.get("ownership")
+            obj.owner_id = str(owner) if owner is not None and str(owner) else None  # type: ignore[attr-defined]
+        except Exception:
+            pass
         # Load container fields
         try:
             small_raw = data.get("container_small_slots")
@@ -298,6 +313,13 @@ class CharacterSheet:
     # Needs system (0-100 scale; higher is better). Defaults represent a well-fed, hydrated NPC.
     hunger: float = 100.0
     thirst: float = 100.0
+    # New social need: drips down over time; refilled by conversation (player or NPC)
+    socialization: float = 100.0
+    # New: Sleep/rest meter (0-100; higher is better). Drops over time; restored by sleeping in a bed you own.
+    sleep: float = 100.0
+    # When sleeping, ticks remaining and the bed object uuid (to validate the spot each tick)
+    sleeping_ticks_remaining: int = 0
+    sleeping_bed_uuid: str | None = None
     # Action economy: how many actions an NPC can take per tick. Players ignore this.
     action_points: int = 0
     # Queue of planned actions produced by AI or offline planner. Each entry is a dict: {"tool": str, "args": dict}
@@ -311,6 +333,10 @@ class CharacterSheet:
             # Persist needs/planning fields for NPCs and future player use
             "hunger": self.hunger,
             "thirst": self.thirst,
+            "socialization": self.socialization,
+            "sleep": self.sleep,
+            "sleeping_ticks_remaining": int(self.sleeping_ticks_remaining or 0),
+            "sleeping_bed_uuid": self.sleeping_bed_uuid,
             "action_points": self.action_points,
             "plan_queue": list(self.plan_queue or []),
         }
@@ -320,6 +346,10 @@ class CharacterSheet:
         # Backfill defaults for worlds saved before needs existed
         hunger = data.get("hunger")
         thirst = data.get("thirst")
+        social = data.get("socialization")
+        sleep = data.get("sleep")
+        sleep_ticks = data.get("sleeping_ticks_remaining")
+        sleep_bed = data.get("sleeping_bed_uuid")
         ap = data.get("action_points")
         pq = data.get("plan_queue")
         return CharacterSheet(
@@ -328,6 +358,10 @@ class CharacterSheet:
             inventory=Inventory.from_dict(data.get("inventory", {})),
             hunger=float(hunger) if isinstance(hunger, (int, float, str)) and str(hunger).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
             thirst=float(thirst) if isinstance(thirst, (int, float, str)) and str(thirst).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
+            socialization=float(social) if isinstance(social, (int, float, str)) and str(social).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
+            sleep=float(sleep) if isinstance(sleep, (int, float, str)) and str(sleep).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
+            sleeping_ticks_remaining=int(sleep_ticks) if isinstance(sleep_ticks, (int, str)) and str(sleep_ticks).lstrip('-').isdigit() else 0,
+            sleeping_bed_uuid=str(sleep_bed) if isinstance(sleep_bed, str) and sleep_bed else None,
             action_points=int(ap) if isinstance(ap, (int, str)) and str(ap).lstrip('-').isdigit() else 0,
             plan_queue=list(pq) if isinstance(pq, list) else [],
         )
@@ -355,6 +389,8 @@ class User:
     description: str = "A nondescript adventurer."
     sheet: CharacterSheet = field(default_factory=lambda: CharacterSheet(display_name="Unnamed"))
     is_admin: bool = False
+    # Player respawn point: if set, login places the player in the room containing this bed object uuid
+    home_bed_uuid: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -364,6 +400,7 @@ class User:
             "description": self.description,
             "sheet": self.sheet.to_dict(),
             "is_admin": self.is_admin,
+            "home_bed_uuid": self.home_bed_uuid,
         }
 
     @staticmethod
@@ -375,6 +412,7 @@ class User:
             description=data.get("description", "A nondescript adventurer."),
             sheet=CharacterSheet.from_dict(data.get("sheet", {"display_name": data.get("display_name", "Unnamed")})),
             is_admin=bool(data.get("is_admin", False)),
+            home_bed_uuid=str(data.get("home_bed_uuid")) if isinstance(data.get("home_bed_uuid"), str) and data.get("home_bed_uuid") else None,
         )
 
 

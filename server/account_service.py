@@ -89,7 +89,29 @@ def login_existing(
     if not user or user.password != password:
         return False, 'Invalid name or password.', emits, broadcasts
 
-    player = world.add_player(sid, sheet=user.sheet)
+    # Determine spawn room: prefer user's home bed if it exists; else start_room
+    spawn_room_id = None
+    info_msgs: List[str] = []
+    try:
+        bed_uuid = getattr(user, 'home_bed_uuid', None)
+        if bed_uuid:
+            # Find the room containing that bed object
+            for rid, room in (world.rooms or {}).items():
+                if bed_uuid in (room.objects or {}):
+                    spawn_room_id = rid
+                    break
+            if not spawn_room_id:
+                # Bed no longer exists
+                info_msgs.append("Your bed was destroyed while you were gone. You wake up in the start room.")
+                # Clear the home bed and persist best-effort
+                try:
+                    user.home_bed_uuid = None
+                    save_world(world, getattr(world, 'STATE_PATH', None) or '')
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    player = world.add_player(sid, sheet=user.sheet, room_id=spawn_room_id)
     sessions[sid] = user.user_id
     # In Creative Mode, ensure the user is an admin (persist change best-effort)
     if getattr(world, 'debug_creative_mode', False) and not getattr(user, 'is_admin', False):
@@ -109,6 +131,8 @@ def login_existing(
         admins.add(sid)
 
     emits.append({'type': 'system', 'content': f'Welcome back, {user.display_name}.'})
+    for m in info_msgs:
+        emits.append({'type': 'system', 'content': m})
     # Greet with world context if configured
     try:
         if getattr(world, 'setup_complete', False):

@@ -30,6 +30,9 @@ _TAG_TO_ACTIONS: dict[str, list[str]] = {
     "small": ["Pick Up"],
     "large": ["Pick Up"],
     "weapon": ["Wield"],
+    # Resting
+    # The 'bed' tag enables a direct Sleep interaction for players (with ownership check)
+    "bed": ["Sleep"],
     # Common affordances (optional future use)
     "Edible": ["Eat"],
     "Drinkable": ["Drink"],
@@ -259,6 +262,13 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 it = inv.slots[i]
                 if it and getattr(it, 'uuid', None) == obj_uuid:
                     obj = it; obj_loc = 'large'; stow_large_index = i; break
+
+    # Helper: simple clamp to keep needs within 0..100
+    def _clamp_need(v: float | int | None) -> float:
+        try:
+            return max(0.0, min(100.0, float(v or 0.0)))
+        except Exception:
+            return 0.0
 
     if chosen.lower() == 'move through':
         # Delegate to movement service using the object's display name
@@ -533,6 +543,61 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         if source == 'hand':
             sessions.pop(sid, None)
             return True, [{'type': 'system', 'content': f'You are already holding the {name}.'}], []
+
+    # Sleep interaction on a bed (must be owned by the player)
+    if chosen.lower() == 'sleep':
+        if not player:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': 'Please authenticate first.'}], []
+        room = world.rooms.get(player.room_id) if player else None
+        if not room:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+        if not obj and obj_uuid:
+            sessions.pop(sid, None)
+            return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+        # Verify the target is a bed by tag (case-insensitive)
+        try:
+            tags_now = {str(t).strip().lower() for t in (getattr(obj, 'object_tags', []) or [])}
+        except Exception:
+            tags_now = set()
+        if 'bed' not in tags_now:
+            sessions.pop(sid, None)
+            return True, [{'type': 'system', 'content': f"You can't sleep on that."}], []
+        # Resolve acting user id by matching the player's sheet to a user record
+        actor_uid = None
+        try:
+            for uid, user in (getattr(world, 'users', {}) or {}).items():
+                if getattr(user, 'sheet', None) is player.sheet:
+                    actor_uid = uid
+                    break
+        except Exception:
+            actor_uid = None
+        if not actor_uid:
+            sessions.pop(sid, None)
+            return True, [{'type': 'error', 'content': 'Session error.'}], []
+        # Ownership check: player must own the bed
+        owner = getattr(obj, 'owner_id', None)
+        if owner != actor_uid:
+            sessions.pop(sid, None)
+            return True, [{'type': 'system', 'content': 'You can only sleep in a bed you own.'}], []
+        # Restore a chunk of sleep and set home bed
+        try:
+            cur = getattr(player.sheet, 'sleep', 100.0) or 0.0
+            # Use the same default refill amount as server's constant (10.0) to avoid importing server.py
+            player.sheet.sleep = _clamp_need(cur + 10.0)
+        except Exception:
+            pass
+        try:
+            user = (getattr(world, 'users', {}) or {}).get(actor_uid)
+            if user is not None:
+                user.home_bed_uuid = getattr(obj, 'uuid', None)
+        except Exception:
+            pass
+        # Build emits/broadcasts; server will persist after handling
+        broadcasts.append((player.room_id, {'type': 'system', 'content': f"[i]{player.sheet.display_name} takes a quick rest on their bed.[/i]"}))
+        sessions.pop(sid, None)
+        return True, [{'type': 'system', 'content': 'Your data was saved. You feel well rested.'}], broadcasts
 
     if chosen.lower() == 'eat' or chosen.lower().startswith('eat (') or chosen.lower() == 'drink' or chosen.lower().startswith('drink ('):
         if not player or not room:

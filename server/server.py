@@ -233,6 +233,8 @@ def _print_command_help() -> None:
         ("gesture <verb>", "perform an emote (e.g., 'gesture wave' -> you wave)"),
         ("gesture <verb> to <target>", "targeted emote (e.g., 'gesture bow to Innkeeper')"),
         ("interact with <Object>", "list possible interactions for an object and choose one"),
+        ("/claim <Object>", "claim an Object as yours"),
+        ("/unclaim <Object>", "remove your ownership from an Object"),
         ("/rename <new name>", "change your display name"),
         ("/describe <text>", "update your character description"),
         ("/sheet", "show your character sheet"),
@@ -373,6 +375,8 @@ def _build_help_text(sid: str | None) -> str:
         ("interact with <Object>", "list possible interactions for an object and pick one"),
         ("gesture <verb>", "perform an emote (e.g., gesture wave -> You wave)"),
         ("gesture <verb> to <Player or NPC>", "targeted emote (e.g., gesture bow to Innkeeper)"),
+        ("/claim <Object>", "claim an object as yours"),
+        ("/unclaim <Object>", "remove your ownership from an object"),
         ("/rename <new name>", "change your display name"),
         ("/describe <text>", "update your character description"),
         ("/sheet", "show your character sheet"),
@@ -628,7 +632,7 @@ class _SimpleRateLimiter:
         return False
 
 
-# --- NPC Needs & Heartbeat (Hunger/Thirst with AP) ---
+# --- NPC Needs & Heartbeat (Hunger/Thirst/Sleep with AP) ---
 # Design notes:
 # - We keep the heartbeat opt-in via env MUD_TICK_ENABLE=1 to avoid affecting tests.
 # - Every TICK_SECONDS we slightly reduce NPC hunger/thirst, regen 1 AP (to AP_MAX),
@@ -657,6 +661,13 @@ TICK_SECONDS = _env_int('MUD_TICK_SECONDS', 60)       # default 60-second world 
 AP_MAX = _env_int('MUD_AP_MAX', 3)                    # cap AP regen to keep NPC pace modest
 NEED_DROP_PER_TICK = _env_float('MUD_NEED_DROP', 1.0) # per tick reduction (small drip)
 NEED_THRESHOLD = _env_float('MUD_NEED_THRESHOLD', 25.0)     # when below and no plan -> think
+SOCIAL_DROP_PER_TICK = _env_float('MUD_SOCIAL_DROP', 0.5)   # small drip for social need
+SOCIAL_REFILL_ON_CHAT = _env_float('MUD_SOCIAL_REFILL', 10.0)  # per conversational exchange
+SOCIAL_SIM_REFILL_TICK = _env_float('MUD_SOCIAL_SIM_TICK', 5.0) # when alone in room, simulate
+SOCIAL_REFILL_EMOTE = _env_float('MUD_SOCIAL_REFILL_EMOTE', 15.0) # emote action refill amount
+SLEEP_DROP_PER_TICK = _env_float('MUD_SLEEP_DROP', 0.75)     # fatigue accumulates slowly
+SLEEP_REFILL_PER_TICK = _env_float('MUD_SLEEP_REFILL', 10.0) # restore while sleeping
+SLEEP_TICKS_DEFAULT = _env_int('MUD_SLEEP_TICKS', 3)         # default sleep duration (ticks)
 
 
 def _clamp_need(v: float) -> float:
@@ -848,6 +859,24 @@ def _npc_exec_do_nothing(npc_name: str, room_id: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _npc_exec_emote(npc_name: str, room_id: str, message: str | None = None) -> tuple[bool, str]:
+    """Perform a lightweight emote to the room and refill a bit of socialization.
+
+    This avoids AI calls and is safe to run even when players are present.
+    """
+    try:
+        text = message.strip() if isinstance(message, str) else ""
+    except Exception:
+        text = ""
+    content = f"[i]{npc_name} {text}[/i]" if text else f"[i]{npc_name} looks around, humming softly.[/i]"
+    broadcast_to_room(room_id, {'type': 'system', 'content': content})
+    try:
+        _npc_gain_socialization(npc_name, SOCIAL_REFILL_EMOTE)
+    except Exception:
+        pass
+    return True, "ok"
+
+
 def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
     tool = (action or {}).get('tool')
     args = (action or {}).get('args') or {}
@@ -857,8 +886,100 @@ def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
             ok, _ = _npc_exec_get_object(npc_name, room_id, str(args.get('object_name') or ''))
         elif tool == 'consume_object':
             ok, _ = _npc_exec_consume_object(npc_name, room_id, str(args.get('object_uuid') or ''))
+        elif tool == 'emote':
+            ok, _ = _npc_exec_emote(npc_name, room_id, str(args.get('message') or ''))
+        elif tool == 'claim':
+            # args: object_uuid
+            try:
+                obj_uuid = str(args.get('object_uuid') or '')
+                sheet = _ensure_npc_sheet(npc_name)
+                # Find in room or inventory
+                room = world.rooms.get(room_id)
+                target = None
+                if room and obj_uuid and obj_uuid in (room.objects or {}):
+                    target = room.objects.get(obj_uuid)
+                if target is None:
+                    for it in sheet.inventory.slots:
+                        if it and getattr(it, 'uuid', None) == obj_uuid:
+                            target = it; break
+                if target is not None:
+                    try:
+                        target.owner_id = world.get_or_create_npc_id(npc_name)  # type: ignore[attr-defined]
+                        ok = True
+                    except Exception:
+                        ok = False
+                else:
+                    ok = False
+            except Exception:
+                ok = False
+        elif tool == 'unclaim':
+            try:
+                obj_uuid = str(args.get('object_uuid') or '')
+                room = world.rooms.get(room_id)
+                sheet = _ensure_npc_sheet(npc_name)
+                target = None
+                if room and obj_uuid and obj_uuid in (room.objects or {}):
+                    target = room.objects.get(obj_uuid)
+                if target is None:
+                    for it in sheet.inventory.slots:
+                        if it and getattr(it, 'uuid', None) == obj_uuid:
+                            target = it; break
+                if target is not None:
+                    try:
+                        target.owner_id = None  # type: ignore[attr-defined]
+                        ok = True
+                    except Exception:
+                        ok = False
+                else:
+                    ok = False
+            except Exception:
+                ok = False
         elif tool == 'do_nothing':
             ok, _ = _npc_exec_do_nothing(npc_name, room_id)
+        elif tool == 'sleep':
+            # Args: bed_uuid (optional; if absent, try to pick an owned bed in room)
+            sheet = _ensure_npc_sheet(npc_name)
+            room = world.rooms.get(room_id)
+            bed_uuid = str(args.get('bed_uuid') or '').strip()
+            # Helper to find a suitable owned bed in room
+            def _find_owned_bed() -> tuple[str | None, object | None]:
+                if not room:
+                    return None, None
+                npc_id = world.get_or_create_npc_id(npc_name)
+                for ouid, obj in (room.objects or {}).items():
+                    try:
+                        tags = set(getattr(obj, 'object_tags', []) or [])
+                    except Exception:
+                        tags = set()
+                    if any(str(t).strip().lower() == 'bed' for t in tags):
+                        owner = getattr(obj, 'owner_id', None)
+                        if owner == npc_id:
+                            return getattr(obj, 'uuid', ouid), obj
+                return None, None
+            # Resolve target bed
+            target_obj = None
+            if bed_uuid:
+                if room and bed_uuid in (room.objects or {}):
+                    target_obj = room.objects.get(bed_uuid)
+                # if it's in inventory, sleeping on carried bed is disallowed; force room obj
+            else:
+                bed_uuid, target_obj = _find_owned_bed()
+            # Validate ownership and tag
+            if target_obj is None:
+                ok = False
+            else:
+                tags = set(getattr(target_obj, 'object_tags', []) or [])
+                is_bed = any(str(t).strip().lower() == 'bed' for t in tags)
+                owner = getattr(target_obj, 'owner_id', None)
+                npc_id = world.get_or_create_npc_id(npc_name)
+                if is_bed and owner == npc_id:
+                    # Enter sleeping state
+                    sheet.sleeping_ticks_remaining = int(SLEEP_TICKS_DEFAULT)
+                    sheet.sleeping_bed_uuid = getattr(target_obj, 'uuid', bed_uuid)
+                    broadcast_to_room(room_id, {'type': 'system', 'content': f"[i]{npc_name} lies down on their bed to rest.[/i]"})
+                    ok = True
+                else:
+                    ok = False
     except Exception as e:
         print(f"NPC action error for {npc_name}: {e}")
         ok = False
@@ -871,7 +992,7 @@ def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
 
 
 def _npc_offline_plan(npc_name: str, room: Room, sheet: CharacterSheet) -> list[dict]:
-    """Simple GOAP: prefer edible when hungry, drinkable when thirsty.
+    """Simple GOAP: prefer edible when hungry, drinkable when thirsty, and emote when lonely.
     Returns a list of actions: [{tool, args}...]
     """
     plan: list[dict] = []
@@ -903,6 +1024,40 @@ def _npc_offline_plan(npc_name: str, room: Room, sheet: CharacterSheet) -> list[
             if water:
                 plan.append({'tool': 'get_object', 'args': {'object_name': getattr(water, 'display_name', '')}})
                 plan.append({'tool': 'consume_object', 'args': {'object_uuid': getattr(water, 'uuid', '')}})
+    # If socialization is low, insert an emote to self-soothe a bit. Keep it cheap.
+    try:
+        if getattr(sheet, 'socialization', 100.0) < NEED_THRESHOLD:
+            plan.append({'tool': 'emote', 'args': {'message': 'hums a tune to themself.'}})
+    except Exception:
+        pass
+    # If sleep is low, try to find an owned bed in the room and sleep
+    try:
+        sleep_val = getattr(sheet, 'sleep', 100.0)
+    except Exception:
+        sleep_val = 100.0
+    if sleep_val < NEED_THRESHOLD:
+        # find bed in room (prefer already owned)
+        try:
+            npc_id = world.get_or_create_npc_id(npc_name)
+            owned_bed = None
+            unowned_bed = None
+            for o in (room.objects or {}).values():
+                tags = set(getattr(o, 'object_tags', []) or [])
+                if any(str(t).strip().lower() == 'bed' for t in tags):
+                    owner = getattr(o, 'owner_id', None)
+                    if owner == npc_id and owned_bed is None:
+                        owned_bed = o
+                    if (owner is None) and unowned_bed is None:
+                        unowned_bed = o
+            if owned_bed is not None:
+                plan.append({'tool': 'sleep', 'args': {'bed_uuid': getattr(owned_bed, 'uuid', '')}})
+            elif unowned_bed is not None:
+                # Claim first, then sleep
+                bu = getattr(unowned_bed, 'uuid', '')
+                plan.append({'tool': 'claim', 'args': {'object_uuid': bu}})
+                plan.append({'tool': 'sleep', 'args': {'bed_uuid': bu}})
+        except Exception:
+            pass
     if not plan:
         plan.append({'tool': 'do_nothing', 'args': {}})
     return plan
@@ -971,19 +1126,23 @@ def npc_think(npc_name: str) -> None:
                     'tags': tags_aug,
                 })
         system_prompt = (
-            "You are an autonomous NPC in a text MUD. You have needs (hunger/thirst, 0-100; higher is better).\n"
+            "You are an autonomous NPC in a text MUD. You have needs (hunger/thirst/socialization/sleep, 0-100; higher is better).\n"
             "Plan a short sequence of 1-4 actions to satisfy your low needs using only the tools below.\n"
             "Always return ONLY JSON: an array of {\"tool\": str, \"args\": object}. No prose.\n"
             "Tools:\n"
             "- get_object(object_name: str): pick up an object in the current room by name.\n"
             "- consume_object(object_uuid: str): consume an item in your inventory.\n"
+            "- emote(message?: str): perform a small emote to yourself/the room to recharge social needs.\n"
+            "- claim(object_uuid: str): claim an object as yours (required before sleeping in a bed).\n"
+            "- unclaim(object_uuid: str): remove your ownership from an object.\n"
+            "- sleep(bed_uuid?: str): sleep in a bed you own to restore sleep.\n"
             "- do_nothing(): if nothing relevant is needed.\n"
         )
         user_prompt = {
-            'npc': {'name': npc_name, 'hunger': sheet.hunger, 'thirst': sheet.thirst},
+            'npc': {'name': npc_name, 'hunger': sheet.hunger, 'thirst': sheet.thirst, 'socialization': getattr(sheet, 'socialization', 100.0), 'sleep': getattr(sheet, 'sleep', 100.0)},
             'room_objects': items_room,
             'inventory': items_inv,
-            'instructions': 'Return JSON only. Prefer edible/drinkable items with positive satiation/hydration.'
+            'instructions': 'Return JSON only. Prefer edible/drinkable for hunger/thirst; emote if socialization is low; sleep in an owned bed to restore sleep.'
         }
         import json as _json
         prompt = system_prompt + "\n" + _json.dumps(user_prompt, ensure_ascii=False)
@@ -1037,17 +1196,45 @@ def _world_tick() -> None:
                         sheet = _ensure_npc_sheet(npc_name)
                     except Exception:
                         continue
-                    # Degrade needs slightly
+                    # Degrade needs slightly (including socialization and sleep)
                     pre_h, pre_t = sheet.hunger, sheet.thirst
+                    pre_s = getattr(sheet, 'socialization', 100.0)
+                    pre_sl = getattr(sheet, 'sleep', 100.0)
                     sheet.hunger = _clamp_need(sheet.hunger - NEED_DROP_PER_TICK)
                     sheet.thirst = _clamp_need(sheet.thirst - NEED_DROP_PER_TICK)
+                    try:
+                        sheet.socialization = _clamp_need((getattr(sheet, 'socialization', 100.0) or 0.0) - SOCIAL_DROP_PER_TICK)
+                    except Exception:
+                        # Backfill on older worlds missing the field
+                        sheet.socialization = _clamp_need(100.0 - SOCIAL_DROP_PER_TICK)
+                    try:
+                        # If actively sleeping, restore sleep and count down duration
+                        if getattr(sheet, 'sleeping_ticks_remaining', 0) > 0:
+                            sheet.sleep = _clamp_need((getattr(sheet, 'sleep', 100.0) or 0.0) + SLEEP_REFILL_PER_TICK)
+                            sheet.sleeping_ticks_remaining = max(0, int(sheet.sleeping_ticks_remaining) - 1)
+                            # Wake up when done
+                            if sheet.sleeping_ticks_remaining == 0:
+                                sheet.sleeping_bed_uuid = None
+                                try:
+                                    broadcast_to_room(rid, {'type': 'system', 'content': f"[i]{npc_name} wakes up, looking refreshed.[/i]"})
+                                except Exception:
+                                    pass
+                        else:
+                            # Not sleeping -> fatigue slowly increases (sleep meter drops)
+                            sheet.sleep = _clamp_need((getattr(sheet, 'sleep', 100.0) or 0.0) - SLEEP_DROP_PER_TICK)
+                    except Exception:
+                        # Backfill for worlds without field
+                        try:
+                            sheet.sleep = _clamp_need(100.0 - SLEEP_DROP_PER_TICK)
+                        except Exception:
+                            pass
                     # Regen AP
                     try:
                         sheet.action_points = int(min(AP_MAX, max(0, (sheet.action_points or 0) + 1)))
                     except Exception:
                         sheet.action_points = 1
-                    # If low and no plan, think
-                    if (sheet.hunger < NEED_THRESHOLD or sheet.thirst < NEED_THRESHOLD) and not sheet.plan_queue:
+                    # If any need is low and no plan, think
+                    if ((sheet.hunger < NEED_THRESHOLD) or (sheet.thirst < NEED_THRESHOLD) or (getattr(sheet, 'socialization', 100.0) < NEED_THRESHOLD) or (getattr(sheet, 'sleep', 100.0) < NEED_THRESHOLD)) and not sheet.plan_queue:
                         try:
                             npc_think(npc_name)
                         except Exception as _e:
@@ -1063,8 +1250,14 @@ def _world_tick() -> None:
                         # Spend 1 AP
                         sheet.action_points = max(0, (sheet.action_points or 0) - 1)
                         mutated = True
+                    # If room has no connected players, simulate socialization refill (offline chatter)
+                    try:
+                        if (not getattr(room, 'players', None)) or len(room.players) == 0:
+                            _npc_gain_socialization(npc_name, SOCIAL_SIM_REFILL_TICK)
+                    except Exception:
+                        pass
                     # If no actions executed but needs changed, mark mutated for persistence
-                    if sheet.hunger != pre_h or sheet.thirst != pre_t:
+                    if sheet.hunger != pre_h or sheet.thirst != pre_t or getattr(sheet, 'socialization', 0.0) != pre_s or getattr(sheet, 'sleep', 0.0) != pre_sl:
                         mutated = True
             if mutated:
                 # Debounced persistence after a tick of world changes
@@ -1276,6 +1469,20 @@ def _ensure_npc_sheet(npc_name: str) -> CharacterSheet:
     return npc_sheet
 
 
+def _npc_gain_socialization(npc_name: str, amount: float) -> None:
+    """Increase an NPC's socialization meter, clamped to [0,100].
+
+    Used when they converse (say/tell/whisper) or when simulated in empty rooms.
+    """
+    try:
+        sheet = _ensure_npc_sheet(npc_name)
+        cur = getattr(sheet, 'socialization', 100.0) or 0.0
+        sheet.socialization = _clamp_need(cur + float(amount))
+    except Exception:
+        # Best-effort; ignore if sheet missing or field absent
+        pass
+
+
 def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, private_to_sender_only: bool = False) -> None:
     """Generate and send an NPC reply.
 
@@ -1283,8 +1490,12 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, priv
     If private_to_sender_only=True, only the sender receives the reply (no room broadcast).
     Works offline with a fallback when AI is not configured.
     """
-    # Ensure sheet exists
+    # Ensure sheet exists, and count this as social contact
     npc_sheet = _ensure_npc_sheet(npc_name)
+    try:
+        _npc_gain_socialization(npc_name, SOCIAL_REFILL_ON_CHAT)
+    except Exception:
+        pass
 
     # Gather player context
     player = world.players.get(sid) if sid else None
@@ -2071,7 +2282,22 @@ def handle_message(data):
                     except Exception:
                         pass
                     rel_text = ("\n" + "\n".join(rel_lines)) if rel_lines else ""
-                    emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}"})
+                    # Admin-only needs overlay for debugging NPC behavior
+                    needs_text = ""
+                    try:
+                        if sid in admins:
+                            # Clamp/format defensively in case of legacy sheets
+                            h = int(max(0, min(100, int(getattr(sheet, 'hunger', 100) or 0))))
+                            t = int(max(0, min(100, int(getattr(sheet, 'thirst', 100) or 0))))
+                            s = int(max(0, min(100, int(getattr(sheet, 'socialization', 100) or 0))))
+                            sl = int(max(0, min(100, int(getattr(sheet, 'sleep', 100) or 0))))
+                            ap = int(getattr(sheet, 'action_points', 0) or 0)
+                            qlen = len(getattr(sheet, 'plan_queue', []) or [])
+                            sleep_state = " (sleeping)" if int(getattr(sheet, 'sleeping_ticks_remaining', 0) or 0) > 0 else ""
+                            needs_text = f"\n[i][color=#888]Needs — Hunger {h}, Thirst {t}, Social {s}, Sleep {sl}{sleep_state} | AP {ap}, Plan {qlen}[/color][/i]"
+                    except Exception:
+                        pass
+                    emit(MESSAGE_OUT, {'type': 'system', 'content': f"[b]{sheet.display_name}[/b]\n{sheet.description}{rel_text}{needs_text}"})
                     return
                 # Try Objects in room
                 obj, suggestions = _resolve_object_in_room(room, name_raw)
@@ -2463,6 +2689,67 @@ def handle_command(sid: str | None, text: str) -> None:
 
     cmd = parts[0].lower()
     args = parts[1:]
+    # Player ownership commands: /claim <object name>, /unclaim <object name>
+    if cmd in ('claim', 'unclaim'):
+        if sid is None:
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Not connected.'}); return
+        if sid not in world.players:
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Please authenticate first with /auth.'}); return
+        if not args:
+            emit(MESSAGE_OUT, {'type': 'error', 'content': f"Usage: /{cmd} <object name>"}); return
+        name_raw = _strip_quotes(" ".join(args).strip())
+        player = world.players.get(sid)
+        room = world.rooms.get(player.room_id) if player else None
+        if not room or not player:
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'You are nowhere.'}); return
+        # Resolve object in room by fuzzy, else search player's inventory by name
+        obj, suggestions = _resolve_object_in_room(room, name_raw)
+        if obj is None:
+            # Search inventory names (case-insensitive exact/prefix/substr)
+            inv = player.sheet.inventory
+            target = None
+            tl = name_raw.lower()
+            # exact
+            for it in inv.slots:
+                if it and getattr(it, 'display_name', '').lower() == tl:
+                    target = it; break
+            if target is None:
+                # prefix
+                cands = [it for it in inv.slots if it and getattr(it, 'display_name', '').lower().startswith(tl)]
+                if len(cands) == 1:
+                    target = cands[0]
+            if target is None:
+                # substring unique
+                cands = [it for it in inv.slots if it and tl in getattr(it, 'display_name', '').lower()]
+                if len(cands) == 1:
+                    target = cands[0]
+            if target is not None:
+                obj = target
+        if obj is None:
+            if suggestions:
+                emit(MESSAGE_OUT, {'type': 'system', 'content': "Did you mean: " + ", ".join(suggestions) + "?"}); return
+            emit(MESSAGE_OUT, {'type': 'system', 'content': f"You don't see '{name_raw}' here or in your inventory."}); return
+        # Apply ownership change
+        try:
+            if cmd == 'claim':
+                # player entity id is their user_id from sessions
+                owner = sessions.get(sid)
+                if not owner:
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': 'Ownership failed: session not found.'}); return
+                obj.owner_id = owner  # type: ignore[attr-defined]
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You claim the {getattr(obj, 'display_name', 'item')} as yours."})
+            else:
+                obj.owner_id = None  # type: ignore[attr-defined]
+                emit(MESSAGE_OUT, {'type': 'system', 'content': f"You unclaim the {getattr(obj, 'display_name', 'item')}."})
+            try:
+                world.save_to_file(STATE_PATH)
+            except Exception:
+                pass
+        except Exception:
+            emit(MESSAGE_OUT, {'type': 'error', 'content': 'Failed to change ownership.'})
+        return
+
+    # (removed) Player sleep command: /sleep [bed name]
 
     # Player convenience: /look and /look at <name>
     if cmd == 'look':
