@@ -11,6 +11,7 @@
 - **Cutting Edge Technology**: Leveraging Godot 4, TinyMUD aims to provide the most state-of-the-art and feature-rich multiplayer text adventure platform possible.
 - **Admin Tools** Create nearly anything in-game with Admin tools, become the ultimate Dungeon Master.
 - **Google Gemini Support** AI NPCs reply in-character with provided Google Gemini API key ([They're free!](https://aistudio.google.com/)) with an offline fallback.
+- **Gemini‑assisted GOAP NPCs** NPCs plan short action sequences to satisfy needs (hunger, thirst, socialization, sleep). Uses Gemini when players are present; otherwise a deterministic offline planner. See docs/goap-ai.md.
 
 ## What’s inside
 
@@ -25,6 +26,8 @@
   - `server/world.py` — very small world model: Rooms, Players, NPC lists
 
 See also: docs/architecture.md for a gentle code tour and data flow diagrams.
+
+AI planning details: docs/goap-ai.md
 
 Great first contributions: add new locations (rooms), add NPC names, or tweak the AI persona. Make the world your own!
 

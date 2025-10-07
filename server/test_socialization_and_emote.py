@@ -38,6 +38,7 @@ def test_emote_exec_refills_socialization(monkeypatch):
     sheet = CharacterSheet(display_name=npc_name, description="NPC")
     setattr(sheet, 'socialization', 10.0)
     srv.world.npc_sheets[npc_name] = sheet
+    srv.world.npc_ids[npc_name] = str(__import__('uuid').uuid4())  # Ensure NPC has ID mapping
 
     # Capture broadcasts
     captured: list[dict] = []
@@ -59,4 +60,8 @@ def test_emote_exec_refills_socialization(monkeypatch):
     assert ok is True
     assert after > before, f"Socialization should increase after emote (before={before}, after={after})"
     # Optional: ensure we didn't exceed 100
+    
+    # Validate world integrity after emote mutations
+    validation_errors = srv.world.validate()
+    assert validation_errors == [], f"World validation failed after emote: {validation_errors}"
     assert after <= 100.0

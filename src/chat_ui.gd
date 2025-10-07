@@ -260,7 +260,7 @@ func _parse_server_config(line: String) -> void:
 				var n := int(val)
 				if n > 0:
 					MAX_MESSAGE_LEN = n
-        
+		
 
 
 # Heuristic to decide if a system message is ASCII art. We avoid relying on server

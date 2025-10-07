@@ -18,6 +18,7 @@ import json
 import os
 import uuid
 from typing import Dict, Set, Optional, List
+from safe_utils import safe_call, safe_call_with_default
 
 
 @dataclass
@@ -156,16 +157,16 @@ class Object:
         # Parse value: accept int or numeric string; otherwise None
         raw_value = data.get("value")
         ival: Optional[int] = None
-        try:
+        def _parse_value():
             if isinstance(raw_value, int):
-                ival = raw_value
+                return raw_value
             elif isinstance(raw_value, str):
                 # strip common formatting
                 s = raw_value.strip()
                 if s.isdigit() or (s.startswith('-') and s[1:].isdigit()):
-                    ival = int(s)
-        except Exception:
-            ival = None
+                    return int(s)
+            return None
+        ival = safe_call(_parse_value)
 
         # Loot location hint can be an embedded object or a string
         llh_raw = data.get("loot_location_hint")
@@ -197,23 +198,21 @@ class Object:
             uuid=str(data.get("uuid") or uuid.uuid4()),
         )
         # Optional nutrition fields with back-compat
-        try:
+        def _set_nutrition_values():
             sv = data.get("satiation_value")
             hv = data.get("hydration_value")
             obj.satiation_value = int(sv) if isinstance(sv, (int, str)) and str(sv).lstrip('-').isdigit() else None  # type: ignore[attr-defined]
             obj.hydration_value = int(hv) if isinstance(hv, (int, str)) and str(hv).lstrip('-').isdigit() else None  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        safe_call(_set_nutrition_values)
         # Optional ownership field with back-compat (also accept 'ownership')
-        try:
+        def _set_ownership():
             owner = data.get("owner_id")
             if owner is None and "ownership" in data:
                 owner = data.get("ownership")
             obj.owner_id = str(owner) if owner is not None and str(owner) else None  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        safe_call(_set_ownership)
         # Load container fields
-        try:
+        def _load_container_fields():
             small_raw = data.get("container_small_slots")
             large_raw = data.get("container_large_slots")
             if isinstance(small_raw, list):
@@ -226,9 +225,7 @@ class Object:
                     obj.container_large_slots.extend([None] * (2 - len(obj.container_large_slots)))
             obj.container_opened = bool(data.get("container_opened", False))
             obj.container_searched = bool(data.get("container_searched", False))
-        except Exception:
-            # Leave defaults on error
-            pass
+        safe_call(_load_container_fields)
         return obj
 
 
@@ -310,6 +307,7 @@ class CharacterSheet:
     display_name: str
     description: str = "A nondescript adventurer."
     inventory: Inventory = field(default_factory=Inventory)
+    currency: int = 0
     # Needs system (0-100 scale; higher is better). Defaults represent a well-fed, hydrated NPC.
     hunger: float = 100.0
     thirst: float = 100.0
@@ -330,6 +328,7 @@ class CharacterSheet:
             "display_name": self.display_name,
             "description": self.description,
             "inventory": self.inventory.to_dict(),
+            "currency": int(self.currency or 0),
             # Persist needs/planning fields for NPCs and future player use
             "hunger": self.hunger,
             "thirst": self.thirst,
@@ -344,6 +343,7 @@ class CharacterSheet:
     @staticmethod
     def from_dict(data: dict) -> "CharacterSheet":
         # Backfill defaults for worlds saved before needs existed
+        currency = data.get("currency")
         hunger = data.get("hunger")
         thirst = data.get("thirst")
         social = data.get("socialization")
@@ -356,6 +356,7 @@ class CharacterSheet:
             display_name=data.get("display_name", "Unnamed"),
             description=data.get("description", "A nondescript adventurer."),
             inventory=Inventory.from_dict(data.get("inventory", {})),
+            currency=int(currency) if isinstance(currency, (int, str)) and str(currency).lstrip('-').isdigit() else 0,
             hunger=float(hunger) if isinstance(hunger, (int, float, str)) and str(hunger).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
             thirst=float(thirst) if isinstance(thirst, (int, float, str)) and str(thirst).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
             socialization=float(social) if isinstance(social, (int, float, str)) and str(social).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
@@ -668,6 +669,8 @@ class World:
         self.setup_complete: bool = False
         # Content safety level for AI replies: 'G' | 'PG-13' | 'R' | 'OFF'
         self.safety_level: str = 'G'
+        # Opt-in for advanced GOAP planning assisted by external models
+        self.advanced_goap_enabled: bool = False
         # Relationship graph (directed): entity_id -> { target_entity_id: relationship_type }
         # entity_id is user.user_id for players and world.get_or_create_npc_id(name) for NPCs
         self.relationships: Dict[str, Dict[str, str]] = {}
@@ -763,6 +766,7 @@ class World:
             "start_room_id": self.start_room_id,
             "setup_complete": self.setup_complete,
             "safety_level": self.safety_level,
+            "advanced_goap_enabled": self.advanced_goap_enabled,
             # Relationships
             "relationships": self.relationships,
             # Debug / Creative Mode flag
@@ -824,6 +828,8 @@ class World:
         if lvl not in ('G', 'PG-13', 'R', 'OFF'):
             lvl = 'G'
         w.safety_level = lvl
+        # Advanced GOAP flag (default False for back-compat)
+        w.advanced_goap_enabled = bool(data.get("advanced_goap_enabled", False))
         # Relationships graph
         rels = data.get("relationships", {})
         if isinstance(rels, dict):
@@ -892,3 +898,184 @@ class World:
         user = User(user_id=uid, display_name=display_name, password=password, description=description, sheet=sheet, is_admin=is_admin)
         self.users[uid] = user
         return user
+
+    def validate(self) -> List[str]:
+        """Validate world state and return a list of error messages.
+        
+        This method performs comprehensive validation of world integrity including:
+        - UUID uniqueness and format validation
+        - Referential integrity (room links, player locations, NPC references)
+        - Object consistency (travel points, inventory constraints)
+        - User/account consistency
+        
+        Returns:
+            List of error message strings. Empty list indicates no validation errors.
+        """
+        errors = []
+        
+        # Helper to validate UUID format
+        def _is_valid_uuid(uid: str) -> bool:
+            if not isinstance(uid, str):
+                return False
+            try:
+                uuid.UUID(uid)
+                return True
+            except ValueError:
+                return False
+        
+        # Track all UUIDs to check uniqueness
+        all_uuids = set()
+        
+        def _check_uuid_unique(uid: str, context: str) -> None:
+            if not _is_valid_uuid(uid):
+                errors.append(f"Invalid UUID format in {context}: {uid}")
+                return
+            if uid in all_uuids:
+                errors.append(f"Duplicate UUID in {context}: {uid}")
+            else:
+                all_uuids.add(uid)
+        
+        # 1. Validate room structure and collect room UUIDs
+        room_ids = set()
+        for room_id, room in self.rooms.items():
+            room_ids.add(room_id)
+            
+            # Check room UUID
+            if hasattr(room, 'uuid'):
+                _check_uuid_unique(room.uuid, f"room '{room_id}' uuid")
+            
+            # Validate door targets exist
+            for door_name, target_room_id in (room.doors or {}).items():
+                if target_room_id not in self.rooms:
+                    errors.append(f"Room '{room_id}' door '{door_name}' points to non-existent room: {target_room_id}")
+            
+            # Validate stairs targets exist
+            if room.stairs_up_to and room.stairs_up_to not in self.rooms:
+                errors.append(f"Room '{room_id}' stairs_up_to points to non-existent room: {room.stairs_up_to}")
+            if room.stairs_down_to and room.stairs_down_to not in self.rooms:
+                errors.append(f"Room '{room_id}' stairs_down_to points to non-existent room: {room.stairs_down_to}")
+            
+            # Validate door IDs
+            for door_name in (room.doors or {}).keys():
+                door_id = (room.door_ids or {}).get(door_name)
+                if door_id:
+                    _check_uuid_unique(door_id, f"room '{room_id}' door '{door_name}' id")
+            
+            # Validate stairs IDs
+            if hasattr(room, 'stairs_up_id') and room.stairs_up_id:
+                _check_uuid_unique(room.stairs_up_id, f"room '{room_id}' stairs_up_id")
+            if hasattr(room, 'stairs_down_id') and room.stairs_down_id:
+                _check_uuid_unique(room.stairs_down_id, f"room '{room_id}' stairs_down_id")
+            
+            # Validate room objects
+            for obj_uuid, obj in (room.objects or {}).items():
+                _check_uuid_unique(obj_uuid, f"room '{room_id}' object uuid")
+                if obj.uuid != obj_uuid:
+                    errors.append(f"Room '{room_id}' object key mismatch: key={obj_uuid}, obj.uuid={obj.uuid}")
+                
+                # Check travel point links
+                if hasattr(obj, 'object_tags') and isinstance(obj.object_tags, set):
+                    if 'Travel Point' in obj.object_tags:
+                        if hasattr(obj, 'link_target_room_id') and obj.link_target_room_id:
+                            if obj.link_target_room_id not in self.rooms:
+                                errors.append(f"Room '{room_id}' travel point '{obj.display_name}' links to non-existent room: {obj.link_target_room_id}")
+        
+        # 2. Validate player structure
+        for sid, player in self.players.items():
+            if hasattr(player, 'id'):
+                _check_uuid_unique(player.id, f"player '{sid}' id")
+            
+            # Check player room exists
+            if player.room_id not in room_ids and player.room_id != "__void__":
+                errors.append(f"Player '{sid}' in non-existent room: {player.room_id}")
+            
+            # Check player is registered in their room
+            if player.room_id in self.rooms:
+                room = self.rooms[player.room_id]
+                if sid not in room.players:
+                    errors.append(f"Player '{sid}' not registered in room '{player.room_id}' players set")
+            
+            # Validate player inventory
+            if hasattr(player, 'sheet') and hasattr(player.sheet, 'inventory'):
+                inv = player.sheet.inventory
+                for slot_idx, obj in enumerate(inv.slots or []):
+                    if obj is not None:
+                        _check_uuid_unique(obj.uuid, f"player '{sid}' inventory slot {slot_idx}")
+                        
+                        # Check inventory constraints
+                        if not inv.can_place(slot_idx, obj):
+                            errors.append(f"Player '{sid}' inventory slot {slot_idx} violates constraints for object '{obj.display_name}'")
+        
+        # 3. Validate NPC structure
+        npc_names = set()
+        for npc_name, sheet in self.npc_sheets.items():
+            npc_names.add(npc_name)
+            
+            # Validate NPC inventory
+            if hasattr(sheet, 'inventory'):
+                inv = sheet.inventory
+                for slot_idx, obj in enumerate(inv.slots or []):
+                    if obj is not None:
+                        _check_uuid_unique(obj.uuid, f"NPC '{npc_name}' inventory slot {slot_idx}")
+                        
+                        # Check inventory constraints
+                        if not inv.can_place(slot_idx, obj):
+                            errors.append(f"NPC '{npc_name}' inventory slot {slot_idx} violates constraints for object '{obj.display_name}'")
+        
+        # Check NPCs referenced in rooms have sheets
+        for room_id, room in self.rooms.items():
+            for npc_name in (room.npcs or set()):
+                if npc_name not in self.npc_sheets:
+                    errors.append(f"Room '{room_id}' references NPC '{npc_name}' but no sheet exists")
+        
+        # 4. Validate NPC ID mapping
+        for npc_name, npc_id in (self.npc_ids or {}).items():
+            _check_uuid_unique(npc_id, f"NPC '{npc_name}' id")
+        
+        # Check all NPCs have ID mappings
+        for npc_name in npc_names:
+            if npc_name not in (self.npc_ids or {}):
+                errors.append(f"NPC '{npc_name}' missing from npc_ids mapping")
+        
+        # 5. Validate user accounts
+        user_display_names = set()
+        for user_id, user in self.users.items():
+            _check_uuid_unique(user_id, f"user account user_id")
+            if user.user_id != user_id:
+                errors.append(f"User account key mismatch: key={user_id}, user.user_id={user.user_id}")
+            
+            # Check display name uniqueness
+            name_lower = user.display_name.lower()
+            if name_lower in user_display_names:
+                errors.append(f"Duplicate user display name: {user.display_name}")
+            else:
+                user_display_names.add(name_lower)
+            
+            # Validate user's character sheet inventory
+            if hasattr(user, 'sheet') and hasattr(user.sheet, 'inventory'):
+                inv = user.sheet.inventory
+                for slot_idx, obj in enumerate(inv.slots or []):
+                    if obj is not None:
+                        _check_uuid_unique(obj.uuid, f"user '{user.display_name}' inventory slot {slot_idx}")
+                        
+                        # Check inventory constraints
+                        if not inv.can_place(slot_idx, obj):
+                            errors.append(f"User '{user.display_name}' inventory slot {slot_idx} violates constraints for object '{obj.display_name}'")
+        
+        # 6. Validate object templates
+        for template_key, obj in (self.object_templates or {}).items():
+            _check_uuid_unique(obj.uuid, f"object template '{template_key}'")
+        
+        # 7. Validate world configuration
+        if self.start_room_id and self.start_room_id not in room_ids:
+            errors.append(f"World start_room_id points to non-existent room: {self.start_room_id}")
+        
+        # 8. Validate relationships graph
+        for entity_id, relationships in (self.relationships or {}).items():
+            if not _is_valid_uuid(entity_id):
+                errors.append(f"Invalid entity_id in relationships: {entity_id}")
+            for target_id, relationship_type in relationships.items():
+                if not _is_valid_uuid(target_id):
+                    errors.append(f"Invalid target entity_id in relationships[{entity_id}]: {target_id}")
+        
+        return errors

@@ -20,14 +20,24 @@ import pytest
 
 @pytest.fixture()
 def server_ctx(monkeypatch):
-    # Import the server module once per test context
-    import server as srv
+    # Always reload server & dialogue_router to avoid stale in-memory modules between rapid runs
+    import importlib
+    import server as _srv_import
+    srv = importlib.reload(_srv_import)
+    try:
+        import dialogue_router as _dr_import
+        importlib.reload(_dr_import)
+    except Exception:
+        pass
+    # Ensure we are on a sufficiently recent build (instrumentation build id >= 5)
+    assert getattr(srv, 'get_server_build_id', None) is not None, "Server missing build ID accessor"
+    assert srv.get_server_build_id() >= 7, f"Outdated server build id: {getattr(srv,'SERVER_BUILD_ID', '?')}"
 
     # Replace the world with a fresh instance (avoid persisted state or startup side-effects)
     from world import World, Room
-    srv.world = World()
+    srv.world = World()  # type: ignore[attr-defined]
     # No AI calls in tests; ensure offline fallback path
-    srv.model = None
+    srv.model = None  # type: ignore[attr-defined]
 
     # Minimal world: one room with two players and two NPCs
     room = Room(id="start", description="Start room")
@@ -76,6 +86,12 @@ def server_ctx(monkeypatch):
 
     # Expose helpers to switch the current caller sid and to drive the handler
     def send_as(sid: str, text: str):
+        # Reset transient dialogue flags between messages to simulate clean per-message context
+        try:
+            if hasattr(srv, '_reset_dialogue_flags'):
+                srv._reset_dialogue_flags()
+        except Exception:
+            pass
         current_sid["sid"] = sid
         srv.handle_message({"content": text})
 

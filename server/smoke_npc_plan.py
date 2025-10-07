@@ -43,12 +43,13 @@ class _FakeSocketIO:
         # No-op for this offline smoke
         pass
 
-srv.socketio = _FakeSocketIO()
+srv.socketio = _FakeSocketIO()  # type: ignore[attr-defined]
 
 # Reset world to a tiny fresh state
 srv.world.rooms.clear()
 srv.world.players.clear()
 srv.world.npc_sheets.clear()
+srv.world.advanced_goap_enabled = True
 
 # Create a test room with one present player (audience) and one NPC
 room = Room(id='start', description='A small test room.')
@@ -83,7 +84,7 @@ class _FakePlanModel:
         ]
         return _FakeAIResponse(json.dumps(plan))
 
-srv.plan_model = _FakePlanModel()
+srv.plan_model = _FakePlanModel()  # type: ignore[attr-defined]
 
 # Ask the NPC to think (queue a plan) then execute up to two actions
 srv.npc_think('Innkeeper')

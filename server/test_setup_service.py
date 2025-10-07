@@ -39,12 +39,21 @@ def test_begin_and_full_setup_flow(world_and_state):
 
     # Conflict
     handled, emits = handle_setup_input(w, state_path, sid, 'Warring clans over ancient magic.', sessions)
+    assert handled and any('manual' in c.lower() and 'quick' in c.lower() for c in _drain(emits))
+
+    # Creation mode - choose manual
+    handled, emits = handle_setup_input(w, state_path, sid, 'manual', sessions)
     assert handled and any('comfortable' in c.lower() for c in _drain(emits))
 
     # Safety level
     handled, emits = handle_setup_input(w, state_path, sid, 'PG-13', sessions)
-    assert handled and any('starting room' in c.lower() for c in _drain(emits))
+    assert handled and any('goap' in c.lower() for c in _drain(emits))
     assert getattr(w, 'safety_level', None) == 'PG-13'
+
+    # Advanced GOAP opt-in
+    handled, emits = handle_setup_input(w, state_path, sid, 'yes', sessions)
+    assert handled and any('starting room' in c.lower() for c in _drain(emits))
+    assert getattr(w, 'advanced_goap_enabled', None) is True
 
     # Room id
     handled, emits = handle_setup_input(w, state_path, sid, 'town_square', sessions)
@@ -67,6 +76,10 @@ def test_begin_and_full_setup_flow(world_and_state):
     assert 'town_square' in w.rooms
     assert w.start_room_id == 'town_square'
     assert 'Town Guard' in w.npc_sheets
+    
+    # Validate world integrity after setup mutations
+    validation_errors = w.validate()
+    assert validation_errors == [], f"World validation failed after setup: {validation_errors}"
 
 
 def test_cancel_flow(world_and_state):

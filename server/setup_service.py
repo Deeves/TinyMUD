@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 setup_service.py — World setup wizard (admin-only) extracted from the socket layer.
 
@@ -14,11 +12,177 @@ Design goals:
 - Make contributors comfortable: tiny functions, clear steps, gentle validation.
 """
 
-from typing import Dict, List, Tuple
+from __future__ import annotations
+
+from typing import Dict, List, Tuple, Optional
 import re
+import os
 
 from world import Room, CharacterSheet
 from persistence_utils import save_world
+from safe_utils import safe_call, safe_call_with_default
+
+# Optional AI import
+try:
+    import google.generativeai as genai  # type: ignore
+    AI_AVAILABLE = True
+except ImportError:
+    genai = None
+    AI_AVAILABLE = False
+
+
+def _generate_quick_world(world, state_path: str) -> Tuple[bool, str]:
+    """Generate a starting room and NPC using AI based on world details.
+
+    Robustness goals:
+    - Gemini may prepend prose or wrap JSON in code fences. We attempt to extract
+      the first valid JSON object rather than assuming a pristine response.
+    - Empty or filtered responses are surfaced with a friendly, actionable error.
+    - We *never* raise; always return (ok, error_msg) for the caller to fall back.
+    """
+    if not AI_AVAILABLE or genai is None:  # pragma: no cover (depends on extra lib)
+        return False, "AI not available for quick generation."
+
+    world_name = getattr(world, 'world_name', 'Unnamed World')
+    world_desc = getattr(world, 'world_description', 'A mysterious place.')
+    world_conflict = getattr(world, 'world_conflict', 'Unknown conflicts.')
+
+    # Configure API if not already done
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return False, "No Gemini API key found."
+    try:  # pragma: no cover (network)
+        genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+        # Prefer a stable / widely available model name. Fall back cascade.
+        # Project standard: only use these two model identifiers.
+        # 1. gemini-flash-lite-latest  (fast, inexpensive; preferred)
+        # 2. gemini-2.5-pro            (heavier fallback if the flash model is unavailable)
+        preferred_models = [
+            'gemini-flash-lite-latest',
+            'gemini-2.5-pro',
+        ]
+        last_err: Optional[Exception] = None
+        model = None
+        for name in preferred_models:
+            try:
+                model = genai.GenerativeModel(name)  # type: ignore[attr-defined]
+                break
+            except Exception as e:  # keep trying
+                last_err = e
+        if model is None and last_err is not None:
+            return False, f"Failed to init Gemini model: {last_err}"  # pragma: no cover
+    except Exception as e:  # pragma: no cover
+        return False, f"Failed to configure AI: {e}"
+
+    prompt = (
+        f"Generate ONLY JSON for a starting room and NPC for this MUD world.\n\n"
+        f"World Name: {world_name}\n"
+        f"World Description: {world_desc}\n"
+        f"World Conflict: {world_conflict}\n\n"
+        "Return a single JSON object with keys 'room' and 'npc'. NO extra narration.\n"
+        "Schema: { 'room': { 'id': 'snake_case_id', 'description': '...' }, 'npc': { 'name': 'Name', 'description': '...' } }\n"
+        "The 'id' MUST be snake_case, <= 32 chars. Descriptions 1-3 sentences."
+    )
+
+    import json
+
+    def _extract_json_block(raw: str) -> Optional[str]:
+        """Attempt to isolate the first JSON object in raw text.
+
+        Strategy:
+        1. Strip code fences ``` and ```json markers.
+        2. Scan for the first '{' then parse braces to find the matching '}'.
+        3. Return that substring if it parses as JSON.
+        """
+        if not raw:
+            return None
+        # Remove common code fence wrappers
+        fence_re = re.compile(r"```(?:json)?|```", re.IGNORECASE)
+        cleaned = fence_re.sub("", raw).strip()
+        # Fast path: direct parse succeeds
+        if safe_call(json.loads, cleaned) is not None:
+            return cleaned
+        # Brace matching
+        start_idx = cleaned.find('{')
+        if start_idx == -1:
+            return None
+        depth = 0
+        for i, ch in enumerate(cleaned[start_idx:], start=start_idx):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start_idx:i+1]
+                    if safe_call(json.loads, candidate) is not None:
+                        return candidate
+                    return None
+        return None
+
+    if model is None:  # Defensive guard for type checkers / unexpected failures
+        return False, "AI model unavailable after initialization attempts."
+
+    try:  # pragma: no cover (network path)
+        response = model.generate_content(prompt)  # type: ignore[assignment]
+    except Exception as e:  # pragma: no cover
+        return False, f"Model call failed: {e}"
+
+    # Different SDK versions expose content differently; try several fallbacks.
+    raw_text = safe_call_with_default(lambda: getattr(response, 'text', '') or '', '')
+    if not raw_text:
+        # Try candidates -> parts
+        def _extract_parts():
+            # response.candidates[0].content.parts is typically a list of objects with a 'text' attr
+            parts = []
+            for c in getattr(response, 'candidates', []) or []:  # type: ignore[attr-defined]
+                content_obj = getattr(c, 'content', None)
+                if not content_obj:
+                    continue
+                for p in getattr(content_obj, 'parts', []) or []:
+                    t = getattr(p, 'text', None)
+                    if t:
+                        parts.append(t)
+            return "\n".join(parts).strip()
+        raw_text = safe_call_with_default(_extract_parts, '')
+
+    if not raw_text:
+        return False, "Empty AI response (possibly filtered)."
+
+    json_block = _extract_json_block(raw_text)
+    if not json_block:
+        # Provide a shortened preview to aid debugging, but avoid logging giant text.
+        preview = raw_text[:120].replace('\n', ' ')
+        return False, f"Could not parse AI JSON (preview: {preview}...)"
+
+    try:
+        data = json.loads(json_block)
+    except Exception as e:
+        return False, f"Invalid JSON structure: {e}"
+
+    room_data = data.get('room', {}) if isinstance(data, dict) else {}
+    npc_data = data.get('npc', {}) if isinstance(data, dict) else {}
+
+    room_id = room_data.get('id') or 'starting_room'
+    # Sanitize room id to snake_case subset
+    room_id = re.sub(r'[^a-z0-9_]+', '_', room_id.lower())[:32] or 'starting_room'
+    room_desc = room_data.get('description', 'A basic starting room.')
+    npc_name = npc_data.get('name', 'Guide')
+    npc_desc = npc_data.get('description', 'A helpful guide.')
+
+    try:
+        # Create room
+        world.rooms[room_id] = Room(id=room_id, description=room_desc)
+        world.start_room_id = room_id
+        # Create NPC
+        world.rooms[room_id].npcs.add(npc_name)
+        sheet = CharacterSheet(display_name=npc_name, description=npc_desc)
+        world.npc_sheets[npc_name] = sheet
+        world.get_or_create_npc_id(npc_name)
+        save_world(world, state_path, debounced=True)
+    except Exception as e:
+        return False, f"Failed to apply generated data: {e}"
+
+    return True, ""
 
 
 def begin_setup(world_setup_sessions: Dict[str, dict], sid: str) -> List[dict]:
@@ -85,15 +249,55 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
             emits.append({'type': 'error', 'content': 'Please provide a short conflict summary (>= 5 chars).'})
             return True, emits
         world.world_conflict = conflict
-        # Ask for roleplay comfort/safety setting next
-        sess['step'] = 'safety_level'
+        # Ask for creation mode next
+        sess['step'] = 'creation_mode'
         world_setup_sessions[sid] = sess
         emits.append({'type': 'system', 'content': (
-            "What type of roleplay are you and your group comfortable with?\n"
-            "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
-            "You can type: G, PG-13, R, or OFF."
+            "Do you want to manually create the starting room and NPC, or have the system generate some rooms and NPCs based on your world details?\n"
+            "Type 'manual' or 'quick'."
         )})
         return True, emits
+
+    # Step: creation mode
+    if step == 'creation_mode':
+        mode = text_lower.strip()
+        if mode not in ('manual', 'quick'):
+            emits.append({'type': 'error', 'content': 'Please answer with manual or quick.'})
+            return True, emits
+        temp['creation_mode'] = mode
+        sess['temp'] = temp
+        if mode == 'manual':
+            # Proceed to safety level as before
+            sess['step'] = 'safety_level'
+            world_setup_sessions[sid] = sess
+            emits.append({'type': 'system', 'content': (
+                "What type of roleplay are you and your group comfortable with?\n"
+                "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
+                "You can type: G, PG-13, R, or OFF."
+            )})
+            return True, emits
+        elif mode == 'quick':
+            # Generate quick rooms and NPCs
+            ok, err = _generate_quick_world(world, state_path)
+            if not ok:
+                emits.append({'type': 'error', 'content': f'Quick generation failed: {err}. Falling back to manual.'})
+                sess['step'] = 'safety_level'
+                world_setup_sessions[sid] = sess
+                emits.append({'type': 'system', 'content': (
+                    "What type of roleplay are you and your group comfortable with?\n"
+                    "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
+                    "You can type: G, PG-13, R, or OFF."
+                )})
+                return True, emits
+            # Success, proceed to safety level
+            sess['step'] = 'safety_level'
+            world_setup_sessions[sid] = sess
+            emits.append({'type': 'system', 'content': (
+                "Quick world generation complete! What type of roleplay are you and your group comfortable with?\n"
+                "Choose one: [b]High (G)[/b], [b]Medium (PG-13)[/b], [b]Low (R)[/b], or [b]Safety Filters Off[/b].\n"
+                "You can type: G, PG-13, R, or OFF."
+            )})
+            return True, emits
 
     # Step: safety level
     if step == 'safety_level':
@@ -111,6 +315,30 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
             return True, emits
         try:
             world.safety_level = level
+            save_world(world, state_path, debounced=True)
+        except Exception:
+            pass
+        sess['step'] = 'advanced_goap'
+        world_setup_sessions[sid] = sess
+        emits.append({'type': 'system', 'content': (
+            "Do you want to enable the advanced GOAP AI for NPCs? This uses Gemini for richer planning when available. "
+            "Type yes or no (default: no)."
+        )})
+        return True, emits
+
+    # Step: advanced GOAP opt-in
+    if step == 'advanced_goap':
+        answer = text_lower.strip()
+        yes_vals = {"yes", "y", "enable", "enabled", "true", "on"}
+        no_vals = {"no", "n", "disable", "disabled", "false", "off", "skip", ""}
+        if answer in yes_vals:
+            world.advanced_goap_enabled = True
+        elif answer in no_vals:
+            world.advanced_goap_enabled = False
+        else:
+            emits.append({'type': 'error', 'content': 'Please answer with yes or no.'})
+            return True, emits
+        try:
             save_world(world, state_path, debounced=True)
         except Exception:
             pass

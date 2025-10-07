@@ -127,6 +127,32 @@ The first account ever created becomes an admin automatically. Admins can kick u
 
 If a Gemini API key is configured, the server builds a prompt using both the player’s and NPC’s character sheets and asks Gemini to reply. Without a key, a friendly fallback reply is sent so the game remains playable offline.
 
+## Configuration and Constants
+
+TinyMUD centralizes its configuration in `server/constants.py` to reduce magic strings and make the codebase more maintainable. This file contains:
+
+**Socket.IO Protocol Constants:**
+- `MESSAGE_IN` = 'message_to_server' (client → server event)  
+- `MESSAGE_OUT` = 'message' (server → client event)
+
+**Message Type Constants:**
+- `MSG_TYPE_SYSTEM`, `MSG_TYPE_PLAYER`, `MSG_TYPE_NPC`, `MSG_TYPE_ERROR`
+- Used by the client to apply different colors and formatting
+
+**Command Parsing Constants:**
+- `COMMAND_PREFIX` = '/' (for slash commands like /help, /auth)
+- `ROOM_BUILD_PREFIX` = '+' (for room creation like +room, +door)
+
+**Environment Variables and Defaults:**
+- `ENV_GEMINI_API_KEY`, `ENV_GOOGLE_API_KEY` for AI configuration
+- `DEFAULT_MAX_MESSAGE_LENGTH`, `DEFAULT_SAFETY_LEVEL`, etc.
+
+**Helper Functions:**
+- `get_message_payload()` creates standardized Socket.IO message structures
+- `is_slash_command()`, `validate_world_name()`, etc. for input validation
+
+This approach makes it easy to adjust protocol details, message limits, and other configuration without hunting through multiple files. New contributors can quickly understand the system's communication patterns by examining the constants file.
+
 ## Glossary (terminology)
 
 - Room name (user input): Human-friendly string admins/players type in commands. We fuzzy-resolve these (exact, case-insensitive exact, unique prefix, unique substring) to a concrete room id.

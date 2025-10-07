@@ -14,6 +14,7 @@ from typing import List, Tuple, Optional, TYPE_CHECKING
 import uuid
 
 from world import Room, Object
+from safe_utils import safe_call, safe_call_with_default
 if TYPE_CHECKING:
     from world import World
 from id_parse_utils import (
@@ -46,14 +47,13 @@ def _suggest_room_ids(world, typed_id: str) -> list[str]:
     """Return a list of room ids that start with the same first letter as typed_id (case-insensitive).
     If typed_id is empty or there are no matches, returns an empty list. Sorted for stable output.
     """
-    try:
+    def _get_candidates():
         first = (typed_id or "").strip()[:1].lower()
         if not first:
             return []
         candidates = [rid for rid in world.rooms.keys() if isinstance(rid, str) and rid[:1].lower() == first]
         return sorted(candidates)
-    except Exception:
-        return []
+    return safe_call_with_default(_get_candidates, [])
 
 
 def handle_room_command(world: "World", state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
@@ -74,11 +74,14 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
     sub_args = args[1:]
 
     if sub == 'create':
-        try:
+        def _parse_create_args():
             parts_joined = " ".join(sub_args)
-            room_id, desc = _parse_pipe_parts(parts_joined, expected=2)
-        except Exception:
+            return _parse_pipe_parts(parts_joined, expected=2)
+        
+        parse_result = safe_call(_parse_create_args)
+        if parse_result is None:
             return True, 'Usage: /room create <id> | <description>', emits
+        room_id, desc = parse_result
         room_id = _strip_quotes(room_id)
         if not room_id:
             return True, 'Room id cannot be empty.', emits
@@ -90,11 +93,14 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         return True, None, emits
 
     if sub == 'setdesc':
-        try:
+        def _parse_setdesc_args():
             parts_joined = " ".join(sub_args)
-            room_id, desc = _parse_pipe_parts(parts_joined, expected=2)
-        except Exception:
+            return _parse_pipe_parts(parts_joined, expected=2)
+        
+        parse_result = safe_call(_parse_setdesc_args)
+        if parse_result is None:
             return True, 'Usage: /room setdesc <id> | <description>', emits
+        room_id, desc = parse_result
         room_id = _strip_quotes(room_id)
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
         if not okn:
@@ -150,27 +156,24 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         # 1) Update all door targets and stairs in all rooms
         for r in list(world.rooms.values()):
             # Doors
-            try:
+            def _update_doors():
                 for dname, target in list((r.doors or {}).items()):
                     if target == old_id:
                         r.doors[dname] = new_id
-            except Exception:
-                pass
+            safe_call(_update_doors)
             # Stairs
-            try:
+            def _update_stairs():
                 if getattr(r, 'stairs_up_to', None) == old_id:
                     r.stairs_up_to = new_id
                 if getattr(r, 'stairs_down_to', None) == old_id:
                     r.stairs_down_to = new_id
-            except Exception:
-                pass
+            safe_call(_update_stairs)
         # 2) Update players currently in the room
-        try:
+        def _update_players():
             for psid, p in list(getattr(world, 'players', {}).items()):
                 if getattr(p, 'room_id', None) == old_id:
                     p.room_id = new_id
-        except Exception:
-            pass
+        safe_call(_update_players)
         # 3) Update world.start_room_id if needed
         try:
             if getattr(world, 'start_room_id', None) == old_id:

@@ -22,7 +22,9 @@ def _mk_bed(world, name: str, owner_npc: str, room):
 
 def test_offline_plan_sleep_when_tired(monkeypatch):
     import server as srv
-    from world import Room, CharacterSheet
+    from world import Room, CharacterSheet, World
+    # Use fresh world to avoid stale state from other tests
+    srv.world = World()
     # Build a tiny world context
     r = Room(id="inn", description="A quiet inn room")
     # Place NPC into the room in the global world
@@ -41,15 +43,24 @@ def test_offline_plan_sleep_when_tired(monkeypatch):
 
 def test_sleep_action_sets_sleeping_state(monkeypatch):
     import server as srv
-    from world import Room
-    r = srv.world.rooms.get("inn2") or Room(id="inn2", description="Another room")
+    from world import Room, World
+    # Use fresh world to avoid stale state from other tests
+    srv.world = World()
+    r = Room(id="inn2", description="Another room")
     srv.world.rooms[r.id] = r
     npc = "Dreamer"
     r.npcs.add(npc)
     sheet = srv._ensure_npc_sheet(npc)
     setattr(sheet, 'sleep', 10.0)
     bed = _mk_bed(srv.world, "Dreamer's Bed", npc, r)
+    # Ensure NPC ID mapping exists for validation
+    if npc not in srv.world.npc_ids:
+        srv.world.npc_ids[npc] = str(__import__('uuid').uuid4())
     # Execute sleep action
     srv._npc_execute_action(npc, r.id, {'tool': 'sleep', 'args': {'bed_uuid': bed.uuid}})
     assert getattr(sheet, 'sleeping_ticks_remaining', 0) > 0
     assert getattr(sheet, 'sleeping_bed_uuid', None) == bed.uuid
+    
+    # Validate world integrity after sleep action mutations
+    validation_errors = srv.world.validate()
+    assert validation_errors == [], f"World validation failed after sleep action: {validation_errors}"
