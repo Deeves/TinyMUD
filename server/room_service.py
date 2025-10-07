@@ -757,14 +757,12 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
 
 
 def _save_silent(world, state_path: str) -> None:
+    """Unified save helper that uses the persistence façade.
+    
+    Always use save_world from persistence_utils for consistency.
+    """
+    from persistence_utils import save_world
     try:
-        from persistence_utils import save_world as _save
-    except Exception:
-        _save = None
-    try:
-        if _save is not None:
-            _save(world, state_path, debounced=True)
-        else:
-            world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass

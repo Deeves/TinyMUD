@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 import os
+
+from persistence_utils import save_world
 from world import World
 
 
@@ -108,14 +110,15 @@ def execute_purge(state_path: str) -> World:
         pass
     new_world = World()
     try:
-        new_world.save_to_file(state_path)
+        save_world(new_world, state_path, debounced=False)
     except Exception:
         pass
     return new_world
 
 
 def _save_silent(world, state_path: str) -> None:
+    """Helper to save world state silently using the persistence façade."""
     try:
-        world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass

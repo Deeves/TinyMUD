@@ -607,14 +607,9 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
 
 def _save_silent(world, state_path: str) -> None:
     # Debounced persistence to reduce I/O during admin operations
+    """Helper to save world state silently using the persistence façade."""
+    from persistence_utils import save_world
     try:
-        from persistence_utils import save_world as _save
-    except Exception:
-        _save = None
-    try:
-        if _save is not None:
-            _save(world, state_path, debounced=True)
-        else:
-            world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass

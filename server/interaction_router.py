@@ -19,9 +19,8 @@ Behaviors migrated (parity focused):
 
 Notes:
  - All world mutations (inventory moves, crafting, container search, etc.)
-   happen inside interaction_service. After successful handling we request a
-   debounced save (best-effort) and also attempt an immediate world.save_to_file
-   mirroring historical server behavior.
+   happen inside interaction_service. After successful handling we use the
+   centralized persistence façade (save_world) to persist changes.
  - Messages / error wording intentionally preserved from the original in-line
    implementation (service already centralizes most text output).
  - This router purposefully avoids any socket.io calls other than emit; room
@@ -33,6 +32,7 @@ from __future__ import annotations
 from typing import Callable
 
 from command_context import CommandContext
+from persistence_utils import save_world
 from interaction_service import begin_interaction, handle_interaction_input
 
 
@@ -66,7 +66,7 @@ def try_handle_flow(
             # Persistence (debounced + best-effort immediate)
             ctx.mark_world_dirty()
             try:
-                world.save_to_file(ctx.state_path)
+                save_world(world, ctx.state_path, debounced=False)
             except Exception:
                 pass
             return True

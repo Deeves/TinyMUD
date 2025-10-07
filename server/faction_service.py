@@ -1,4 +1,14 @@
-"""Faction generation service for /faction commands.
+"""Faction generation sfrom __future__ import annotations
+
+from typing import List, Tuple, Optional, Dict, Any
+import os
+import json
+import re
+import uuid
+
+from persistence_utils import save_world
+from world import World, Room, Object, CharacterSheet
+from ai_utils import safety_settings_for_level as _shared_safety_settings /faction commands.
 
 Implements:
   - /faction factiongen
@@ -23,12 +33,13 @@ Contract: handle_faction_command(world, state_path, sid, args) -> (handled, err,
 
 from __future__ import annotations
 
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 import os
 import json
 import re
 import uuid
 
+from persistence_utils import save_world
 from world import World, Room, Object, CharacterSheet
 from ai_utils import safety_settings_for_level as _shared_safety_settings
 
@@ -336,7 +347,7 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
 
     # Best-effort save
     try:
-        world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass
 

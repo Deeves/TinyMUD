@@ -427,7 +427,7 @@ def handle_setup_input(world, state_path: str, sid: str, player_message: str, wo
             except Exception:
                 pass
             try:
-                world.save_to_file(state_path)
+                save_world(world, state_path, debounced=False)
             except Exception:
                 pass
         world.setup_complete = True

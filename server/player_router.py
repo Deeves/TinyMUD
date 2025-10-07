@@ -14,6 +14,7 @@ Behavior preserved exactly from original inline code.
 from typing import Any
 from command_context import CommandContext, EmitFn
 from dice_utils import roll as dice_roll, DiceParseError as DiceError
+from persistence_utils import save_world
 
 
 def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], raw: str, emit: EmitFn) -> bool:
@@ -41,7 +42,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             return True
         player.sheet.display_name = new_name
         try:
-            world.save_to_file(STATE_PATH)
+            save_world(world, STATE_PATH, debounced=True)
         except Exception:  # pragma: no cover
             pass
         emit(MESSAGE_OUT, {'type': 'system', 'content': f'You are now known as {new_name}.'})
@@ -67,7 +68,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             return True
         player.sheet.description = text
         try:
-            world.save_to_file(STATE_PATH)
+            save_world(world, STATE_PATH, debounced=True)
         except Exception:  # pragma: no cover
             pass
         emit(MESSAGE_OUT, {'type': 'system', 'content': 'Description updated.'})

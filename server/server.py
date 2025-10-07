@@ -162,6 +162,7 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit, disconnect
 from ai_utils import safety_settings_for_level as _safety_settings_for_level
 from debounced_saver import DebouncedSaver
+from persistence_utils import save_world, flush_all_saves
 from world import World, CharacterSheet, Room, User
 from look_service import format_look as _format_look, resolve_object_in_room as _resolve_object_in_room, format_object_summary as _format_object_summary
 from account_service import create_account_and_login, login_existing
@@ -596,10 +597,15 @@ world = World.load_from_file(STATE_PATH)
 
 
 def _save_world():
-    world.save_to_file(STATE_PATH)
+    """Final save on shutdown - must be immediate, not debounced."""
+    save_world(world, STATE_PATH, debounced=False)
+    # Also flush any pending debounced saves
+    flush_all_saves()
 
 
-_saver = DebouncedSaver(lambda: world.save_to_file(STATE_PATH), interval_ms=int(_env_str('MUD_SAVE_DEBOUNCE_MS', '300')))
+# Note: We keep _saver for backward compatibility with any code that references it,
+# but all new code should use persistence_utils.save_world() instead of _saver.debounce()
+_saver = DebouncedSaver(lambda: save_world(world, STATE_PATH, debounced=False), interval_ms=int(_env_str('MUD_SAVE_DEBOUNCE_MS', '300')))
 atexit.register(_save_world)  # one last immediate save on process exit
 admins = set()  # set of admin player sids (derived from logged-in users)
 sessions: dict[str, str] = {}  # sid -> user_id
@@ -1584,7 +1590,7 @@ def _apply_creative_mode_to_existing_users() -> None:
                     u.is_admin = True
                     changed = True
             if changed:
-                safe_call(world.save_to_file, STATE_PATH)
+                save_world(world, STATE_PATH, debounced=False)
     except Exception:
         pass
 
@@ -1606,7 +1612,7 @@ def _maybe_prompt_creative_mode() -> None:
             return
         if val in ('0', 'false', 'no', 'n', 'off'):
             setattr(world, 'debug_creative_mode', False)
-            safe_call(world.save_to_file, STATE_PATH)
+            save_world(world, STATE_PATH, debounced=False)
             print("Debug / Creative Mode DISABLED via env.")
             return
     # If already set in persisted world, just apply and continue
@@ -1624,7 +1630,7 @@ def _maybe_prompt_creative_mode() -> None:
         if ans in ("y", "yes"):
             setattr(world, 'debug_creative_mode', True)
             _apply_creative_mode_to_existing_users()
-            safe_call(world.save_to_file, STATE_PATH)
+            save_world(world, STATE_PATH, debounced=False)
             print("Creative Mode enabled. All users are admins.")
         else:
             print("Creative Mode remains disabled.")
@@ -2825,7 +2831,7 @@ def handle_message(data):
                         world.object_templates = {}
                     world.object_templates[key] = obj
                     try:
-                        world.save_to_file(STATE_PATH)
+                        save_world(world, STATE_PATH, debounced=True)
                     except Exception:
                         pass
                     object_template_sessions.pop(sid_str, None)
@@ -3035,7 +3041,7 @@ def handle_command(sid: str | None, text: str) -> None:
                 obj.owner_id = None  # type: ignore[attr-defined]
                 emit(MESSAGE_OUT, {'type': 'system', 'content': f"You unclaim the {getattr(obj, 'display_name', 'item')}."})
             try:
-                world.save_to_file(STATE_PATH)
+                save_world(world, STATE_PATH, debounced=True)
             except Exception:
                 pass
         except Exception:

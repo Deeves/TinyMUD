@@ -17,6 +17,7 @@ from typing import Any
 import json
 
 from command_context import CommandContext, EmitFn
+from persistence_utils import save_world
 
 
 def _emit_error(emit: EmitFn, message_out: str, text: str) -> None:
@@ -194,7 +195,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             return True
         try:
             world.safety_level = level  # type: ignore[attr-defined]
-            world.save_to_file(ctx.state_path)
+            save_world(world, ctx.state_path, debounced=True)
         except Exception:  # pragma: no cover
             pass
         _emit_system(emit, MESSAGE_OUT, f"Safety level set to [b]{level}[/b]. This applies to future AI replies.")
