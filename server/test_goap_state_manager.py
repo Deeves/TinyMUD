@@ -49,7 +49,7 @@ class TestNPCStateValidation:
         world = World()
         
         # Create a healthy NPC
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [
             {"tool": "eat", "args": {"target": "apple"}},
             {"tool": "sleep", "args": {"duration": 8}}
@@ -71,7 +71,7 @@ class TestNPCStateValidation:
     def test_validate_corrupted_plan_queue(self):
         """Test detection of corrupted plan queue structures."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         
         # Test various corruption patterns
         corruption_tests = [
@@ -106,7 +106,7 @@ class TestNPCStateValidation:
     def test_validate_needs_out_of_range(self):
         """Test detection of needs values outside valid ranges."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = []
         
         # Test needs out of range
@@ -140,7 +140,7 @@ class TestNPCStateValidation:
     def test_validate_sleep_state_inconsistency(self):
         """Test detection of inconsistent sleep states."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = []
         npc.hunger = npc.thirst = npc.socialization = npc.sleep = 50.0
         
@@ -177,7 +177,7 @@ class TestNPCStateCleanup:
     def test_clean_healthy_npc_no_changes(self):
         """Test that healthy NPCs are left unchanged."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [{"tool": "eat", "args": {"target": "apple"}}]
         npc.hunger = 75.0
         npc.thirst = 80.0
@@ -199,7 +199,7 @@ class TestNPCStateCleanup:
     def test_force_reset_plans(self):
         """Test forced plan queue reset."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [{"tool": "eat", "args": {"target": "apple"}}]
         
         world.npc_sheets = {"TestNPC": npc}
@@ -214,7 +214,7 @@ class TestNPCStateCleanup:
     def test_force_reset_needs(self):
         """Test forced needs reset."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.hunger = 25.0
         npc.thirst = 30.0
         npc.socialization = 40.0
@@ -235,7 +235,7 @@ class TestNPCStateCleanup:
     def test_clean_corrupted_plan_queue(self):
         """Test cleanup of corrupted plan queues."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         
         # Mix valid and invalid actions
         npc.plan_queue = [
@@ -259,7 +259,7 @@ class TestNPCStateCleanup:
     def test_clamp_needs_to_valid_ranges(self):
         """Test clamping of needs values to valid ranges."""
         world = World()
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         
         # Set invalid need values
         npc.hunger = -25.0  # Below 0
@@ -284,12 +284,12 @@ class TestNPCStateCleanup:
         world = World()
         
         # Test case 1: Sleeping without bed
-        npc1 = CharacterSheet(\ TestNPC\)
+        npc1 = CharacterSheet("TestNPC")
         npc1.sleeping_ticks_remaining = 100
         npc1.sleeping_bed_uuid = None
         
         # Test case 2: Has bed but not sleeping
-        npc2 = CharacterSheet(\ TestNPC\)
+        npc2 = CharacterSheet("TestNPC")
         npc2.sleeping_ticks_remaining = 0
         npc2.sleeping_bed_uuid = "some-bed-uuid"
         
@@ -317,7 +317,7 @@ class TestGOAPModeTransitions:
         world.advanced_goap_enabled = True
         
         # Add NPC with valid state
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [{"tool": "eat", "args": {"target": "apple"}}]
         world.npc_sheets = {"TestNPC": npc}
         
@@ -334,10 +334,10 @@ class TestGOAPModeTransitions:
         world.advanced_goap_enabled = False
         
         # Add NPCs with existing plans
-        npc1 = CharacterSheet(\ TestNPC\)
+        npc1 = CharacterSheet("TestNPC")
         npc1.plan_queue = [{"tool": "eat", "args": {}}]
-        
-        npc2 = CharacterSheet(\ TestNPC\)
+
+        npc2 = CharacterSheet("TestNPC")
         npc2.plan_queue = [{"tool": "sleep", "args": {}}, {"tool": "drink", "args": {}}]
         
         world.npc_sheets = {"NPC1": npc1, "NPC2": npc2}
@@ -360,8 +360,8 @@ class TestGOAPModeTransitions:
         """Test switching from advanced to offline planning."""
         world = World()
         world.advanced_goap_enabled = True
-        
-        npc = CharacterSheet(\ TestNPC\)
+
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [{"tool": "complex_ai_action", "args": {"reasoning": "advanced"}}]
         world.npc_sheets = {"TestNPC": npc}
         
@@ -376,8 +376,8 @@ class TestGOAPModeTransitions:
         """Test mode change when NPCs have corrupted state that needs cleanup."""
         world = World()
         world.advanced_goap_enabled = False
-        
-        npc = CharacterSheet(\ TestNPC\)
+
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = ["invalid_action", {"tool": "eat"}]  # Mixed valid/invalid
         npc.hunger = -50.0  # Invalid need value
         
@@ -483,12 +483,12 @@ class TestWorldAudit:
         world.advanced_goap_enabled = False
         
         # NPC with invalid plan
-        npc1 = CharacterSheet(\ TestNPC\)
+        npc1 = CharacterSheet("TestNPC")
         npc1.plan_queue = ["invalid_action"]
         npc1.hunger = npc1.thirst = npc1.socialization = npc1.sleep = 50.0
         
         # NPC with invalid needs
-        npc2 = CharacterSheet(\ TestNPC\)
+        npc2 = CharacterSheet("TestNPC")
         npc2.plan_queue = []
         npc2.hunger = -25.0  # Invalid
         npc2.thirst = 150.0  # Invalid
@@ -496,7 +496,7 @@ class TestWorldAudit:
         npc2.sleep = 50.0
         
         # NPC with sleep inconsistency
-        npc3 = CharacterSheet(\ TestNPC\)
+        npc3 = CharacterSheet("TestNPC")
         npc3.plan_queue = []
         npc3.hunger = npc3.thirst = npc3.socialization = npc3.sleep = 50.0
         npc3.sleeping_ticks_remaining = 100
@@ -527,7 +527,7 @@ class TestWorldReloadCleanup:
         world.advanced_goap_enabled = True
         
         # Add NPC with some issues that need cleanup
-        npc = CharacterSheet(\ TestNPC\)
+        npc = CharacterSheet("TestNPC")
         npc.plan_queue = [{"tool": "eat", "args": {}}]  # Valid plan
         npc.hunger = -10.0  # Invalid need (will be clamped)
         npc.thirst = 150.0  # Invalid need (will be clamped)
