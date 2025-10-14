@@ -18,6 +18,7 @@ import json
 
 from command_context import CommandContext, EmitFn
 from persistence_utils import save_world
+from rate_limiter import check_rate_limit, OperationType
 
 
 def _emit_error(emit: EmitFn, message_out: str, text: str) -> None:
@@ -40,6 +41,29 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
 
     if cmd in admin_cmds and (sid is None or sid not in ctx.admins):
         _emit_error(emit, ctx.message_out, 'Admin command. Admin rights required.')
+        return True
+
+    # Rate limiting for admin operations (they can be expensive)
+    # Use different costs based on operation severity
+    operation_costs = {
+        'purge': OperationType.SUPER_HEAVY,  # World reset is very expensive
+        'faction': OperationType.SUPER_HEAVY,  # AI-powered faction generation
+        'room': OperationType.HEAVY,  # Room operations can modify world structure
+        'npc': OperationType.HEAVY,  # NPC operations, especially familygen with AI
+        'object': OperationType.HEAVY,  # Object creation and templates
+        'teleport': OperationType.MODERATE,  # Player movement
+        'bring': OperationType.MODERATE,  # Player movement
+        'kick': OperationType.MODERATE,  # Disconnect players
+        'worldstate': OperationType.BASIC,  # Read-only operation
+        'safety': OperationType.BASIC,  # Configuration change
+        'setup': OperationType.MODERATE,  # World setup
+    }
+
+    cost = operation_costs.get(cmd, OperationType.HEAVY)  # Default to heavy for unknown
+    if not check_rate_limit(sid, cost, f"admin_{cmd}"):
+        _emit_error(emit, ctx.message_out,
+                    f'You are performing admin operations too quickly. '
+                    f'Please wait before using /{cmd} again.')
         return True
 
     world = ctx.world
@@ -235,12 +259,14 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             if sid not in world.players:
                 _emit_error(emit, MESSAGE_OUT, 'Please authenticate first to create objects.')
                 return True
-            handled, err, emits3 = _obj_create(world, ctx.state_path, sid, args[1:])
+            handled, err, emits3, broadcasts3 = _obj_create(world, ctx.state_path, sid, args[1:])
             if err:
                 _emit_error(emit, MESSAGE_OUT, err)
                 return True
             for payload in emits3:
                 emit(MESSAGE_OUT, payload)
+            for room_id, payload in broadcasts3:
+                ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
             return True
         if sub == 'createtemplateobject':
             if not hasattr(world, 'object_template_sessions'):
@@ -269,24 +295,28 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
                 _emit_error(emit, MESSAGE_OUT, 'Usage: /object deletetemplate <key>')
                 return True
             key = args[1]
-            handled, err2, emitsD = _obj_delete_template(world, ctx.state_path, key)
+            handled, err2, emitsD, broadcastsD = _obj_delete_template(world, ctx.state_path, key)
             if err2:
                 _emit_error(emit, MESSAGE_OUT, err2)
                 return True
             for payload in emitsD:
                 emit(MESSAGE_OUT, payload)
+            for room_id, payload in broadcastsD:
+                ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
             return True
         _emit_error(emit, MESSAGE_OUT, 'Unknown /object subcommand. Use createobject, createtemplateobject, listtemplates, viewtemplate, or deletetemplate.')
         return True
 
     # /room
     if cmd == 'room':
-        handled, err, emits2 = ctx.handle_room_command(world, ctx.state_path, args, sid)
+        handled, err, emits2, broadcasts2 = ctx.handle_room_command(world, ctx.state_path, args, sid)
         if err:
             _emit_error(emit, MESSAGE_OUT, err)
             return True
         for payload in emits2:
             emit(MESSAGE_OUT, payload)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True if handled else False
 
     # /faction
@@ -297,22 +327,26 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         if sid not in ctx.admins:
             _emit_error(emit, MESSAGE_OUT, 'Admin command. Admin rights required.')
             return True
-        handled, err, emits2 = ctx.handle_faction_command(world, ctx.state_path, sid, args)
+        handled, err, emits2, broadcasts2 = ctx.handle_faction_command(world, ctx.state_path, sid, args)
         if err:
             _emit_error(emit, MESSAGE_OUT, err)
             return True
         for payload in emits2:
             emit(MESSAGE_OUT, payload)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True if handled else False
 
     # /npc
     if cmd == 'npc':
-        handled, err, emits2 = ctx.handle_npc_command(world, ctx.state_path, sid, args)
+        handled, err, emits2, broadcasts2 = ctx.handle_npc_command(world, ctx.state_path, sid, args)
         if err:
             _emit_error(emit, MESSAGE_OUT, err)
             return True
         for payload in emits2:
             emit(MESSAGE_OUT, payload)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True if handled else False
 
     return False

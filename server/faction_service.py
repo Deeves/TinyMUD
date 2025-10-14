@@ -1,14 +1,4 @@
-"""Faction generation sfrom __future__ import annotations
-
-from typing import List, Tuple, Optional, Dict, Any
-import os
-import json
-import re
-import uuid
-
-from persistence_utils import save_world
-from world import World, Room, Object, CharacterSheet
-from ai_utils import safety_settings_for_level as _shared_safety_settings /faction commands.
+"""Faction generation for /faction commands.
 
 Implements:
   - /faction factiongen
@@ -28,7 +18,12 @@ Offline fallback:
 - If AI isn't available or parsing fails, synthesizes a compact 3-room loop with 3 NPCs,
   simple relationships, a Food Crate and Water Barrel (both consumable), and owned beds.
 
-Contract: handle_faction_command(world, state_path, sid, args) -> (handled, err, emits)
+Service Contract:
+    All public functions return 4-tuple: (handled, error, emits, broadcasts)
+    - handled: bool - whether the command was recognized
+    - error: str | None - error message if any
+    - emits: List[dict] - messages to send to the acting player
+    - broadcasts: List[Tuple[str, dict]] - (room_id, message) pairs for room broadcasts
 """
 
 from __future__ import annotations
@@ -403,13 +398,18 @@ def _build_ai_prompt(world: World) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def handle_faction_command(world: World, state_path: str, sid: str | None, args: List[str]) -> Tuple[bool, Optional[str], List[dict]]:
+def handle_faction_command(world: World, state_path: str, sid: str | None, args: List[str]) -> Tuple[bool, Optional[str], List[dict], List[Tuple[str, dict]]]:
+    """Handle /faction commands.
+    
+    Returns: (handled, error, emits, broadcasts)
+    """
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     if not args:
-        return True, "Usage: /faction factiongen", emits
+        return True, "Usage: /faction factiongen", emits, broadcasts
     sub = (args[0] or '').strip().lower()
     if sub != 'factiongen':
-        return False, None, emits
+        return False, None, emits, broadcasts
 
     # Build AI prompt
     model = _get_gemini_model()
@@ -452,4 +452,4 @@ def handle_faction_command(world: World, state_path: str, sid: str | None, args:
             f"Each NPC has an owned bed; food and water sources were ensured."
         )
     })
-    return True, None, emits
+    return True, None, emits, broadcasts

@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from world import World, Room, Player, User, Object, CharacterSheet, Inventory
+from world import World, Room, Player, User, Object, CharacterSheet
 
 
 def test_empty_world_validates_clean():
@@ -24,13 +24,37 @@ def test_simple_valid_world_passes_validation():
     """A basic world with rooms, players, and NPCs should validate cleanly."""
     w = World()
     
-    # Add a room with a simple door
+    # Add rooms with properly set up reciprocal doors
     room1 = Room(id="room1", description="First room")
     room2 = Room(id="room2", description="Second room")
-    room1.doors["north"] = "room2"
-    room1.door_ids["north"] = str(uuid.uuid4())
     w.rooms["room1"] = room1
     w.rooms["room2"] = room2
+    
+    # Create reciprocal doors with proper objects
+    door1_id = str(uuid.uuid4())
+    door2_id = str(uuid.uuid4())
+    
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door1_id
+    room2.doors["south"] = "room1"
+    room2.door_ids["south"] = door2_id
+    
+    # Create door objects
+    door1_obj = Object(
+        display_name="north door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="room2"
+    )
+    door1_obj.uuid = door1_id
+    room1.objects[door1_id] = door1_obj
+    
+    door2_obj = Object(
+        display_name="south door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="room1"
+    )
+    door2_obj.uuid = door2_id
+    room2.objects[door2_id] = door2_obj
     
     # Add a player
     w.add_player("sid123", "TestPlayer", "room1")
@@ -41,7 +65,7 @@ def test_simple_valid_world_passes_validation():
     room1.npcs.add("Guard")
     
     # Add a user account
-    user = w.create_user("Alice", "password123", "A brave adventurer")
+    w.create_user("Alice", "password123", "A brave adventurer")
     
     errors = w.validate()
     assert errors == []
@@ -267,11 +291,33 @@ def test_validation_after_world_mutations():
     errors = w.validate()
     assert errors == []
     
-    # Add a door (mutation)
-    room1.doors["north"] = "room2"
-    room1.door_ids["north"] = str(uuid.uuid4())
+    # Add reciprocal doors with proper objects (mutation)
+    door1_id = str(uuid.uuid4())
+    door2_id = str(uuid.uuid4())
     
-    # Should still be clean
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door1_id
+    room2.doors["south"] = "room1"
+    room2.door_ids["south"] = door2_id
+    
+    # Create door objects
+    door1_obj = Object(
+        display_name="north door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="room2"
+    )
+    door1_obj.uuid = door1_id
+    room1.objects[door1_id] = door1_obj
+    
+    door2_obj = Object(
+        display_name="south door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="room1"
+    )
+    door2_obj.uuid = door2_id
+    room2.objects[door2_id] = door2_obj
+    
+    # Should be clean after proper setup
     errors = w.validate()
     assert errors == []
     
@@ -288,6 +334,321 @@ def test_validation_after_world_mutations():
     # Should be clean again
     errors = w.validate()
     assert errors == []
+
+
+def test_door_without_reciprocal_connection():
+    """Validation should detect doors lacking reciprocal connections."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add door from room1 to room2 but no door back
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = str(uuid.uuid4())
+    
+    errors = w.validate()
+    assert any("door 'north' -> 'room2' lacks reciprocal door" in err for err in errors)
+
+
+def test_door_with_proper_reciprocal_connection():
+    """Validation should pass when doors have proper reciprocal connections."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add reciprocal doors
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = str(uuid.uuid4())
+    room2.doors["south"] = "room1"
+    room2.door_ids["south"] = str(uuid.uuid4())
+    
+    errors = w.validate()
+    reciprocal_errors = [e for e in errors if "lacks reciprocal door" in e]
+    assert len(reciprocal_errors) == 0
+
+
+def test_door_missing_door_id():
+    """Validation should detect doors without proper door_ids."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add door without door_id
+    room1.doors["north"] = "room2"
+    # Intentionally don't set door_ids["north"]
+    
+    errors = w.validate()
+    assert any("door 'north' missing door_id" in err for err in errors)
+
+
+def test_door_object_missing():
+    """Validation should detect missing door objects."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add door with door_id but no matching object
+    door_id = str(uuid.uuid4())
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door_id
+    # Intentionally don't create room1.objects[door_id]
+    
+    errors = w.validate()
+    assert any(f"door 'north' has door_id {door_id} but no matching object" in err
+               for err in errors)
+
+
+def test_door_object_missing_travel_point_tag():
+    """Validation should detect door objects without Travel Point tag."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Create door with object missing Travel Point tag
+    door_id = str(uuid.uuid4())
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door_id
+    
+    door_obj = Object(display_name="north door", object_tags={"Immovable"})  # Missing Travel Point
+    door_obj.uuid = door_id
+    room1.objects[door_id] = door_obj
+    
+    errors = w.validate()
+    assert any("door object 'north' missing 'Travel Point' tag" in err for err in errors)
+
+
+def test_door_object_link_target_mismatch():
+    """Validation should detect door objects with mismatched link targets."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    room3 = Room(id="room3", description="Third room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    w.rooms["room3"] = room3
+    
+    # Create door to room2 but object links to room3
+    door_id = str(uuid.uuid4())
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door_id
+    
+    door_obj = Object(
+        display_name="north door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="room3"  # Mismatch: door goes to room2 but object links to room3
+    )
+    door_obj.uuid = door_id
+    room1.objects[door_id] = door_obj
+    
+    errors = w.validate()
+    assert any("link_target_room_id mismatch" in err for err in errors)
+
+
+def test_stairs_without_reciprocal_connection():
+    """Validation should detect stairs lacking reciprocal connections."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add stairs up from room1 to room2 but no stairs down back
+    room1.stairs_up_to = "room2"
+    # Intentionally don't set room2.stairs_down_to = "room1"
+    
+    errors = w.validate()
+    assert any("stairs_up_to 'room2' lacks reciprocal stairs_down_to" in err for err in errors)
+
+
+def test_stairs_with_proper_reciprocal_connection():
+    """Validation should pass when stairs have proper reciprocal connections."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add reciprocal stairs
+    room1.stairs_up_to = "room2"
+    room2.stairs_down_to = "room1"
+    
+    errors = w.validate()
+    reciprocal_errors = [e for e in errors if "lacks reciprocal stairs" in e]
+    assert len(reciprocal_errors) == 0
+
+
+def test_stairs_missing_stairs_id():
+    """Validation should detect stairs without proper stairs IDs."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add stairs without stairs_up_id
+    room1.stairs_up_to = "room2"
+    room2.stairs_down_to = "room1"
+    # Intentionally don't set stairs_up_id or stairs_down_id
+    
+    errors = w.validate()
+    assert any("has stairs_up_to but missing stairs_up_id" in err for err in errors)
+    assert any("has stairs_down_to but missing stairs_down_id" in err for err in errors)
+
+
+def test_stairs_object_missing():
+    """Validation should detect missing stairs objects."""
+    w = World()
+    
+    room1 = Room(id="room1", description="First room")
+    room2 = Room(id="room2", description="Second room")
+    w.rooms["room1"] = room1
+    w.rooms["room2"] = room2
+    
+    # Add stairs with IDs but no matching objects
+    stairs_up_id = str(uuid.uuid4())
+    stairs_down_id = str(uuid.uuid4())
+    
+    room1.stairs_up_to = "room2"
+    room1.stairs_up_id = stairs_up_id
+    room2.stairs_down_to = "room1"
+    room2.stairs_down_id = stairs_down_id
+    # Intentionally don't create objects[stairs_up_id] or objects[stairs_down_id]
+    
+    errors = w.validate()
+    assert any(f"stairs_up_id {stairs_up_id} but no matching object" in err for err in errors)
+    assert any(f"stairs_down_id {stairs_down_id} but no matching object" in err for err in errors)
+
+
+def test_travel_point_missing_immovable_tag():
+    """Validation should detect travel points without Immovable tag."""
+    w = World()
+    
+    room = Room(id="room1", description="Test room")
+    w.rooms["room1"] = room
+    
+    # Create travel point without Immovable tag
+    obj = Object(
+        display_name="portal",
+        object_tags={"Travel Point"},  # Missing Immovable tag
+        link_target_room_id="room2"
+    )
+    room.objects[obj.uuid] = obj
+    
+    errors = w.validate()
+    assert any("travel point 'portal' missing 'Immovable' tag" in err for err in errors)
+
+
+def test_travel_point_missing_link_target():
+    """Validation should detect travel points without link targets."""
+    w = World()
+    
+    room = Room(id="room1", description="Test room")
+    w.rooms["room1"] = room
+    
+    # Create travel point without link_target_room_id
+    obj = Object(
+        display_name="broken portal",
+        object_tags={"Immovable", "Travel Point"}
+        # Missing link_target_room_id
+    )
+    room.objects[obj.uuid] = obj
+    
+    errors = w.validate()
+    assert any("travel point 'broken portal' missing link_target_room_id" in err for err in errors)
+
+
+def test_comprehensive_reciprocal_linkage_validation():
+    """Test validation of a complex world with proper reciprocal linkage."""
+    w = World()
+    
+    # Create rooms
+    lobby = Room(id="lobby", description="Main lobby")
+    upstairs = Room(id="upstairs", description="Upper floor") 
+    garden = Room(id="garden", description="Garden")
+    w.rooms["lobby"] = lobby
+    w.rooms["upstairs"] = upstairs
+    w.rooms["garden"] = garden
+    
+    # Set up reciprocal doors: lobby <-> garden
+    lobby_door_id = str(uuid.uuid4())
+    garden_door_id = str(uuid.uuid4())
+    
+    lobby.doors["garden door"] = "garden"
+    lobby.door_ids["garden door"] = lobby_door_id
+    garden.doors["lobby door"] = "lobby"
+    garden.door_ids["lobby door"] = garden_door_id
+    
+    # Create door objects
+    lobby_door_obj = Object(
+        display_name="garden door",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="garden"
+    )
+    lobby_door_obj.uuid = lobby_door_id
+    lobby.objects[lobby_door_id] = lobby_door_obj
+    
+    garden_door_obj = Object(
+        display_name="lobby door", 
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="lobby"
+    )
+    garden_door_obj.uuid = garden_door_id
+    garden.objects[garden_door_id] = garden_door_obj
+    
+    # Set up reciprocal stairs: lobby <-> upstairs  
+    stairs_up_id = str(uuid.uuid4())
+    stairs_down_id = str(uuid.uuid4())
+    
+    lobby.stairs_up_to = "upstairs"
+    lobby.stairs_up_id = stairs_up_id
+    upstairs.stairs_down_to = "lobby"
+    upstairs.stairs_down_id = stairs_down_id
+    
+    # Create stairs objects
+    stairs_up_obj = Object(
+        display_name="stairs up",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="upstairs"
+    )
+    stairs_up_obj.uuid = stairs_up_id
+    lobby.objects[stairs_up_id] = stairs_up_obj
+    
+    stairs_down_obj = Object(
+        display_name="stairs down",
+        object_tags={"Immovable", "Travel Point"},
+        link_target_room_id="lobby"
+    )
+    stairs_down_obj.uuid = stairs_down_id
+    upstairs.objects[stairs_down_id] = stairs_down_obj
+    
+    # The comprehensive world should validate with no reciprocal linkage errors
+    errors = w.validate()
+    reciprocal_errors = [e for e in errors if any(phrase in e for phrase in [
+        "lacks reciprocal door", "lacks reciprocal stairs", "missing door_id",
+        "but no matching object", "missing 'Travel Point' tag", "link_target_room_id mismatch",
+        "missing stairs_up_id", "missing stairs_down_id", "missing 'Immovable' tag",
+        "missing link_target_room_id"
+    ])]
+    assert len(reciprocal_errors) == 0, f"Expected no reciprocal linkage errors, got: {reciprocal_errors}"
 
 
 if __name__ == "__main__":

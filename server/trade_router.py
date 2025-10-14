@@ -15,26 +15,44 @@ import re
 import os  # added for debug instrumentation (MUD_DEBUG_TRADE)
 from command_context import CommandContext, EmitFn
 from world import CharacterSheet, World
+from concurrency_utils import atomic_many, atomic
 
 # We reuse inventory + swap/purchase helpers that remain in server.py to avoid
 # duplicating logic. Import lazily inside functions to minimize circular risk.
 
 
-def _barter_begin(ctx: CommandContext, world: World, sid: str, *, target_kind: str, target_display: str, room_id: str, target_sid: str | None = None, target_name: str | None = None):
-    ctx.barter_sessions.pop(sid, None)
-    ctx.trade_sessions.pop(sid, None)
-    session = {
-        'step': 'choose_desired',
-        'target_kind': target_kind,
-        'target_sid': target_sid,
-        'target_name': target_name,
-        'target_display': target_display,
-        'room_id': room_id,
-    }
-    ctx.barter_sessions[sid] = session
+def _barter_begin(
+    ctx: CommandContext,
+    world: World,
+    sid: str,
+    *,
+    target_kind: str,
+    target_display: str,
+    room_id: str,
+    target_sid: str | None = None,
+    target_name: str | None = None
+):
+    with atomic_many(['barter_sessions', 'trade_sessions']):
+        ctx.barter_sessions.pop(sid, None)
+        ctx.trade_sessions.pop(sid, None)
+        session = {
+            'step': 'choose_desired',
+            'target_kind': target_kind,
+            'target_sid': target_sid,
+            'target_name': target_name,
+            'target_display': target_display,
+            'room_id': room_id,
+        }
+        ctx.barter_sessions[sid] = session
     emits = [
-        {'type': 'system', 'content': f"Beginning barter with {target_display}. Type 'cancel' to abort."},
-        {'type': 'system', 'content': f"What item do you want from {target_display}'s inventory?"},
+        {
+            'type': 'system',
+            'content': f"Beginning barter with {target_display}. Type 'cancel' to abort.",
+        },
+        {
+            'type': 'system',
+            'content': f"What item do you want from {target_display}'s inventory?",
+        },
     ]
     return True, None, emits
 
@@ -50,7 +68,8 @@ def _barter_handle(ctx: CommandContext, world: World, sid: str, text: str):
     mutated = False
     raw = (text or '').strip(); lower = raw.lower()
     if lower in ('cancel', '/cancel'):
-        sessions_map.pop(sid, None)
+        with atomic('barter_sessions'):
+            sessions_map.pop(sid, None)
         emits.append({'type': 'system', 'content': 'Barter cancelled.'})
         return True, emits, broadcasts, directs, False
     player = world.players.get(sid)
@@ -95,7 +114,8 @@ def _barter_handle(ctx: CommandContext, world: World, sid: str, text: str):
         session['desired_uuid'] = str(getattr(obj, 'uuid', '') or '')
         session['desired_name'] = getattr(obj, 'display_name', 'the item')
         session['step'] = 'choose_offer'
-        sessions_map[sid] = session
+        with atomic('barter_sessions'):
+            sessions_map[sid] = session
         emits.append({'type': 'system', 'content': f"You set your sights on {session['desired_name']}."})
         emits.append({'type': 'system', 'content': 'What item from your inventory will you offer in exchange?'})
         return True, emits, broadcasts, directs, False

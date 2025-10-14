@@ -1,6 +1,6 @@
 """Room admin operations for /room commands.
 
-All functions return (handled: bool, error: str | None, emits: list[dict]).
+All functions return (handled: bool, error: str | None, emits: list[dict], broadcasts: list[tuple[str, dict]]).
 They are pure of Flask/SocketIO and only touch the world model and save file.
 
 Terminology:
@@ -56,19 +56,20 @@ def _suggest_room_ids(world, typed_id: str) -> list[str]:
     return safe_call_with_default(_get_candidates, [])
 
 
-def handle_room_command(world: "World", state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict]]:
+def handle_room_command(world: "World", state_path: str, args: list[str], sid: str | None = None) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     """Parse and execute /room admin operations.
 
     Contract:
     - Inputs: world (World), state_path (str), args (list[str]), sid optional
-    - Returns: (handled, error, emits)
+    - Returns: (handled, error, emits, broadcasts)
     - Errors: Non-fatal; never raises. Returns handled=True for known subcommands, False otherwise.
     """
     assert isinstance(state_path, str) and state_path != "", "state_path must be non-empty"
     assert isinstance(args, list), "args must be a list of strings"
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     if not args:
-        return True, 'Usage: /room <create|setdesc|rename|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits
+        return True, 'Usage: /room <create|setdesc|rename|adddoor|removedoor|setstairs|linkdoor|linkstairs|lockdoor> ...', emits, broadcasts
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -80,17 +81,17 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         
         parse_result = safe_call(_parse_create_args)
         if parse_result is None:
-            return True, 'Usage: /room create <id> | <description>', emits
+            return True, 'Usage: /room create <id> | <description>', emits, broadcasts
         room_id, desc = parse_result
         room_id = _strip_quotes(room_id)
         if not room_id:
-            return True, 'Room id cannot be empty.', emits
+            return True, 'Room id cannot be empty.', emits, broadcasts
         if room_id in world.rooms:
-            return True, f"Room '{room_id}' already exists.", emits
+            return True, f"Room '{room_id}' already exists.", emits, broadcasts
         world.rooms[room_id] = Room(id=room_id, description=desc)
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Room '{room_id}' created."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'setdesc':
         def _parse_setdesc_args():
@@ -99,24 +100,24 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         
         parse_result = safe_call(_parse_setdesc_args)
         if parse_result is None:
-            return True, 'Usage: /room setdesc <id> | <description>', emits
+            return True, 'Usage: /room setdesc <id> | <description>', emits, broadcasts
         room_id, desc = parse_result
         room_id = _strip_quotes(room_id)
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         # norm is a concrete room id string or original input
         val = norm if isinstance(norm, str) else room_id
         rok, rerr, room_id_res = _resolve_room_id(world, val)
         if not rok or not room_id_res:
-            return True, (rerr or f"Room '{room_id}' not found."), emits
+            return True, (rerr or f"Room '{room_id}' not found."), emits, broadcasts
         room = world.rooms.get(room_id_res)
         if room is None:
-            return True, f"Room '{room_id_res}' not found.", emits
+            return True, f"Room '{room_id_res}' not found.", emits, broadcasts
         room.description = desc
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Room '{room_id_res}' description updated."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'rename':
         # /room rename <room name> | <new room name>
@@ -124,15 +125,15 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             parts_joined = " ".join(sub_args)
             src_in, new_in = _parse_pipe_parts(parts_joined, expected=2)
         except Exception:
-            return True, 'Usage: /room rename <room name> | <new room name>', emits
+            return True, 'Usage: /room rename <room name> | <new room name>', emits, broadcasts
         src_in = _strip_quotes(src_in)
         new_id = _strip_quotes(new_in)
         if not src_in or not new_id:
-            return True, 'Usage: /room rename <room name> | <new room name>', emits
+            return True, 'Usage: /room rename <room name> | <new room name>', emits, broadcasts
         # Normalize 'here' for source
         okn, errn, norm = _normalize_room_input(world, sid, src_in)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else src_in
         rok, rerr, old_id = _resolve_room_id(world, val)
         if not rok or not old_id:
@@ -140,18 +141,18 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             suggestions = _suggest_room_ids(world, val)
             if suggestions:
                 return True, (rerr or f"Room '{src_in}' not found.") + ' Did you mean: ' + ", ".join(suggestions[:10]) + '?', emits
-            return True, (rerr or f"Room '{src_in}' not found."), emits
+            return True, (rerr or f"Room '{src_in}' not found."), emits, broadcasts
         if new_id == old_id:
-            return True, 'New room id is the same as current.', emits
+            return True, 'New room id is the same as current.', emits, broadcasts
         if not new_id:
-            return True, 'New room id cannot be empty.', emits
+            return True, 'New room id cannot be empty.', emits, broadcasts
         if new_id in world.rooms:
-            return True, f"Room '{new_id}' already exists.", emits
+            return True, f"Room '{new_id}' already exists.", emits, broadcasts
 
         # Perform rename: move Room object to new key and update its id
         room_obj = world.rooms.get(old_id)
         if not room_obj:
-            return True, f"Room '{old_id}' not found.", emits
+            return True, f"Room '{old_id}' not found.", emits, broadcasts
         # Update references in other structures first, then remap key
         # 1) Update all door targets and stairs in all rooms
         for r in list(world.rooms.values()):
@@ -202,11 +203,11 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             room_obj.id = new_id
             world.rooms[new_id] = room_obj
         except Exception:
-            return True, 'Internal error while renaming room.', emits
+            return True, 'Internal error while renaming room.', emits, broadcasts
 
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Room '{old_id}' renamed to '{new_id}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'adddoor':
         try:
@@ -215,27 +216,27 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             door_name, target_room = _parse_pipe_parts(rest, expected=2)
         except Exception:
             # Note: usage mentions user-facing room names; internally we resolve to ids
-            return True, 'Usage: /room adddoor <room name> | <door name> | <target room name>', emits
+            return True, 'Usage: /room adddoor <room name> | <door name> | <target room name>', emits, broadcasts
         room_id = _strip_quotes(room_id)
         door_name = _strip_quotes(door_name)
         target_room = _strip_quotes(target_room)
         # Normalize 'here' for both source and target
         okn_src, errn_src, norm_src = _normalize_room_input(world, sid, room_id)
         if not okn_src:
-            return True, errn_src, emits
+            return True, errn_src, emits, broadcasts
         okn_dst, errn_dst, norm_dst = _normalize_room_input(world, sid, target_room)
         if not okn_dst:
-            return True, errn_dst, emits
+            return True, errn_dst, emits, broadcasts
         val_src = norm_src if isinstance(norm_src, str) else room_id
         rok, rerr, room_id_res = _resolve_room_id(world, val_src)
         if not rok or not room_id_res:
-            return True, (rerr or f"Room '{room_id}' not found."), emits
+            return True, (rerr or f"Room '{room_id}' not found."), emits, broadcasts
         room = world.rooms.get(room_id_res)
         if room is None:
-            return True, f"Room '{room_id_res}' not found.", emits
+            return True, f"Room '{room_id_res}' not found.", emits, broadcasts
         target_room = norm_dst
         if not target_room:
-            return True, 'Target room id cannot be empty.', emits
+            return True, 'Target room id cannot be empty.', emits, broadcasts
         # Create or update forward door
         room.doors[door_name] = target_room
         # Assign a stable id for this door if missing
@@ -310,30 +311,30 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             emits.append({'type': 'system', 'content': f"Door '{door_name}' in room '{room_id_res}' now leads to '{target_room}'. (Note: target room not found; back-link not created)"})
 
         _save_silent(world, state_path)
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'removedoor':
         try:
             parts_joined = " ".join(sub_args)
             room_id, door_name = _parse_pipe_parts(parts_joined, expected=2)
         except Exception:
-            return True, 'Usage: /room removedoor <room name> | <door name>', emits
+            return True, 'Usage: /room removedoor <room name> | <door name>', emits, broadcasts
         room_id = _strip_quotes(room_id)
         door_name = _strip_quotes(door_name)
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else room_id
         rok, rerr, room_id_res = _resolve_room_id(world, val)
         if not rok or not room_id_res:
-            return True, (rerr or f"Room '{room_id}' not found."), emits
+            return True, (rerr or f"Room '{room_id}' not found."), emits, broadcasts
         room = world.rooms.get(room_id_res)
         if not room:
-            return True, f"Room '{room_id_res}' not found.", emits
+            return True, f"Room '{room_id_res}' not found.", emits, broadcasts
         # Fuzzy resolve existing door name within the room
         okd, derr, resolved = _resolve_door_name(room, door_name)
         if not okd or not resolved:
-            return True, (derr or f"Door '{door_name}' not found in room '{room_id}'."), emits
+            return True, (derr or f"Door '{door_name}' not found in room '{room_id}'."), emits, broadcasts
         # Capture object id before removal
         oid = None
         try:
@@ -353,7 +354,7 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Door '{door_name}' removed from room '{room_id}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'setstairs':
         try:
@@ -361,21 +362,21 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             room_id, rest = _parse_pipe_parts(parts_joined, expected=2)
             up_str, down_str = _parse_pipe_parts(rest, expected=2)
         except Exception:
-            return True, 'Usage: /room setstairs <room name> | <up room name or -> | <down room name or ->', emits
+            return True, 'Usage: /room setstairs <room name> | <up room name or -> | <down room name or ->', emits, broadcasts
         room_id = _strip_quotes(room_id)
         up_str = _strip_quotes(up_str)
         down_str = _strip_quotes(down_str)
         room_id = _strip_quotes(room_id)
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else room_id
         rok, rerr, room_id_res = _resolve_room_id(world, val)
         if not rok or not room_id_res:
-            return True, (rerr or f"Room '{room_id}' not found."), emits
+            return True, (rerr or f"Room '{room_id}' not found."), emits, broadcasts
         room = world.rooms.get(room_id_res)
         if not room:
-            return True, f"Room '{room_id_res}' not found.", emits
+            return True, f"Room '{room_id_res}' not found.", emits, broadcasts
         # Normalize 'here' for targets too
         def _norm_stairs(val: str) -> str | None:
             if val in ('', '-'):
@@ -441,7 +442,7 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Stairs for '{room_id}' set. Up -> {room.stairs_up_to or 'none'}, Down -> {room.stairs_down_to or 'none'}."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'linkdoor':
         try:
@@ -450,28 +451,28 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             door_a, rest2 = _parse_pipe_parts(rest, expected=2)
             room_b, door_b = _parse_pipe_parts(rest2, expected=2)
         except Exception:
-            return True, 'Usage: /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>', emits
+            return True, 'Usage: /room linkdoor <room_a> | <door_a> | <room_b> | <door_b>', emits, broadcasts
         room_a = _strip_quotes(room_a)
         room_b = _strip_quotes(room_b)
         door_a = _strip_quotes(door_a)
         door_b = _strip_quotes(door_b)
         okn_a, errn_a, norm_a = _normalize_room_input(world, sid, room_a)
         if not okn_a:
-            return True, errn_a, emits
+            return True, errn_a, emits, broadcasts
         okn_b, errn_b, norm_b = _normalize_room_input(world, sid, room_b)
         if not okn_b:
-            return True, errn_b, emits
+            return True, errn_b, emits, broadcasts
         val_a = norm_a if isinstance(norm_a, str) else room_a
         val_b = norm_b if isinstance(norm_b, str) else room_b
         rok_a, rerr_a, room_a_res = _resolve_room_id(world, val_a)
         rok_b, rerr_b, room_b_res = _resolve_room_id(world, val_b)
         if not rok_a or not rok_b or not room_a_res or not room_b_res:
             err_msg = rerr_a or rerr_b or 'Both rooms must exist.'
-            return True, err_msg, emits
+            return True, err_msg, emits, broadcasts
         ra = world.rooms.get(room_a_res)
         rb = world.rooms.get(room_b_res)
         if not ra or not rb:
-            return True, 'Both rooms must exist.', emits
+            return True, 'Both rooms must exist.', emits, broadcasts
         ra.doors[door_a] = room_b_res
         rb.doors[door_b] = room_a_res
         # Ensure door ids on both sides and matching Objects
@@ -516,7 +517,7 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Linked door '{door_a}' in '{room_a_res}' <-> '{door_b}' in '{room_b_res}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'linkstairs':
         try:
@@ -524,30 +525,30 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             room_a, rest = _parse_pipe_parts(parts_joined, expected=2)
             direction, room_b = _parse_pipe_parts(rest, expected=2)
         except Exception:
-            return True, 'Usage: /room linkstairs <room_a> | <up|down> | <room_b>', emits
+            return True, 'Usage: /room linkstairs <room_a> | <up|down> | <room_b>', emits, broadcasts
         room_a = _strip_quotes(room_a)
         room_b = _strip_quotes(room_b)
         direction = _strip_quotes(direction)
         okn_a, errn_a, norm_a = _normalize_room_input(world, sid, room_a)
         if not okn_a:
-            return True, errn_a, emits
+            return True, errn_a, emits, broadcasts
         okn_b, errn_b, norm_b = _normalize_room_input(world, sid, room_b)
         if not okn_b:
-            return True, errn_b, emits
+            return True, errn_b, emits, broadcasts
         val_a = norm_a if isinstance(norm_a, str) else room_a
         val_b = norm_b if isinstance(norm_b, str) else room_b
         rok_a, rerr_a, room_a_res = _resolve_room_id(world, val_a)
         rok_b, rerr_b, room_b_res = _resolve_room_id(world, val_b)
         if not rok_a or not rok_b or not room_a_res or not room_b_res:
             err_msg = rerr_a or rerr_b or 'Both rooms must exist.'
-            return True, err_msg, emits
+            return True, err_msg, emits, broadcasts
         ra = world.rooms.get(room_a_res)
         rb = world.rooms.get(room_b_res)
         if not ra or not rb:
-            return True, 'Both rooms must exist.', emits
+            return True, 'Both rooms must exist.', emits, broadcasts
         d = direction.lower()
         if d not in ('up', 'down'):
-            return True, "Direction must be 'up' or 'down'.", emits
+            return True, "Direction must be 'up' or 'down'.", emits, broadcasts
         if d == 'up':
             ra.stairs_up_to = room_b_res
             rb.stairs_down_to = room_a_res
@@ -637,7 +638,7 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
                 pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"Linked stairs {d} from '{room_a_res}' <-> opposite in '{room_b_res}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'lockdoor':
         # Syntax:
@@ -646,14 +647,14 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         # /room lockdoor <door name> | <relationship: <type> with <player or NPC>>
         # Applies to the admin's current room ('here').
         if sid is None or sid not in getattr(world, 'players', {}):
-            return True, 'You must be in a room to lock a door. Please authenticate.', emits
+            return True, 'You must be in a room to lock a door. Please authenticate.', emits, broadcasts
         player = world.players.get(sid)
         rid = getattr(player, 'room_id', None)
         if not isinstance(rid, str) or not rid:
-            return True, 'You are nowhere.', emits
+            return True, 'You are nowhere.', emits, broadcasts
         room = world.rooms.get(rid)
         if room is None:
-            return True, 'You are nowhere.', emits
+            return True, 'You are nowhere.', emits, broadcasts
         parts_joined = " ".join(sub_args)
         try:
             door_in, policy_in = _parse_pipe_parts(parts_joined, expected=2)
@@ -662,11 +663,11 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
         door_in = _strip_quotes(door_in)
         policy_in = policy_in.strip()
         if not door_in or not policy_in:
-            return True, 'Usage: /room lockdoor <door name> | <names...> or relationship: <type> with <name>', emits
+            return True, 'Usage: /room lockdoor <door name> | <names...> or relationship: <type> with <name>', emits, broadcasts
         # Resolve door name within current room
         okd, derr, door_name = _resolve_door_name(room, door_in)
         if not okd or not door_name:
-            return True, (derr or f"Door '{door_in}' not found in this room."), emits
+            return True, (derr or f"Door '{door_in}' not found in this room."), emits, broadcasts
 
         # Helper: resolve an entity display name to a stable id (user.user_id or npc_id)
         def resolve_entity_id_by_name(name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -716,24 +717,24 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
                 rel_type = raw[:idx].strip()
                 who_raw = raw[idx + len(' with '):].strip()
             else:
-                return True, 'Usage: relationship: <type> with <name>', emits
+                return True, 'Usage: relationship: <type> with <name>', emits, broadcasts
             if not rel_type or not who_raw:
-                return True, 'Usage: relationship: <type> with <name>', emits
+                return True, 'Usage: relationship: <type> with <name>', emits, broadcasts
             # Resolve target entity id
             tgt_id, tgt_disp = resolve_entity_id_by_name(who_raw)
             if not tgt_id:
-                return True, f"'{who_raw}' not found as a player or NPC.", emits
+                return True, f"'{who_raw}' not found as a player or NPC.", emits, broadcasts
             rel_rules.append({'type': rel_type, 'to': tgt_id})
         else:
             # Comma separated names
             names = [p.strip() for p in policy_in.split(',') if p.strip()]
             if not names:
-                return True, 'Provide at least one name.', emits
+                return True, 'Provide at least one name.', emits, broadcasts
             resolved_disp: list[str] = []
             for nm in names:
                 eid, disp = resolve_entity_id_by_name(nm)
                 if not eid:
-                    return True, f"'{nm}' not found as a player or NPC.", emits
+                    return True, f"'{nm}' not found as a player or NPC.", emits, broadcasts
                 allow_ids.append(eid)
                 resolved_disp.append(disp or nm)
 
@@ -751,9 +752,9 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
             # relationship rule
             rule = rel_rules[0]
             emits.append({'type': 'system', 'content': f"Door '{door_name}' is now locked. Permitted: anyone with relationship [{rule['type']}] to the specified entity."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
-    return False, None, emits
+    return False, None, emits, broadcasts
 
 
 def _save_silent(world, state_path: str) -> None:

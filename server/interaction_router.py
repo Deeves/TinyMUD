@@ -53,7 +53,7 @@ def try_handle_flow(
 
     # 1. Active multi-turn interaction session continuation
     if sid in interaction_sessions:
-        handled, emits_list, broadcasts_list = handle_interaction_input(world, sid, player_message, interaction_sessions)
+        handled, err, emits_list, broadcasts_list = handle_interaction_input(world, sid, player_message, interaction_sessions)
         if handled:
             for payload in emits_list:
                 emit(MESSAGE_OUT, payload)
@@ -84,12 +84,18 @@ def try_handle_flow(
             return True
         player = world.players.get(sid)
         room = world.rooms.get(player.room_id) if player else None
-        ok, err, emits_list = begin_interaction(world, sid, room, raw_name, interaction_sessions)
+        ok, err, emits_list, broadcasts_list = begin_interaction(world, sid, room, raw_name, interaction_sessions)
         if not ok:
             emit(MESSAGE_OUT, {'type': 'system', 'content': err or 'Unable to interact.'})
             return True
         for payload in emits_list:
             emit(MESSAGE_OUT, payload)
+        # Room broadcasts (room_id, payload)
+        try:
+            for room_id, payload in (broadcasts_list or []):
+                ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
+        except Exception:
+            pass
         # No immediate persistence needed (session only) but harmless to debounce.
         ctx.mark_world_dirty()
         return True

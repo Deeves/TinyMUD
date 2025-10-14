@@ -21,7 +21,7 @@ def test_faction_offline_invariants(monkeypatch, tmp_path):
     state_file = tmp_path / 'world_state.json'
 
     # Run the command under test
-    handled, err, emits = handle_faction_command(w, str(state_file), None, ['factiongen'])
+    handled, err, emits, broadcasts = handle_faction_command(w, str(state_file), None, ['factiongen'])
     assert handled and err is None
 
     # Collect created room ids

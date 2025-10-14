@@ -9,7 +9,9 @@ other players in the same room. The caller (server.py) is responsible for sendin
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
+from concurrency_utils import atomic_many
 from persistence_utils import save_world
+from rate_limiter import check_rate_limit, OperationType
 
 
 def create_account_and_login(
@@ -30,11 +32,27 @@ def create_account_and_login(
     """
     emits: List[dict] = []
     broadcasts: List[Tuple[str, dict]] = []
+    
+    # Rate limiting: prevent account creation spam and brute force attempts
+    if not check_rate_limit(sid, OperationType.MODERATE, "account_creation"):
+        return (False, 'You are creating accounts too quickly. '
+                       'Please wait before creating another account.', emits, broadcasts)
 
     try:
-        # First user becomes admin by default. In Creative Mode, everyone is admin.
-        grant_admin = (len(world.users) == 0) or bool(getattr(world, 'debug_creative_mode', False))
-        user = world.create_user(display_name, password, description, is_admin=grant_admin)
+        # Protect creation + session/admin updates as one atomic step
+        with atomic_many(['world', 'sessions', 'admins']):
+            # First user becomes admin by default. In Creative Mode, everyone is admin.
+            grant_admin = (
+                (len(world.users) == 0)
+                or bool(getattr(world, 'debug_creative_mode', False))
+            )
+            user = world.create_user(display_name, password, description, is_admin=grant_admin)
+            # Place into the world
+            player = world.add_player(sid, sheet=user.sheet)
+            sessions[sid] = user.user_id
+            if user.is_admin:
+                admins.add(sid)
+        # Persist after atomic section (best-effort, debounced)
         try:
             save_world(world, state_path, debounced=True)
         except Exception:
@@ -42,12 +60,6 @@ def create_account_and_login(
             pass
     except Exception as e:
         return False, f"Failed to create user: {e}", emits, broadcasts
-
-    # Place into the world
-    player = world.add_player(sid, sheet=user.sheet)
-    sessions[sid] = user.user_id
-    if user.is_admin:
-        admins.add(sid)
 
     emits.append({'type': 'system', 'content': f'{user.display_name} arrives.'})
     # Greet with world context if configured
@@ -66,7 +78,13 @@ def create_account_and_login(
         pass
     emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
     # Announce arrival to others
-    broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} enters."}))
+    broadcasts.append((
+        player.room_id,
+        {
+            'type': 'system',
+            'content': f"{player.sheet.display_name} enters.",
+        },
+    ))
     return True, None, emits, broadcasts
 
 
@@ -84,7 +102,13 @@ def login_existing(
     """
     emits: List[dict] = []
     broadcasts: List[Tuple[str, dict]] = []
+    
+    # Rate limiting: prevent brute force login attempts
+    if not check_rate_limit(sid, OperationType.MODERATE, "login_attempt"):
+        return (False, 'You are attempting to login too frequently. '
+                       'Please wait before trying again.', emits, broadcasts)
 
+    # Validate credentials outside of mutation lock
     user = world.get_user_by_display_name(display_name)
     if not user or user.password != password:
         return False, 'Invalid name or password.', emits, broadcasts
@@ -102,7 +126,10 @@ def login_existing(
                     break
             if not spawn_room_id:
                 # Bed no longer exists
-                info_msgs.append("Your bed was destroyed while you were gone. You wake up in the start room.")
+                info_msgs.append(
+                    "Your bed was destroyed while you were gone. "
+                    "You wake up in the start room."
+                )
                 # Clear the home bed and persist best-effort
                 try:
                     user.home_bed_uuid = None
@@ -111,24 +138,17 @@ def login_existing(
                     pass
     except Exception:
         pass
-    player = world.add_player(sid, sheet=user.sheet, room_id=spawn_room_id)
-    sessions[sid] = user.user_id
-    # In Creative Mode, ensure the user is an admin (persist change best-effort)
-    if getattr(world, 'debug_creative_mode', False) and not getattr(user, 'is_admin', False):
-        try:
-            user.is_admin = True
+    with atomic_many(['world', 'sessions', 'admins']):
+        player = world.add_player(sid, sheet=user.sheet, room_id=spawn_room_id)
+        sessions[sid] = user.user_id
+        # In Creative Mode, ensure the user is an admin (persist change best-effort)
+        if getattr(world, 'debug_creative_mode', False) and not getattr(user, 'is_admin', False):
             try:
-                # state_path isn't available here; rely on caller's save cadence elsewhere
-                # but attempt attribute presence only.
-                if hasattr(world, 'save_to_file') and hasattr(world, 'to_dict'):
-                    # No path here to write; server typically persists on mutations elsewhere.
-                    pass
+                user.is_admin = True
             except Exception:
                 pass
-        except Exception:
-            pass
-    if user.is_admin or getattr(world, 'debug_creative_mode', False):
-        admins.add(sid)
+        if user.is_admin or getattr(world, 'debug_creative_mode', False):
+            admins.add(sid)
 
     emits.append({'type': 'system', 'content': f'Welcome back, {user.display_name}.'})
     for m in info_msgs:
@@ -148,5 +168,11 @@ def login_existing(
     except Exception:
         pass
     emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
-    broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} enters."}))
+    broadcasts.append((
+        player.room_id,
+        {
+            'type': 'system',
+            'content': f"{player.sheet.display_name} enters.",
+        },
+    ))
     return True, None, emits, broadcasts

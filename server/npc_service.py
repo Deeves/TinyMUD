@@ -14,6 +14,13 @@ Backward compatibility:
     - /npc setdesc <npc name> | <description>
     - /npc setrelation <source name> | <relationship type> | <target name>
     - /npc removerelations <source name> | <target name>
+
+Service Contract:
+    All public functions return 4-tuple: (handled, error, emits, broadcasts)
+    - handled: bool - whether the command was recognized
+    - error: str | None - error message if any
+    - emits: List[dict] - messages to send to the acting player
+    - broadcasts: List[Tuple[str, dict]] - (room_id, message) pairs for room broadcasts
 """
 
 from __future__ import annotations
@@ -123,10 +130,15 @@ def _normalize_room_input(world, sid: str | None, typed: str) -> tuple[bool, str
     return True, None, t
 
 
-def handle_npc_command(world, state_path: str, sid: str | None, args: list[str]) -> Tuple[bool, str | None, List[dict]]:
+def handle_npc_command(world, state_path: str, sid: str | None, args: list[str]) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+    """Handle /npc commands.
+    
+    Returns: (handled, error, emits, broadcasts)
+    """
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     if not args:
-        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations|familygen> ...', emits
+        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations|familygen> ...', emits, broadcasts
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -138,22 +150,22 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             try:
                 room_in, name_in, desc_in = _parse_pipe_parts(parts_joined, expected=3)
             except Exception:
-                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
+                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits, broadcasts
             room_in = _strip_quotes(room_in)
             name_in = _strip_quotes(name_in)
             desc_in = desc_in.strip()
             if not room_in or not name_in:
-                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
+                return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits, broadcasts
             okn, errn, norm = _normalize_room_input(world, sid, room_in)
             if not okn:
-                return True, errn, emits
+                return True, errn, emits, broadcasts
             val = norm if isinstance(norm, str) else room_in
             rok, rerr, room_res = _resolve_room_id(world, val)
             if not rok or not room_res:
-                return True, (rerr or f"Room '{room_in}' not found."), emits
+                return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
             room = world.rooms.get(room_res)
             if not room:
-                return True, f"Room '{room_res}' not found.", emits
+                return True, f"Room '{room_res}' not found.", emits, broadcasts
             npc_name = name_in
             room.npcs.add(npc_name)
             # Ensure NPC sheet with provided description (create or update)
@@ -171,23 +183,23 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
                 pass
             _save_silent(world, state_path)
             emits.append({'type': 'system', 'content': f"NPC '{npc_name}' added to room '{room_res}'."})
-            return True, None, emits
+            return True, None, emits, broadcasts
 
         # Legacy syntax fallback: /npc add <room_id> <npc name...>
         if len(sub_args) < 2:
-            return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits
+            return True, 'Usage: /npc add <room name> | <npc name> | <npc description>', emits, broadcasts
         room_id = _strip_quotes(sub_args[0])
         npc_name = _strip_quotes(" ".join(sub_args[1:]).strip())
         okn, errn, norm = _normalize_room_input(world, sid, room_id)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else room_id
         rok, rerr, room_res = _resolve_room_id(world, val)
         if not rok or not room_res:
-            return True, (rerr or f"Room '{room_id}' not found."), emits
+            return True, (rerr or f"Room '{room_id}' not found."), emits, broadcasts
         room = world.rooms.get(room_res)
         if not room:
-            return True, f"Room '{room_res}' not found.", emits
+            return True, f"Room '{room_res}' not found.", emits, broadcasts
         room.npcs.add(npc_name)
         if npc_name not in world.npc_sheets:
             world.npc_sheets[npc_name] = CharacterSheet(display_name=npc_name, description=f"An NPC named {npc_name}.")
@@ -197,7 +209,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             pass
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"NPC '{npc_name}' added to room '{room_res}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'familygen':
         # /npc familygen <room name> | <target npc name> | <relationship>
@@ -205,25 +217,25 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             parts_joined = " ".join(sub_args)
             room_in, target_in, rel_in = _parse_pipe_parts(parts_joined, expected=3)
         except Exception:
-            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits
+            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits, broadcasts
 
         room_in = _strip_quotes(room_in)
         target_name = _strip_quotes(target_in)
         relationship = rel_in.strip()
         if not room_in or not target_name or not relationship:
-            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits
+            return True, 'Usage: /npc familygen <room name> | <target npc name> | <relationship>', emits, broadcasts
 
         # Resolve room (support 'here')
         okn, errn, norm = _normalize_room_input(world, sid, room_in)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else room_in
         rok, rerr, room_res = _resolve_room_id(world, val)
         if not rok or not room_res:
-            return True, (rerr or f"Room '{room_in}' not found."), emits
+            return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
         room = world.rooms.get(room_res)
         if not room:
-            return True, f"Room '{room_res}' not found.", emits
+            return True, f"Room '{room_res}' not found.", emits, broadcasts
 
         # Ensure target NPC sheet exists (create if missing)
         target_sheet = world.npc_sheets.get(target_name)
@@ -330,7 +342,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             f"Relationship: {target_sheet.display_name} ⇄ {new_name} as [{relationship}]\n"
             f"Description: {new_desc}"
         )})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'remove':
         # New default: remove by name from the admin's current room
@@ -339,59 +351,59 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             npc_in = _strip_quotes(parts_joined)
             player = world.players.get(sid)
             if not player:
-                return True, 'Please authenticate first.', emits
+                return True, 'Please authenticate first.', emits, broadcasts
             room = world.rooms.get(player.room_id)
             if not room:
-                return True, 'You are nowhere.', emits
+                return True, 'You are nowhere.', emits, broadcasts
             # Fuzzy resolve within current room
             resolved = _resolve_npcs_in_room(room, [npc_in])
             if not resolved:
-                return True, f"NPC '{npc_in}' not found in this room.", emits
+                return True, f"NPC '{npc_in}' not found in this room.", emits, broadcasts
             npc_name = resolved[0]
             room.npcs.discard(npc_name)
             _save_silent(world, state_path)
             emits.append({'type': 'system', 'content': f"NPC '{npc_name}' removed from room '{room.id}'."})
-            return True, None, emits
+            return True, None, emits, broadcasts
 
         # Legacy/explicit: /npc remove <room_id> | <npc name>  or  /npc remove <room_id> <npc name...>
         if '|' in parts_joined:
             try:
                 room_in, npc_in = _parse_pipe_parts(parts_joined, expected=2)
             except Exception:
-                return True, 'Usage: /npc remove <room_id> | <npc name>', emits
+                return True, 'Usage: /npc remove <room_id> | <npc name>', emits, broadcasts
             room_in = _strip_quotes(room_in)
             npc_in = _strip_quotes(npc_in)
         else:
             if len(sub_args) < 2:
-                return True, 'Usage: /npc remove <npc name>', emits
+                return True, 'Usage: /npc remove <npc name>', emits, broadcasts
             room_in = _strip_quotes(sub_args[0])
             npc_in = _strip_quotes(" ".join(sub_args[1:]).strip())
         okn, errn, norm = _normalize_room_input(world, sid, room_in)
         if not okn:
-            return True, errn, emits
+            return True, errn, emits, broadcasts
         val = norm if isinstance(norm, str) else room_in
         rok, rerr, room_res = _resolve_room_id(world, val)
         if not rok or not room_res:
-            return True, (rerr or f"Room '{room_in}' not found."), emits
+            return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
         room = world.rooms.get(room_res)
         if not room:
-            return True, f"Room '{room_res}' not found.", emits
+            return True, f"Room '{room_res}' not found.", emits, broadcasts
         # Try fuzzy resolve in that room
         resolved = _resolve_npcs_in_room(room, [npc_in])
         npc_name = resolved[0] if resolved else npc_in
         if npc_name not in room.npcs:
-            return True, f"NPC '{npc_in}' not in room '{room_res}'.", emits
+            return True, f"NPC '{npc_in}' not in room '{room_res}'.", emits, broadcasts
         room.npcs.discard(npc_name)
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"NPC '{npc_name}' removed from room '{room_res}'."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'setdesc':
         try:
             parts_joined = " ".join(sub_args)
             npc_name, desc = _parse_pipe_parts(parts_joined, expected=2)
         except Exception:
-            return True, 'Usage: /npc setdesc <npc name> | <description>', emits
+            return True, 'Usage: /npc setdesc <npc name> | <description>', emits, broadcasts
         npc_name = _strip_quotes(npc_name)
         sheet = world.npc_sheets.get(npc_name)
         if not sheet:
@@ -405,7 +417,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
         sheet.description = desc
         _save_silent(world, state_path)
         emits.append({'type': 'system', 'content': f"NPC '{npc_name}' description updated."})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'setrelation':
         # /npc setrelation <source name> | <relationship type> | <target name> [| mutual]
@@ -425,13 +437,13 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
                 src_in, rel_in, tgt_in, mutual_raw = parts[:4]
                 mutual_flag = str(mutual_raw).strip().lower() in ("mutual", "yes", "true", "both")
         except Exception:
-            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits
+            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits, broadcasts
 
         src_name = _strip_quotes(src_in)
         tgt_name = _strip_quotes(tgt_in)
         rel_type = rel_in.strip()
         if not src_name or not tgt_name or not rel_type:
-            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits
+            return True, 'Usage: /npc setrelation <source name> | <relationship type> | <target name> | mutual', emits, broadcasts
 
         # Resolve entity IDs for source and target. Entities can be: connected players, any user by display name, or NPC by name.
         def resolve_entity_id(name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -485,10 +497,10 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
 
         src_id, src_resolved = resolve_entity_id(src_name)
         if not src_id:
-            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits
+            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits, broadcasts
         tgt_id, tgt_resolved = resolve_entity_id(tgt_name)
         if not tgt_id:
-            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits
+            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits, broadcasts
 
         # Set directed relationship
         rels: Dict[str, Dict[str, str]] = getattr(world, 'relationships', {})
@@ -509,7 +521,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             emits.append({'type': 'system', 'content': f"Relationship set (mutual): {src_disp} ⇄ {tgt_disp} as [{rel_type}]"})
         else:
             emits.append({'type': 'system', 'content': f"Relationship set: {src_disp} —[{rel_type}]→ {tgt_disp}"})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
     if sub == 'removerelations':
         # /npc removerelations <source> | <target>
@@ -517,12 +529,12 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             parts_joined = " ".join(sub_args)
             src_in, tgt_in = _parse_pipe_parts(parts_joined, expected=2)
         except Exception:
-            return True, 'Usage: /npc removerelations <source> | <target>', emits
+            return True, 'Usage: /npc removerelations <source> | <target>', emits, broadcasts
 
         src_name = _strip_quotes(src_in)
         tgt_name = _strip_quotes(tgt_in)
         if not src_name or not tgt_name:
-            return True, 'Usage: /npc removerelations <source> | <target>', emits
+            return True, 'Usage: /npc removerelations <source> | <target>', emits, broadcasts
 
         # Reuse resolver from setrelation
         def resolve_entity_id(name: str) -> Tuple[Optional[str], Optional[str]]:
@@ -569,10 +581,10 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
 
         src_id, src_resolved = resolve_entity_id(src_name)
         if not src_id:
-            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits
+            return True, f"Source '{src_name}' not found as a player, user, or NPC.", emits, broadcasts
         tgt_id, tgt_resolved = resolve_entity_id(tgt_name)
         if not tgt_id:
-            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits
+            return True, f"Target '{tgt_name}' not found as a player, user, or NPC.", emits, broadcasts
 
         rels: Dict[str, Dict[str, str]] = getattr(world, 'relationships', {})
         changed = False
@@ -600,9 +612,9 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             emits.append({'type': 'system', 'content': f"Removed relationships between {src_disp} and {tgt_disp}."})
         else:
             emits.append({'type': 'system', 'content': 'No relationships existed to remove.'})
-        return True, None, emits
+        return True, None, emits, broadcasts
 
-    return False, None, emits
+    return False, None, emits, broadcasts
 
 
 def _save_silent(world, state_path: str) -> None:

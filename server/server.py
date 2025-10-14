@@ -164,6 +164,7 @@ from ai_utils import safety_settings_for_level as _safety_settings_for_level
 from debounced_saver import DebouncedSaver
 from persistence_utils import save_world, flush_all_saves
 from world import World, CharacterSheet, Room, User
+from concurrency_utils import atomic_many
 from look_service import format_look as _format_look, resolve_object_in_room as _resolve_object_in_room, format_object_summary as _format_object_summary
 from account_service import create_account_and_login, login_existing
 from movement_service import move_through_door, move_stairs, teleport_player
@@ -193,6 +194,11 @@ from object_service import (
 )
 from setup_service import begin_setup as _setup_begin, handle_setup_input as _setup_handle
 from auth_wizard_service import handle_interactive_auth as _auth_handle
+# Rate limiting system to protect against malicious client spam
+from rate_limiter import (
+    check_rate_limit, OperationType, _SimpleRateLimiter,
+    get_rate_limit_status, reset_rate_limit, cleanup_rate_limiter
+)
 # Safe execution utilities - replaces bare 'except Exception: pass' patterns with logging
 from safe_utils import safe_call, safe_call_with_default
 
@@ -618,47 +624,7 @@ barter_sessions: dict[str, dict] = {}  # sid -> active barter flow state
 trade_sessions: dict[str, dict] = {}   # sid -> active currency trade flow state
 
 
-# --- Simple per-SID token-bucket rate limiter ---
-class _SimpleRateLimiter:
-    """Tiny token-bucket limiter keyed by sid.
 
-    Defaults can be tuned via env:
-      - MUD_RATE_CAPACITY: max burst tokens (default 5)
-      - MUD_RATE_REFILL_PER_SEC: tokens per second (default 2)
-    """
-    _buckets: dict[str, dict] = {}
-    _capacity = int(_env_str('MUD_RATE_CAPACITY', '5'))
-    _refill_per_sec = float(_env_str('MUD_RATE_REFILL_PER_SEC', '2'))
-
-    def __init__(self, sid: str | None) -> None:
-        self.sid = sid or 'anon'
-
-    @classmethod
-    def get(cls, sid: str | None) -> "_SimpleRateLimiter":
-        return cls(sid)
-
-    def allow(self) -> bool:
-        # Feature gate: disabled unless explicitly enabled via env
-        try:
-            if (os.getenv('MUD_RATE_ENABLE') or '0').strip().lower() not in ('1', 'true', 'yes', 'on'):
-                return True
-        except Exception:
-            return True
-        import time as _time
-        sid = self.sid
-        now = _time.time()
-        b = self._buckets.get(sid)
-        if not b:
-            b = {'t': now, 'tokens': float(self._capacity)}
-            self._buckets[sid] = b
-        # Refill
-        elapsed = max(0.0, now - float(b['t']))
-        b['t'] = now
-        b['tokens'] = min(float(self._capacity), float(b['tokens']) + elapsed * float(self._refill_per_sec))
-        if b['tokens'] >= 1.0:
-            b['tokens'] -= 1.0
-            return True
-        return False
 
 
 # --- NPC Needs & Heartbeat (Hunger/Thirst/Sleep with AP) ---
@@ -1429,6 +1395,12 @@ def npc_think(npc_name: str) -> None:
         }
         import json as _json
         prompt = system_prompt + "\n" + _json.dumps(user_prompt, ensure_ascii=False)
+        # Rate limiting: protect against spam of expensive GOAP planning operations
+        if not check_rate_limit(None, OperationType.HEAVY, f"npc_goap_plan_{npc_name}"):
+            # Rate limited - fall back to offline planner
+            sheet.plan_queue = _npc_offline_plan(npc_name, room, sheet)
+            return
+
         # Reuse the shared helper for safety settings (handles SDK availability differences)
         try:
             safety = _safety_settings_for_level(getattr(world, 'safety_level', 'G'))
@@ -2292,6 +2264,21 @@ def _send_npc_reply(npc_name: str, player_message: str, sid: str | None, *, priv
                 broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
         return
 
+    # Rate limiting: protect against spam of expensive AI operations
+    if not check_rate_limit(sid, OperationType.HEAVY, f"npc_chat_{npc_name}"):
+        # Rate limited - send a brief offline fallback instead
+        npc_payload = {
+            'type': 'npc',
+            'name': npc_name,
+            'content': f"[i]{npc_name} considers your words thoughtfully but remains silent.[/i]"
+        }
+        emit(MESSAGE_OUT, npc_payload)
+        if (not private_to_sender_only) and sid and sid in world.players:
+            player_obj = world.players.get(sid)
+            if player_obj:
+                broadcast_to_room(player_obj.room_id, npc_payload, exclude_sid=sid)
+        return
+
     # Build safety settings per world configuration
     def _safety_for_level() -> list | None:
         return _safety_settings_for_level(getattr(world, 'safety_level', 'G'))
@@ -2403,24 +2390,33 @@ def handle_disconnect():
                     }, exclude_sid=sid)
             except Exception:
                 pass
-            # If the player was an admin, revoke their admin status on disconnect
-            if sid in admins:
-                admins.discard(sid)
-            # Drop session mapping
-            sessions.pop(sid, None)
-            # Drop any pending auth flow
-            try:
-                auth_sessions.pop(sid, None)
-            except Exception:
-                pass
-            try:
-                barter_sessions.pop(sid, None)
-            except Exception:
-                pass
-            try:
-                trade_sessions.pop(sid, None)
-            except Exception:
-                pass
+            # Clean up all session state atomically to prevent race conditions
+            with atomic_many([
+                'sessions', 'admins', 'auth_sessions', 'barter_sessions',
+                'trade_sessions', 'interaction_sessions', 'setup_sessions'
+            ]):
+                # If the player was an admin, revoke their admin status on disconnect
+                if sid in admins:
+                    admins.discard(sid)
+                # Drop session mapping
+                sessions.pop(sid, None)
+                # Drop any pending auth flow
+                try:
+                    auth_sessions.pop(sid, None)
+                except Exception:
+                    pass
+                try:
+                    barter_sessions.pop(sid, None)
+                except Exception:
+                    pass
+                try:
+                    trade_sessions.pop(sid, None)
+                except Exception:
+                    pass
+                try:
+                    interaction_sessions.pop(sid, None)
+                except Exception:
+                    pass
             world.remove_player(sid)
     except Exception:
         pass
@@ -2507,10 +2503,15 @@ def handle_message(data):
                 return
         # Handle world setup wizard if active for this sid (delegated to setup_service)
         if sid and sid in world_setup_sessions:
-            handled, emits_list = _setup_handle(world, STATE_PATH, sid, player_message, world_setup_sessions)
+            handled, err, emits_list, broadcasts_list = _setup_handle(world, STATE_PATH, sid, player_message, world_setup_sessions)
             if handled:
+                if err:
+                    emit(MESSAGE_OUT, {'type': 'error', 'content': err})
+                    return
                 for payload in emits_list:
                     emit(MESSAGE_OUT, payload)
+                for room_id, payload in broadcasts_list:
+                    broadcast_to_room(room_id, payload, exclude_sid=sid)
                 return
 
         # Trade / barter interactive flows

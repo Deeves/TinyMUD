@@ -11,10 +11,18 @@ Mission briefing:
 Great first change ideas:
 - Add more template fields? Just thread them through here.
 - Expand fuzzy matching for template keys or add categories. Easy win.
+
+Service Contract:
+    All public functions return 4-tuple: (handled, error, emits, broadcasts)
+    - handled: bool - whether the command was recognized
+    - error: str | None - error message if any
+    - emits: List[dict] - messages to send to the acting player
+    - broadcasts: List[Tuple[str, dict]] - (room_id, message) pairs for room broadcasts
 """
 
 from typing import List, Tuple
 from persistence_utils import save_world
+from rate_limiter import check_rate_limit, OperationType
 
 from id_parse_utils import (
     strip_quotes as _strip_quotes,
@@ -39,32 +47,38 @@ def _resolve_room_id_fuzzy(world, sid: str | None, typed: str) -> tuple[bool, st
     return ok, err, rid
 
 
-def create_object(world, state_path: str, sid: str | None, args: list[str]) -> tuple[bool, str | None, List[dict]]:
+def create_object(world, state_path: str, sid: str | None, args: list[str]) -> tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     """Create a concrete Object instance in a room, optionally from a template.
 
     Syntax: /object createobject <room> | <display name> | <description> | <tags csv OR template_key>
-    Returns: (handled, error, emits)
+    Returns: (handled, error, emits, broadcasts)
     """
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
+    
+    # Rate limiting: object creation can be expensive and spammable
+    if not check_rate_limit(sid, OperationType.MODERATE, "object_creation"):
+        return (True, 'You are creating objects too quickly. '
+                      'Please wait before creating another object.', emits, broadcasts)
     try:
         joined = " ".join(args)
         p_room, p_name, p_desc, p_third = _pipe_parts(joined, expected=4)
     except Exception:
-        return True, 'Usage: /object createobject <room> | <display name> | <description> | <tags or template_key>', emits
+        return True, 'Usage: /object createobject <room> | <display name> | <description> | <tags or template_key>', emits, broadcasts
 
     name = _strip_quotes(p_name or "").strip()
     desc = _strip_quotes(p_desc or "").strip()
     third = (p_third or "").strip()
     if not name:
-        return True, 'Display name required.', emits
+        return True, 'Display name required.', emits, broadcasts
 
     room_input = _strip_quotes(p_room or "").strip()
     rok, rerr, rid = _resolve_room_id_fuzzy(world, sid, room_input or 'here')
     if not rok or not rid:
-        return True, (rerr or 'Room not found.'), emits
+        return True, (rerr or 'Room not found.'), emits, broadcasts
     room = world.rooms.get(rid)
     if not room:
-        return True, 'Room not found.', emits
+        return True, 'Room not found.', emits, broadcasts
 
     from world import Object as _Obj
     new_obj: _Obj
@@ -84,7 +98,7 @@ def create_object(world, state_path: str, sid: str | None, args: list[str]) -> t
     if template_key:
         base = tpl_store.get(template_key)
         if not base:
-            return True, f"Template '{third}' not found.", emits
+            return True, f"Template '{third}' not found.", emits, broadcasts
         try:
             base_dict = base.to_dict()
             new_obj = _Obj.from_dict(base_dict)
@@ -131,7 +145,7 @@ def create_object(world, state_path: str, sid: str | None, args: list[str]) -> t
 
     how = f"from template '{template_key}'" if used_template and template_key else ""
     emits.append({'type': 'system', 'content': f"Created object '{new_obj.display_name}' {how} in room {rid}."})
-    return True, None, emits
+    return True, None, emits, broadcasts
 
 
 def list_templates(world) -> list[str]:
@@ -154,15 +168,20 @@ def view_template(world, key: str) -> tuple[bool, str | None, str | None]:
     return True, None, raw
 
 
-def delete_template(world, state_path: str, key: str) -> tuple[bool, str | None, List[dict]]:
+def delete_template(world, state_path: str, key: str) -> tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
+    """Delete an object template.
+    
+    Returns: (handled, error, emits, broadcasts)
+    """
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     store = getattr(world, 'object_templates', {})
     if key not in store:
-        return True, f"Template '{key}' not found.", emits
+        return True, f"Template '{key}' not found.", emits, broadcasts
     try:
         del store[key]
         save_world(world, state_path, debounced=True)
         emits.append({'type': 'system', 'content': f"Deleted template '{key}'."})
     except Exception as e:
-        return True, f"Failed to delete template: {e}", emits
-    return True, None, emits
+        return True, f"Failed to delete template: {e}", emits, broadcasts
+    return True, None, emits, broadcasts

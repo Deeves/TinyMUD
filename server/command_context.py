@@ -21,12 +21,20 @@ Future niceties (not done yet):
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Set
+from typing import Any, Callable, Dict, Set, Protocol
+
+
+class BroadcastFn(Protocol):
+    """Protocol for broadcast_to_room with optional exclude_sid.
+    
+    Supports both calling patterns:
+      - broadcast_to_room(room_id, payload, exclude_sid=sid)  # keyword
+      - broadcast_to_room(room_id, payload, sid)             # positional
+    """
+    def __call__(self, room_id: str, payload: Dict[str, Any], exclude_sid: str | None = None) -> None: ...
 
 
 EmitFn = Callable[[str, Dict[str, Any]], None]
-# Match server.broadcast_to_room(room_id, payload, exclude_sid=None)
-BroadcastFn = Callable[[str, Dict[str, Any], str | None], None]
 
 
 @dataclass(slots=True)
@@ -58,9 +66,9 @@ class CommandContext:
 
     # Services / operations
     teleport_player: Callable[..., tuple[bool, str | None, list, list]]
-    handle_room_command: Callable[..., tuple[bool, str | None, list]]
-    handle_npc_command: Callable[..., tuple[bool, str | None, list]]
-    handle_faction_command: Callable[..., tuple[bool, str | None, list]]
+    handle_room_command: Callable[..., tuple[bool, str | None, list, list]]
+    handle_npc_command: Callable[..., tuple[bool, str | None, list, list]]
+    handle_faction_command: Callable[..., tuple[bool, str | None, list, list]]
 
     # Admin / purge helpers
     purge_prompt: Callable[[], dict]

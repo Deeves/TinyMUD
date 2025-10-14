@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import uuid
-from typing import Dict, Set, Optional, List
+from typing import Dict, Set, Optional, List, Any
 from safe_utils import safe_call, safe_call_with_default
 
 
@@ -342,29 +342,50 @@ class CharacterSheet:
 
     @staticmethod
     def from_dict(data: dict) -> "CharacterSheet":
-        # Backfill defaults for worlds saved before needs existed
-        currency = data.get("currency")
-        hunger = data.get("hunger")
-        thirst = data.get("thirst")
-        social = data.get("socialization")
-        sleep = data.get("sleep")
-        sleep_ticks = data.get("sleeping_ticks_remaining")
-        sleep_bed = data.get("sleeping_bed_uuid")
-        ap = data.get("action_points")
-        pq = data.get("plan_queue")
+        """Load CharacterSheet from dictionary data.
+        
+        Note: Backfill logic for needs system has been moved to Migration002.
+        This method now assumes data has been properly migrated.
+        """
+        # Helper functions for safe type conversion
+        def _safe_int(val: Any, default: int) -> int:
+            if val is None:
+                return default
+            if isinstance(val, int):
+                return val
+            if isinstance(val, str):
+                try:
+                    return int(val)
+                except ValueError:
+                    return default
+            return default
+        
+        def _safe_float(val: Any, default: float) -> float:
+            if val is None:
+                return default
+            if isinstance(val, (int, float)):
+                return float(val)
+            if isinstance(val, str):
+                try:
+                    return float(val)
+                except ValueError:
+                    return default
+            return default
+        
         return CharacterSheet(
             display_name=data.get("display_name", "Unnamed"),
             description=data.get("description", "A nondescript adventurer."),
             inventory=Inventory.from_dict(data.get("inventory", {})),
-            currency=int(currency) if isinstance(currency, (int, str)) and str(currency).lstrip('-').isdigit() else 0,
-            hunger=float(hunger) if isinstance(hunger, (int, float, str)) and str(hunger).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
-            thirst=float(thirst) if isinstance(thirst, (int, float, str)) and str(thirst).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
-            socialization=float(social) if isinstance(social, (int, float, str)) and str(social).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
-            sleep=float(sleep) if isinstance(sleep, (int, float, str)) and str(sleep).replace('.', '', 1).lstrip('-').isdigit() else 100.0,
-            sleeping_ticks_remaining=int(sleep_ticks) if isinstance(sleep_ticks, (int, str)) and str(sleep_ticks).lstrip('-').isdigit() else 0,
-            sleeping_bed_uuid=str(sleep_bed) if isinstance(sleep_bed, str) and sleep_bed else None,
-            action_points=int(ap) if isinstance(ap, (int, str)) and str(ap).lstrip('-').isdigit() else 0,
-            plan_queue=list(pq) if isinstance(pq, list) else [],
+            currency=_safe_int(data.get("currency"), 0),
+            # Needs system fields - migrations should have ensured these exist
+            hunger=_safe_float(data.get("hunger"), 100.0),
+            thirst=_safe_float(data.get("thirst"), 100.0),
+            socialization=_safe_float(data.get("socialization"), 100.0),
+            sleep=_safe_float(data.get("sleep"), 100.0),
+            sleeping_ticks_remaining=_safe_int(data.get("sleeping_ticks_remaining"), 0),
+            sleeping_bed_uuid=str(data.get("sleeping_bed_uuid")) if data.get("sleeping_bed_uuid") else None,
+            action_points=_safe_int(data.get("action_points"), 0),
+            plan_queue=list(data.get("plan_queue", [])),
         )
 
 
@@ -573,75 +594,8 @@ class Room:
                         room.objects[obj.uuid] = obj
         except Exception:
             pass
-        # Backfill missing door IDs for existing door names
-        for dname in list(room.doors.keys()):
-            if dname not in room.door_ids:
-                room.door_ids[dname] = str(uuid.uuid4())
-        # Backfill stairs IDs when targets are set but ids missing
-        if room.stairs_up_to and not room.stairs_up_id:
-            room.stairs_up_id = str(uuid.uuid4())
-        if room.stairs_down_to and not room.stairs_down_id:
-            room.stairs_down_id = str(uuid.uuid4())
-        # Ensure door objects exist for every named door
-        try:
-            for dname, target_room in (room.doors or {}).items():
-                oid = room.door_ids.get(dname) or str(uuid.uuid4())
-                room.door_ids[dname] = oid
-                if oid not in room.objects:
-                    desc = f"A doorway named '{dname}'."
-                    obj = Object(
-                        display_name=dname,
-                        description=desc,
-                        object_tags={"Immovable", "Travel Point"},
-                        link_target_room_id=target_room,
-                    )
-                    # Force object's uuid to match oid for stable linking
-                    obj.uuid = oid
-                    room.objects[oid] = obj
-                else:
-                    # Ensure tags include immovable + travel point and link target is set
-                    o = room.objects[oid]
-                    o.object_tags.update({"Immovable", "Travel Point"})
-                    if not getattr(o, 'link_target_room_id', None):
-                        o.link_target_room_id = target_room
-        except Exception:
-            pass
-        # Ensure stairs objects exist (up/down) when linked
-        try:
-            if room.stairs_up_to and room.stairs_up_id:
-                oid = room.stairs_up_id
-                if oid not in room.objects:
-                    obj = Object(
-                        display_name="stairs up",
-                        description="A staircase leading up.",
-                        object_tags={"Immovable", "Travel Point"},
-                        link_target_room_id=room.stairs_up_to,
-                    )
-                    obj.uuid = oid
-                    room.objects[oid] = obj
-                else:
-                    o = room.objects[oid]
-                    o.object_tags.update({"Immovable", "Travel Point"})
-                    if not getattr(o, 'link_target_room_id', None):
-                        o.link_target_room_id = room.stairs_up_to
-            if room.stairs_down_to and room.stairs_down_id:
-                oid = room.stairs_down_id
-                if oid not in room.objects:
-                    obj = Object(
-                        display_name="stairs down",
-                        description="A staircase leading down.",
-                        object_tags={"Immovable", "Travel Point"},
-                        link_target_room_id=room.stairs_down_to,
-                    )
-                    obj.uuid = oid
-                    room.objects[oid] = obj
-                else:
-                    o = room.objects[oid]
-                    o.object_tags.update({"Immovable", "Travel Point"})
-                    if not getattr(o, 'link_target_room_id', None):
-                        o.link_target_room_id = room.stairs_down_to
-        except Exception:
-            pass
+        # Note: UUID backfill and travel point object creation has been moved to migrations.
+        # Migration003 handles UUID generation, Migration004 handles travel point objects.
         return room
 
 
@@ -677,6 +631,9 @@ class World:
         # Debug / Creative Mode: when True, all users are admins automatically.
         # Persisted; can be toggled at server startup. Used by account/login flows.
         self.debug_creative_mode = False
+        # Schema version for migrations: tracks the data format version
+        # New worlds start at latest version; old worlds are migrated on load
+        self.world_version: int = 0  # Will be set to latest during save/load
 
     def ensure_default_room(self) -> Optional[Room]:
         """No longer auto-creates a default room; setup wizard defines the first room."""
@@ -750,9 +707,17 @@ class World:
             return "You are nowhere."
         return room.describe(self, viewer_sid=sid)
 
-    # --- Persistence: only rooms and npc_sheets ---
+    # --- Persistence: rooms, npc_sheets, and all world data with versioning ---
     def to_dict(self) -> dict:
+        # Import here to avoid circular dependency
+        from world_migrations import migration_registry
+        
+        # Always save at the latest schema version
+        latest_version = migration_registry.get_latest_version()
+        
         return {
+            # Schema version must be first for clarity
+            "world_version": latest_version,
             "rooms": {rid: room.to_dict() for rid, room in self.rooms.items()},
             "npc_sheets": {name: sheet.to_dict() for name, sheet in self.npc_sheets.items()},
             "object_templates": {key: obj.to_dict() for key, obj in self.object_templates.items()},
@@ -775,20 +740,50 @@ class World:
 
     @classmethod
     def from_dict(cls, data: dict) -> "World":
+        """Load World from dictionary data, applying migrations as needed.
+        
+        This method now uses the migration system to handle schema evolution
+        cleanly, rather than ad-hoc backfill logic scattered throughout.
+        """
+        # Import here to avoid circular dependency
+        from world_migrations import migration_registry
+        
+        # Apply any needed migrations to bring data up to current schema
+        try:
+            if migration_registry.needs_migration(data):
+                current_version = migration_registry.get_current_version(data)
+                latest_version = migration_registry.get_latest_version()
+                print(f"Migrating world data from version {current_version} to {latest_version}")
+                data = migration_registry.migrate(data)
+            else:
+                current_version = migration_registry.get_current_version(data)
+                print(f"World data is current at version {current_version}")
+        except Exception as e:
+            # Migration failed - log error but continue with raw data for robustness
+            print(f"Migration failed, loading raw data: {e}")
+        
+        # Create new world instance
         w = cls()
+        
+        # Set version from migrated data
+        w.world_version = data.get("world_version", 0)
+        
+        # Load rooms (migrations should have cleaned up any issues)
         rooms = data.get("rooms", {})
         if isinstance(rooms, dict):
             for rid, rdata in rooms.items():
                 if isinstance(rdata, dict):
                     room = Room.from_dict(rdata)
-                    # Ensure mapping by its own id
                     w.rooms[room.id] = room
+        
+        # Load NPC sheets (migrations should have backfilled needs)
         npc_sheets = data.get("npc_sheets", {})
         if isinstance(npc_sheets, dict):
             for name, sdata in npc_sheets.items():
                 if isinstance(sdata, dict):
                     w.npc_sheets[name] = CharacterSheet.from_dict(sdata)
-        # Load object templates
+        
+        # Load object templates 
         obj_t = data.get("object_templates", {})
         if isinstance(obj_t, dict):
             for key, odata in obj_t.items():
@@ -798,53 +793,50 @@ class World:
                     except Exception:
                         # Skip malformed entries
                         pass
-        # Load npc id mapping and backfill for any npcs referenced in rooms
+        
+        # Load NPC ID mapping (migrations should have ensured completeness)
         npc_ids = data.get("npc_ids", {})
         if isinstance(npc_ids, dict):
             w.npc_ids = dict(npc_ids)
-        # Backfill for any NPC names in rooms without ids
-        try:
-            for room in w.rooms.values():
-                for npc_name in list(room.npcs):
-                    if npc_name not in w.npc_ids:
-                        w.npc_ids[npc_name] = str(uuid.uuid4())
-        except Exception:
-            pass
+        
+        # Load users
         users = data.get("users", {})
         if isinstance(users, dict):
             for uid, udata in users.items():
                 if isinstance(udata, dict):
                     user = User.from_dict(udata)
-                    # Keep key consistent with user_id
                     w.users[user.user_id] = user
-        # World metadata
+        
+        # Load world metadata with safe defaults
         w.world_name = data.get("world_name")
         w.world_description = data.get("world_description")
         w.world_conflict = data.get("world_conflict")
         w.start_room_id = data.get("start_room_id")
         w.setup_complete = bool(data.get("setup_complete", False))
-        # Safety level with default to 'G' if missing
+        
+        # Safety level with validation
         lvl = (data.get("safety_level") or 'G').upper()
         if lvl not in ('G', 'PG-13', 'R', 'OFF'):
             lvl = 'G'
         w.safety_level = lvl
-        # Advanced GOAP flag (default False for back-compat)
+        
+        # Advanced GOAP flag
         w.advanced_goap_enabled = bool(data.get("advanced_goap_enabled", False))
-        # Relationships graph
+        
+        # Relationships graph with safe loading
         rels = data.get("relationships", {})
         if isinstance(rels, dict):
-            # Ensure nested dicts are of correct type (string keys)
             w.relationships = {}
             try:
                 for src, m in rels.items():
-                    if not isinstance(src, str) or not isinstance(m, dict):
-                        continue
-                    w.relationships[src] = {str(tgt): str(val) for tgt, val in m.items()}
+                    if isinstance(src, str) and isinstance(m, dict):
+                        w.relationships[src] = {str(tgt): str(val) for tgt, val in m.items()}
             except Exception:
-                # Fallback to raw if any issues
-                w.relationships = dict(rels)
-        # Debug / Creative Mode flag (default False for back-compat)
+                w.relationships = {}
+        
+        # Debug / Creative Mode flag
         w.debug_creative_mode = bool(data.get("debug_creative_mode", False))
+        
         return w
 
     def save_to_file(self, path: str) -> None:
@@ -860,16 +852,29 @@ class World:
 
     @classmethod
     def load_from_file(cls, path: str) -> "World":
+        """Load World from file, applying any necessary schema migrations.
+        
+        If the file doesn't exist or loading fails, returns a fresh World instance.
+        Migration errors are logged but don't prevent loading - the system falls back
+        to raw data loading for maximum robustness.
+        """
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                # from_dict handles migrations internally
                 w = cls.from_dict(data)
                 return w
-        except Exception:
+        except Exception as e:
+            # Log the error but continue with fresh world for robustness
+            print(f"Failed to load world from {path}: {e}")
             # Fall through to a fresh world
-            pass
+        
+        # Return fresh world at latest schema version
         w = cls()
+        # Import here to avoid circular dependency
+        from world_migrations import migration_registry
+        w.world_version = migration_registry.get_latest_version()
         return w
 
     # --- User helpers ---
@@ -1077,5 +1082,123 @@ class World:
             for target_id, relationship_type in relationships.items():
                 if not _is_valid_uuid(target_id):
                     errors.append(f"Invalid target entity_id in relationships[{entity_id}]: {target_id}")
+        
+        # 9. Validate reciprocal door linkage
+        # Check that doors have appropriate reciprocal connections
+        for room_id, room in self.rooms.items():
+            for door_name, target_room_id in (room.doors or {}).items():
+                if target_room_id in self.rooms:
+                    target_room = self.rooms[target_room_id]
+                    # Check if target room has any door back to this room
+                    has_reciprocal = any(
+                        target_target == room_id
+                        for target_target in (target_room.doors or {}).values()
+                    )
+                    if not has_reciprocal:
+                        msg = (f"Room '{room_id}' door '{door_name}' -> '{target_room_id}' "
+                               f"lacks reciprocal door")
+                        errors.append(msg)
+                
+                # Validate door object exists and is consistent
+                door_id = (room.door_ids or {}).get(door_name)
+                if door_id:
+                    if door_id not in (room.objects or {}):
+                        msg = (f"Room '{room_id}' door '{door_name}' has door_id {door_id} "
+                               f"but no matching object")
+                        errors.append(msg)
+                    else:
+                        door_obj = room.objects[door_id]
+                        # Check travel point tags
+                        if not (hasattr(door_obj, 'object_tags') and
+                                isinstance(door_obj.object_tags, set) and
+                                'Travel Point' in door_obj.object_tags):
+                            msg = (f"Room '{room_id}' door object '{door_name}' "
+                                   f"missing 'Travel Point' tag")
+                            errors.append(msg)
+                        # Check link target matches door destination
+                        if (hasattr(door_obj, 'link_target_room_id') and
+                                door_obj.link_target_room_id != target_room_id):
+                            msg = (f"Room '{room_id}' door object '{door_name}' "
+                                   f"link_target_room_id mismatch: "
+                                   f"object={door_obj.link_target_room_id}, door={target_room_id}")
+                            errors.append(msg)
+                else:
+                    errors.append(f"Room '{room_id}' door '{door_name}' missing door_id")
+        
+        # 10. Validate reciprocal stairs linkage
+        for room_id, room in self.rooms.items():
+            # Check stairs up reciprocity
+            if room.stairs_up_to and room.stairs_up_to in self.rooms:
+                target_room = self.rooms[room.stairs_up_to]
+                if target_room.stairs_down_to != room_id:
+                    msg = (f"Room '{room_id}' stairs_up_to '{room.stairs_up_to}' "
+                           f"lacks reciprocal stairs_down_to")
+                    errors.append(msg)
+                
+                # Validate stairs up object exists and is consistent
+                if hasattr(room, 'stairs_up_id') and room.stairs_up_id:
+                    if room.stairs_up_id not in (room.objects or {}):
+                        msg = (f"Room '{room_id}' stairs_up_id {room.stairs_up_id} "
+                               f"but no matching object")
+                        errors.append(msg)
+                    else:
+                        stairs_obj = room.objects[room.stairs_up_id]
+                        if not (hasattr(stairs_obj, 'object_tags') and
+                                isinstance(stairs_obj.object_tags, set) and
+                                'Travel Point' in stairs_obj.object_tags):
+                            msg = f"Room '{room_id}' stairs up object missing 'Travel Point' tag"
+                            errors.append(msg)
+                        if (hasattr(stairs_obj, 'link_target_room_id') and
+                                stairs_obj.link_target_room_id != room.stairs_up_to):
+                            msg = f"Room '{room_id}' stairs up object link_target_room_id mismatch"
+                            errors.append(msg)
+                else:
+                    errors.append(f"Room '{room_id}' has stairs_up_to but missing stairs_up_id")
+            
+            # Check stairs down reciprocity
+            if room.stairs_down_to and room.stairs_down_to in self.rooms:
+                target_room = self.rooms[room.stairs_down_to]
+                if target_room.stairs_up_to != room_id:
+                    msg = (f"Room '{room_id}' stairs_down_to '{room.stairs_down_to}' "
+                           f"lacks reciprocal stairs_up_to")
+                    errors.append(msg)
+                
+                # Validate stairs down object exists and is consistent
+                if hasattr(room, 'stairs_down_id') and room.stairs_down_id:
+                    if room.stairs_down_id not in (room.objects or {}):
+                        msg = (f"Room '{room_id}' stairs_down_id {room.stairs_down_id} "
+                               f"but no matching object")
+                        errors.append(msg)
+                    else:
+                        stairs_obj = room.objects[room.stairs_down_id]
+                        if not (hasattr(stairs_obj, 'object_tags') and
+                                isinstance(stairs_obj.object_tags, set) and
+                                'Travel Point' in stairs_obj.object_tags):
+                            msg = f"Room '{room_id}' stairs down object missing 'Travel Point' tag"
+                            errors.append(msg)
+                        if (hasattr(stairs_obj, 'link_target_room_id') and
+                                stairs_obj.link_target_room_id != room.stairs_down_to):
+                            msg = f"Room '{room_id}' stairs down obj link_target_room_id mismatch"
+                            errors.append(msg)
+                else:
+                    msg = f"Room '{room_id}' has stairs_down_to but missing stairs_down_id"
+                    errors.append(msg)
+        
+        # 11. Validate object tag consistency for all travel points
+        for room_id, room in self.rooms.items():
+            for obj_uuid, obj in (room.objects or {}).items():
+                if hasattr(obj, 'object_tags') and isinstance(obj.object_tags, set):
+                    if 'Travel Point' in obj.object_tags:
+                        # Travel points must have Immovable tag
+                        if 'Immovable' not in obj.object_tags:
+                            msg = (f"Room '{room_id}' travel point '{obj.display_name}' "
+                                   f"missing 'Immovable' tag")
+                            errors.append(msg)
+                        
+                        # Travel points should have a link target (unless they're special cases)
+                        if not hasattr(obj, 'link_target_room_id') or not obj.link_target_room_id:
+                            msg = (f"Room '{room_id}' travel point '{obj.display_name}' "
+                                   f"missing link_target_room_id")
+                            errors.append(msg)
         
         return errors

@@ -39,12 +39,14 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth promote <name>'})
             return True
         target_name = ctx.strip_quotes(" ".join(args[1:]).strip())
-        ok, err, emits2 = promote_user(world, ctx.sessions, ctx.admins, target_name, ctx.state_path)
+        ok, err, emits2, broadcasts2 = promote_user(world, ctx.sessions, ctx.admins, target_name, ctx.state_path)
         if err:
             emit(MESSAGE_OUT, {'type': 'error', 'content': err})
             return True
         for p in emits2:
             emit(MESSAGE_OUT, p)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True
     if sub == 'list_admins':
         names = list_admins(world)
@@ -61,12 +63,14 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
             emit(MESSAGE_OUT, {'type': 'error', 'content': 'Usage: /auth demote <name>'})
             return True
         target_name = ctx.strip_quotes(" ".join(args[1:]).strip())
-        ok, err, emits2 = demote_user(world, ctx.sessions, ctx.admins, target_name, ctx.state_path)
+        ok, err, emits2, broadcasts2 = demote_user(world, ctx.sessions, ctx.admins, target_name, ctx.state_path)
         if err:
             emit(MESSAGE_OUT, {'type': 'error', 'content': err})
             return True
         for p in emits2:
             emit(MESSAGE_OUT, p)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True
 
     # Create account
@@ -96,7 +100,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         for p in emits2:
             emit(MESSAGE_OUT, p)
         for room_id, payload in broadcasts2:
-            ctx.broadcast_to_room(room_id, payload, sid)
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         # First-user setup wizard
         try:  # pragma: no cover - defensive
             if not getattr(world, 'setup_complete', False) and sid in ctx.sessions:
@@ -127,7 +131,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         for p in emits2:
             emit(MESSAGE_OUT, p)
         for room_id, payload in broadcasts2:
-            ctx.broadcast_to_room(room_id, payload, sid)
+            ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True
 
     emit(MESSAGE_OUT, {'type': 'error', 'content': 'Unknown /auth subcommand. Use create or login.'})
