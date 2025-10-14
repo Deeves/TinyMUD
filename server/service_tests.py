@@ -150,7 +150,7 @@ def test_lockdoor(tmpfile):
     ok2, err2, emits2, broadcasts2 = create_account_and_login(w, sid_bob, 'Bob', 'pw2', 'desc2', sessions, admins, tmpfile)
     assert_true(ok2 and not err2, f"setup create Bob failed: {err2}")
     # Lock door to allow only Alice by name
-    handled, err, emits = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|Alice'], sid_admin)
+    handled, err, emits, broadcasts = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|Alice'], sid_admin)
     assert_true(handled and not err, f"lockdoor allow Alice failed: {err}")
     # Bob should be denied
     ok, err, emitsM, broadcastsM = move_through_door(w, sid_bob, 'oak door')
@@ -167,7 +167,7 @@ def test_lockdoor(tmpfile):
     uid_bob = next(uid for uid, u in w.users.items() if u.display_name == 'Bob')
     w.relationships.setdefault(uid_bob, {})[uid_alice] = 'friend'
     # Relock with relationship rule
-    handled2, errR, emitsR = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|relationship: friend with Alice'], sid_admin)
+    handled2, errR, emitsR, broadcastsR = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|relationship: friend with Alice'], sid_admin)
     assert_true(handled2 and not errR, f"lockdoor relationship failed: {errR}")
     # Bob should now be able to pass
     ok4, err4, emits4, broadcasts4 = move_through_door(w, sid_bob, 'oak door')

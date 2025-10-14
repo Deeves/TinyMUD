@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import json
 import os
 import uuid
-from typing import Dict, Set, Optional, List, Any
+from typing import Dict, Set, Optional, List, Any, Tuple
 from safe_utils import safe_call, safe_call_with_default
 
 
@@ -887,12 +887,136 @@ class World:
 
     # --- NPC helpers ---
     def get_or_create_npc_id(self, npc_name: str) -> str:
-        """Return a stable UUID for an NPC name, creating one if missing."""
+        """Return a stable UUID for an NPC name, creating one if missing.
+        
+        Args:
+            npc_name: The display name of the NPC. Must be a non-empty string.
+            
+        Returns:
+            The stable UUID string for this NPC.
+            
+        Raises:
+            TypeError: If npc_name is not a string.
+            ValueError: If npc_name is empty or whitespace-only.
+        """
+        if not isinstance(npc_name, str):
+            raise TypeError(f"NPC name must be a string, got {type(npc_name)}")
+        
+        npc_name = npc_name.strip()
+        if not npc_name:
+            raise ValueError("NPC name cannot be empty or whitespace-only")
+        
+        # Initialize npc_ids dict if missing (robustness for corrupt state)
+        if not hasattr(self, 'npc_ids') or self.npc_ids is None:
+            self.npc_ids = {}
+        
         if npc_name not in self.npc_ids:
-            self.npc_ids[npc_name] = str(uuid.uuid4())
+            new_id = str(uuid.uuid4())
+            self.npc_ids[npc_name] = new_id
+            
+            # Log when creating new NPC IDs for debugging/audit trail
+            print(f"Created new NPC ID for '{npc_name}': {new_id}")
+            
         return self.npc_ids[npc_name]
 
-    def create_user(self, display_name: str, password: str, description: str, is_admin: bool = False) -> User:
+    def validate_npc_integrity(self) -> List[str]:
+        """Validate consistency between NPC sheets and ID mappings.
+        
+        Returns:
+            List of error messages describing inconsistencies found.
+        """
+        errors = []
+        
+        # Ensure both collections exist
+        if not hasattr(self, 'npc_sheets') or self.npc_sheets is None:
+            self.npc_sheets = {}
+        if not hasattr(self, 'npc_ids') or self.npc_ids is None:
+            self.npc_ids = {}
+        
+        # Get all NPC names from various sources
+        sheet_names = set(self.npc_sheets.keys())
+        id_names = set(self.npc_ids.keys())
+        room_npc_names = set()
+        
+        # Collect NPCs referenced in rooms
+        for room_id, room in self.rooms.items():
+            if hasattr(room, 'npcs') and room.npcs:
+                room_npc_names.update(room.npcs)
+        
+        # Check for NPCs with sheets but no IDs
+        missing_ids = sheet_names - id_names
+        for npc_name in missing_ids:
+            errors.append(f"NPC '{npc_name}' has sheet but missing from npc_ids mapping")
+        
+        # Check for NPCs with IDs but no sheets
+        missing_sheets = id_names - sheet_names
+        for npc_name in missing_sheets:
+            errors.append(f"NPC '{npc_name}' has ID mapping but missing character sheet")
+        
+        # Check for NPCs referenced in rooms but missing sheets
+        orphaned_room_npcs = room_npc_names - sheet_names
+        for npc_name in orphaned_room_npcs:
+            errors.append(f"NPC '{npc_name}' referenced in room but missing character sheet")
+        
+        # Check for NPCs referenced in rooms but missing IDs
+        room_npcs_no_ids = room_npc_names - id_names
+        for npc_name in room_npcs_no_ids:
+            errors.append(f"NPC '{npc_name}' referenced in room but missing from npc_ids mapping")
+        
+        return errors
+
+    def repair_npc_integrity(self) -> Tuple[int, List[str]]:
+        """Repair NPC integrity issues by creating missing sheets and IDs.
+        
+        This method attempts to fix common NPC integrity problems:
+        - Creates missing character sheets for NPCs with IDs
+        - Creates missing ID mappings for NPCs with sheets
+        - Creates both sheets and IDs for NPCs only referenced in rooms
+        
+        Returns:
+            Tuple of (repairs_made, repair_messages)
+        """
+        repairs = 0
+        messages = []
+        
+        # Ensure collections exist
+        if not hasattr(self, 'npc_sheets') or self.npc_sheets is None:
+            self.npc_sheets = {}
+        if not hasattr(self, 'npc_ids') or self.npc_ids is None:
+            self.npc_ids = {}
+        
+        # Get all NPC names from various sources
+        sheet_names = set(self.npc_sheets.keys())
+        id_names = set(self.npc_ids.keys())
+        room_npc_names = set()
+        
+        for room_id, room in self.rooms.items():
+            if hasattr(room, 'npcs') and room.npcs:
+                room_npc_names.update(room.npcs)
+        
+        all_npc_names = sheet_names | id_names | room_npc_names
+        
+        # Repair missing character sheets
+        for npc_name in all_npc_names:
+            if npc_name not in self.npc_sheets:
+                self.npc_sheets[npc_name] = CharacterSheet(
+                    display_name=npc_name,
+                    description=f"An NPC named {npc_name}."
+                )
+                repairs += 1
+                messages.append(f"Created missing character sheet for NPC '{npc_name}'")
+        
+        # Repair missing ID mappings
+        for npc_name in all_npc_names:
+            if npc_name not in self.npc_ids:
+                self.npc_ids[npc_name] = str(uuid.uuid4())
+                repairs += 1
+                messages.append(f"Created missing ID mapping for NPC '{npc_name}'")
+        
+        return repairs, messages
+
+    def create_user(self, display_name: str, password: str, description: str,
+                    is_admin: bool = False) -> User:
         assert isinstance(display_name, str) and 2 <= len(display_name) <= 32, "display_name must be 2-32 chars"
         assert isinstance(password, str) and len(password) >= 1, "password required"
         if self.get_user_by_display_name(display_name) is not None:
@@ -1200,5 +1324,9 @@ class World:
                             msg = (f"Room '{room_id}' travel point '{obj.display_name}' "
                                    f"missing link_target_room_id")
                             errors.append(msg)
+        
+        # 12. Validate NPC integrity (sheets ↔ IDs consistency)
+        npc_integrity_errors = self.validate_npc_integrity()
+        errors.extend(npc_integrity_errors)
         
         return errors

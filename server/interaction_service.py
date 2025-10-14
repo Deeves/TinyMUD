@@ -512,34 +512,43 @@ def handle_interaction_input(
             return True, None, [{'type': 'error', 'content': f'Crafting failed: {e}'}], []
 
     def _place_in_hand(o) -> tuple[bool, str | None, int | None]:
-        # Prefer right hand (1), then left hand (0)
+        # Enhanced version with duplicate UUID checking and safer placement
         if inv is None:
             return False, 'No inventory available.', None
-        if inv.slots[1] is None:
-            inv.slots[1] = o
-            # Remove 'stowed' if present
-            try:
-                getattr(o, 'object_tags', set()).discard('stowed')
-            except Exception:
-                pass
-            return True, None, 1
-        if inv.slots[0] is None:
-            inv.slots[0] = o
-            try:
-                getattr(o, 'object_tags', set()).discard('stowed')
-            except Exception:
-                pass
-            return True, None, 0
-        return False, 'Your hands are full.', None
+        
+        # Check for duplicate UUID in inventory before placing
+        for idx, existing_obj in enumerate(inv.slots):
+            if existing_obj and existing_obj.uuid == o.uuid:
+                return False, f'Object already exists in slot {idx}.', None
+        
+        # Prefer right hand (1), then left hand (0) with validation
+        for slot_idx in [1, 0]:
+            if inv.slots[slot_idx] is None and inv.can_place(slot_idx, o):
+                inv.slots[slot_idx] = o
+                # Remove 'stowed' tag if present
+                try:
+                    getattr(o, 'object_tags', set()).discard('stowed')
+                except Exception:
+                    pass
+                return True, None, slot_idx
+        
+        return False, 'Your hands are full or object cannot be held.', None
 
     def _place_stowed(o) -> tuple[bool, str | None]:
         if inv is None:
             return False, 'No inventory available.'
+            
+        # Enhanced version with duplicate UUID checking and validation
+        # Check for duplicate UUID in inventory before placing
+        for idx, existing_obj in enumerate(inv.slots):
+            if existing_obj and existing_obj.uuid == o.uuid:
+                return False, f'Object already exists in slot {idx}.'
+        
         tags = set(getattr(o, 'object_tags', []) or [])
-        # large items go to large, small to small
+        # large items go to large slots (6-7), small to small slots (2-5)
         if 'large' in tags:
             for i in range(6, 8):
-                if inv.slots[i] is None:
+                if inv.slots[i] is None and inv.can_place(i, o):
                     inv.slots[i] = o
                     try:
                         getattr(o, 'object_tags', set()).add('stowed')
@@ -547,9 +556,10 @@ def handle_interaction_input(
                         pass
                     return True, None
             return False, 'No large slot available to stow it.'
-        # default small
+        
+        # default small items
         for i in range(2, 6):
-            if inv.slots[i] is None:
+            if inv.slots[i] is None and inv.can_place(i, o):
                 inv.slots[i] = o
                 try:
                     getattr(o, 'object_tags', set()).add('stowed')
@@ -597,6 +607,8 @@ def handle_interaction_input(
                 room.objects.pop(obj.uuid, None)
         except Exception:
             pass
+            
+        # Attempt to place object in inventory with enhanced validation
         okp, errp = _place_stowed(obj)
         if not okp:
             okh, errh, _idx = _place_in_hand(obj)
@@ -612,6 +624,16 @@ def handle_interaction_input(
                     'type': 'error',
                     'content': (errp or errh or 'No space to pick that up.'),
                 }], []
+        
+        # Object successfully picked up - transfer ownership atomically
+        if obj and player:
+            try:
+                # Transfer ownership to the picking player
+                obj.owner_id = player.user_id  # type: ignore[attr-defined]
+            except Exception:
+                # If ownership transfer fails, continue anyway (non-critical)
+                pass
+        
         sessions.pop(sid, None)
         return True, None, [{'type': 'system', 'content': f'You pick up the {name}.'}], []
 
@@ -648,6 +670,14 @@ def handle_interaction_input(
                     'type': 'error',
                     'content': errh or 'Your hands are full.',
                 }], []
+            
+            # Transfer ownership when wielding from room
+            if obj and player:
+                try:
+                    obj.owner_id = player.user_id  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                    
             hand_name = 'right hand' if which == 1 else 'left hand'
             with atomic('interaction_sessions'):
                 sessions.pop(sid, None)

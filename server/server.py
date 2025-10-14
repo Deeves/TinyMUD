@@ -601,6 +601,17 @@ if _ASYNC_MODE == "threading":
 STATE_PATH = os.path.join(os.path.dirname(__file__), 'world_state.json')
 world = World.load_from_file(STATE_PATH)
 
+# Perform GOAP planner integrity cleanup after world load
+try:
+    from goap_state_manager import on_world_reload_cleanup
+    cleanup_actions = on_world_reload_cleanup(world)
+    if cleanup_actions:
+        print(f"GOAP cleanup completed: {len(cleanup_actions)} actions taken")
+        # Save any cleanup changes immediately
+        world.save_to_file(STATE_PATH)
+except Exception as e:
+    print(f"GOAP cleanup failed (continuing anyway): {e}")
+
 
 def _save_world():
     """Final save on shutdown - must be immediate, not debounced."""
@@ -1058,22 +1069,34 @@ def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
                     try:
                         locks = getattr(room, 'door_locks', {}) or {}
                         policy = locks.get(resolved_label)
-                        if policy:
-                            actor_id = world.get_or_create_npc_id(npc_name)
-                            allow_ids = set((policy.get('allow_ids') or []))
-                            permitted = actor_id in allow_ids
-                            if not permitted:
+                        if resolved_label in locks:  # Policy exists (even if None) - door is locked
+                            # SECURITY FIX: Validate policy structure - deny access if corrupted
+                            if not isinstance(policy, dict):
+                                permitted = False
+                            else:
+                                actor_id = world.get_or_create_npc_id(npc_name)
+                                allow_ids = set((policy.get('allow_ids') or []))
                                 rel_rules = policy.get('allow_rel') or []
-                                relationships = getattr(world, 'relationships', {}) or {}
-                                for rule in rel_rules:
-                                    try:
-                                        rtype = str(rule.get('type') or '').strip()
-                                        to_id = rule.get('to')
-                                    except Exception:
-                                        rtype = ''; to_id = None
-                                    if rtype and to_id and relationships.get(actor_id, {}).get(to_id) == rtype:
-                                        permitted = True
-                                        break
+                                
+                                # SECURITY FIX: If no restrictions defined, deny access (empty policy)
+                                if not allow_ids and not rel_rules:
+                                    permitted = False
+                                else:
+                                    permitted = actor_id in allow_ids
+                                    if not permitted:
+                                        relationships = getattr(world, 'relationships', {}) or {}
+                                        for rule in rel_rules:
+                                            try:
+                                                rtype = str(rule.get('type') or '').strip()
+                                                to_id = rule.get('to')
+                                            except Exception:
+                                                rtype = ''; to_id = None
+                                            if rtype and to_id and relationships.get(actor_id, {}).get(to_id) == rtype:
+                                                # SECURITY FIX: Validate relationship target exists
+                                                if to_id not in getattr(world, 'users', {}):
+                                                    continue  # Skip orphaned relationship
+                                                permitted = True
+                                                break
                     except Exception:
                         # On any error checking locks, deny for safety
                         permitted = False

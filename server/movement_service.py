@@ -117,7 +117,11 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
     try:
         locks = getattr(room, 'door_locks', {}) or {}
         policy = locks.get(name_in)
-        if policy:
+        if name_in in locks:  # Policy exists (even if None) - door is locked
+            # SECURITY FIX: Validate policy structure - deny access if corrupted
+            if not isinstance(policy, dict):
+                return False, f"The {name_in} is locked.", emits, broadcasts
+            
             # Determine acting entity id (user id)
             actor_uid = None
             try:
@@ -134,23 +138,35 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
             # If we couldn't resolve, deny by default to be safe
             if not actor_uid:
                 return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
+            
             allow_ids = set(policy.get('allow_ids') or [])
+            rel_rules = policy.get('allow_rel') or []
+            
+            # SECURITY FIX: If no restrictions are defined, deny access (empty policy bypass)
+            if not allow_ids and not rel_rules:
+                return False, f"The {name_in} is locked.", emits, broadcasts
+            
             if actor_uid in allow_ids:
                 pass  # allowed
             else:
                 # Check relationship rule(s)
-                rel_rules = policy.get('allow_rel') or []
                 permitted = False
                 relationships = getattr(world, 'relationships', {}) or {}
                 for rule in rel_rules:
-                    rtype = str(rule.get('type') or '').strip()
-                    to_id = rule.get('to')
-                    if not rtype or not to_id:
-                        continue
-                    # Check if actor has relationship rtype towards to_id
-                    if relationships.get(actor_uid, {}).get(to_id) == rtype:
-                        permitted = True
-                        break
+                    try:
+                        rtype = str(rule.get('type') or '').strip()
+                        to_id = rule.get('to')
+                        if not rtype or not to_id:
+                            continue
+                        # Check if actor has relationship rtype towards to_id
+                        if relationships.get(actor_uid, {}).get(to_id) == rtype:
+                            # SECURITY FIX: Validate that relationship target user still exists (orphaned relationship fix)
+                            if to_id not in getattr(world, 'users', {}):
+                                continue  # Skip this relationship rule - target user deleted
+                            permitted = True
+                            break
+                    except Exception:
+                        continue  # Skip malformed rules
                 if not permitted:
                     return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
     except Exception:

@@ -564,10 +564,32 @@ def handle_setup_input(
         no_vals = {"no", "n", "disable", "disabled", "false", "off", "skip", ""}
         if answer in yes_vals:
             with atomic('world'):
-                world.advanced_goap_enabled = True
+                # Use safe GOAP mode switching to prevent state corruption
+                try:
+                    from goap_state_manager import reset_goap_mode_safely
+                    success, cleanup_actions = reset_goap_mode_safely(world, True)
+                    if success and cleanup_actions:
+                        print(f"GOAP mode enabled with cleanup: {len(cleanup_actions)} actions")
+                except ImportError:
+                    # Fallback if goap_state_manager is not available
+                    world.advanced_goap_enabled = True
+                except Exception as e:
+                    print(f"GOAP mode switch failed, using fallback: {e}")
+                    world.advanced_goap_enabled = True
         elif answer in no_vals:
             with atomic('world'):
-                world.advanced_goap_enabled = False
+                # Use safe GOAP mode switching to prevent state corruption
+                try:
+                    from goap_state_manager import reset_goap_mode_safely
+                    success, cleanup_actions = reset_goap_mode_safely(world, False)
+                    if success and cleanup_actions:
+                        print(f"GOAP mode disabled with cleanup: {len(cleanup_actions)} actions")
+                except ImportError:
+                    # Fallback if goap_state_manager is not available
+                    world.advanced_goap_enabled = False
+                except Exception as e:
+                    print(f"GOAP mode switch failed, using fallback: {e}")
+                    world.advanced_goap_enabled = False
         else:
             emits.append({'type': 'error', 'content': 'Please answer with yes or no.'})
             return True, None, emits, broadcasts

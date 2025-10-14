@@ -268,18 +268,80 @@ def get_rate_limit_status(sid: str | None) -> tuple[float, float]:
     return _global_rate_limiter.get_bucket_status(sid)
 
 
-def reset_rate_limit(sid: str | None) -> None:
+def reset_rate_limit(sid: str | None, operation_key: str | None = None) -> None:
     """Reset rate limit for a specific client (admin function).
     
     Args:
-        sid: Session ID to reset
+        sid: Session ID to reset (if None, resets for operation_key)
+        operation_key: Specific operation key to reset (for keyed operations)
     """
-    _global_rate_limiter.reset_bucket(sid)
+    if operation_key and hasattr(_global_rate_limiter, 'keyed_buckets'):
+        # Reset specific keyed bucket if the rate limiter supports it
+        keyed_buckets = getattr(_global_rate_limiter, 'keyed_buckets', {})
+        if operation_key in keyed_buckets:
+            del keyed_buckets[operation_key]
+    elif sid:
+        _global_rate_limiter.reset_bucket(sid)
 
 
 def cleanup_rate_limiter() -> None:
     """Clean up old rate limit buckets to prevent memory leaks."""
     _global_rate_limiter.cleanup_old_buckets()
+    
+    
+def cleanup_npc_planning_rate_limits() -> int:
+    """Clean up rate limiting state for NPC planning operations.
+    
+    This is called during world reload to ensure fresh planner state.
+    
+    Returns:
+        Number of NPC planning buckets cleaned up
+    """
+    cleaned_count = 0
+    
+    try:
+        # Access the internal bucket storage if available (defensive access)
+        buckets_attr = getattr(_global_rate_limiter, 'buckets', None)
+        if buckets_attr is not None:
+            npc_keys_to_remove = []
+            
+            # Find all keys that look like NPC planning operations
+            for key in buckets_attr.keys():
+                if isinstance(key, str) and 'npc_goap_plan_' in key:
+                    npc_keys_to_remove.append(key)
+            
+            # Remove the found keys
+            for key in npc_keys_to_remove:
+                if key in buckets_attr:
+                    del buckets_attr[key]
+                    cleaned_count += 1
+                    _logger.debug(f"Cleaned NPC planning rate limit: {key}")
+                
+        # Also check for keyed buckets if the limiter supports them
+        keyed_buckets_attr = getattr(_global_rate_limiter, 'keyed_buckets', None)
+        if keyed_buckets_attr is not None:
+            npc_keys_to_remove = []
+            
+            for key in keyed_buckets_attr.keys():
+                if isinstance(key, str) and 'npc_goap_plan_' in key:
+                    npc_keys_to_remove.append(key)
+            
+            for key in npc_keys_to_remove:
+                if key in keyed_buckets_attr:
+                    del keyed_buckets_attr[key]
+                    cleaned_count += 1
+                    _logger.debug(f"Cleaned NPC planning keyed rate limit: {key}")
+                
+    except Exception as e:
+        _logger.warning(f"Failed to clean NPC planning rate limits: {e}")
+        # Fallback to general cleanup
+        try:
+            cleanup_rate_limiter()
+            cleaned_count = 1  # Indicate we did some cleanup
+        except Exception:
+            pass  # Best effort
+    
+    return cleaned_count
 
 
 # Backwards compatibility with the simple rate limiter

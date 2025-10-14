@@ -41,24 +41,45 @@ def parse_pipe_parts(s: str, expected: Optional[int] = None) -> List[str]:
 
 
 def _suggest_by_first_letter(typed: str, candidates: Iterable[str]) -> List[str]:
+    """Suggest candidates with deterministic sorting for stable results."""
     first = (typed or "").strip()[:1].lower()
     if not first:
         return []
     try:
-        return sorted([c for c in candidates if isinstance(c, str) and c[:1].lower() == first])
+        matches = [c for c in candidates if isinstance(c, str) and c[:1].lower() == first]
+        return _deterministic_sort(matches)
     except Exception:
         return []
 
 
+def _deterministic_sort(items: List[str]) -> List[str]:
+    """Sort items deterministically for stable fuzzy resolution results.
+    
+    Uses a two-tier sorting approach:
+    1. Primary: case-insensitive lexicographic order
+    2. Secondary: original case for tie-breaking
+    
+    This ensures consistent results regardless of input order, locale settings,
+    or case variations while maintaining intuitive alphabetical ordering.
+    
+    Examples:
+        ["Apple", "apple", "APPLE"] -> ["APPLE", "Apple", "apple"]
+        ["banana", "Bread", "butter"] -> ["banana", "Bread", "butter"]
+    """
+    return sorted(items, key=lambda x: (x.lower(), x))
+
 def fuzzy_resolve(typed: str, candidates: Iterable[str]) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Generic fuzzy resolver.
+    """Generic fuzzy resolver with deterministic ordering.
 
     Returns (ok, err, resolved_value) where:
     - ok=True with resolved_value when a single candidate is selected
     - ok=False with err message otherwise
     Strategy: exact -> ci-exact -> unique prefix (ci) -> unique substring (ci).
-    On ambiguity: list up to 10 candidates.
+    On ambiguity: list up to 10 candidates in deterministic order.
     On not found: suggest ids with same first letter when available.
+    
+    Deterministic sorting ensures stable results across different systems, locales,
+    and input orderings. Sorts case-insensitively first, then by original case.
     """
     t = (typed or '').strip()
     items = list(candidates)
@@ -76,13 +97,17 @@ def fuzzy_resolve(typed: str, candidates: Iterable[str]) -> Tuple[bool, Optional
     if len(prefs) == 1:
         return True, None, prefs[0]
     if len(prefs) > 1:
-        return False, 'Ambiguous id. Did you mean: ' + ", ".join(sorted(prefs)[:10]) + ' ?', None
+        # Deterministic sorting: case-insensitive first, then by original case
+        deterministic_prefs = _deterministic_sort(prefs)
+        return False, 'Ambiguous id. Did you mean: ' + ", ".join(deterministic_prefs[:10]) + ' ?', None
     # substring
     subs = [c for c in items if t.lower() in c.lower()]
     if len(subs) == 1:
         return True, None, subs[0]
     if len(subs) > 1:
-        return False, 'Ambiguous id. Did you mean: ' + ", ".join(sorted(subs)[:10]) + ' ?', None
+        # Deterministic sorting: case-insensitive first, then by original case  
+        deterministic_subs = _deterministic_sort(subs)
+        return False, 'Ambiguous id. Did you mean: ' + ", ".join(deterministic_subs[:10]) + ' ?', None
     # not found suggestions
     suggestions = _suggest_by_first_letter(t, items)
     if suggestions:
