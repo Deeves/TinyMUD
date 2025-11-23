@@ -509,4 +509,44 @@ class MigrationRegistry:
 
 
 # Global migration registry instance
+
+class Migration005_CombatStats(BaseMigration):
+    """Add morale, yielded, is_dead, equipped_weapon, equipped_armor to character sheets.
+    Backfills missing fields for both npc_sheets and user character sheets.
+    """
+    @property
+    def version(self) -> int:  # next schema version
+        return 5
+
+    @property
+    def description(self) -> str:
+        return "Add combat morale, death state, and equipment fields to character sheets"
+
+    def migrate(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(data)
+        def _apply(sheet: Dict[str, Any]):
+            if not isinstance(sheet, dict):
+                return
+            sheet.setdefault("morale", 50)
+            sheet.setdefault("yielded", False)
+            sheet.setdefault("is_dead", False)
+            sheet.setdefault("equipped_weapon", None)
+            sheet.setdefault("equipped_armor", None)
+        npc_sheets = data.get("npc_sheets", {})
+        if isinstance(npc_sheets, dict):
+            for _, sheet in npc_sheets.items():
+                _apply(sheet)
+        users = data.get("users", {})
+        if isinstance(users, dict):
+            for _, user in users.items():
+                if isinstance(user, dict):
+                    sheet = user.get("sheet")
+                    if isinstance(sheet, dict):
+                        _apply(sheet)
+        migration_logger.info(f"Applied migration {self.version}: {self.description}")
+        # Only update world_version if not already set to a higher value
+        if int(data.get("world_version", 0)) < self.version:
+            data["world_version"] = self.version
+        return data
+
 migration_registry = MigrationRegistry()

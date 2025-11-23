@@ -64,6 +64,8 @@ class Object:
     link_to_object_uuid: Optional[str] = None
     # Ownership: player.user_id or npc_id; None means unowned
     owner_id: Optional[str] = None
+    # Faction ownership: optional faction_id that owns this object
+    faction_id: Optional[str] = None
     # Stable id
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     # Container support (when 'Container' in object_tags): two small and two large slots
@@ -71,6 +73,12 @@ class Object:
     container_large_slots: List[Optional["Object"]] = field(default_factory=lambda: [None, None])
     container_opened: bool = False
     container_searched: bool = False
+
+    # --- Combat Modifiers ---
+    weapon_damage: Optional[int] = None  # If weapon, base damage
+    weapon_type: Optional[str] = None    # e.g., "cutting", "blunt", "piercing"
+    armor_defense: Optional[int] = None  # If armor, base defense
+    armor_type: Optional[str] = None     # e.g., "light", "medium", "heavy"
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +90,7 @@ class Object:
             "value": self.value,
             # Ownership persistence (player.user_id or npc_id)
             "owner_id": getattr(self, 'owner_id', None),
+            "faction_id": getattr(self, 'faction_id', None),
             # Nutrition properties for needs system (optional)
             "satiation_value": getattr(self, 'satiation_value', None),
             "hydration_value": getattr(self, 'hydration_value', None),
@@ -98,6 +107,11 @@ class Object:
             "container_large_slots": [o.to_dict() if o else None for o in (self.container_large_slots or [None, None])],
             "container_opened": self.container_opened,
             "container_searched": self.container_searched,
+            # Combat modifiers
+            "weapon_damage": self.weapon_damage,
+            "weapon_type": self.weapon_type,
+            "armor_defense": self.armor_defense,
+            "armor_type": self.armor_type,
         }
 
     @staticmethod
@@ -196,6 +210,11 @@ class Object:
             link_target_room_id=(str(data.get("link_target_room_id")) if data.get("link_target_room_id") is not None else None),
             link_to_object_uuid=(str(data.get("link_to_object_uuid")) if data.get("link_to_object_uuid") is not None else None),
             uuid=str(data.get("uuid") or uuid.uuid4()),
+            # Combat modifiers
+            weapon_damage=data.get("weapon_damage"),
+            weapon_type=data.get("weapon_type"),
+            armor_defense=data.get("armor_defense"),
+            armor_type=data.get("armor_type"),
         )
         # Optional nutrition fields with back-compat
         def _set_nutrition_values():
@@ -211,6 +230,8 @@ class Object:
                 owner = data.get("ownership")
             obj.owner_id = str(owner) if owner is not None and str(owner) else None  # type: ignore[attr-defined]
         safe_call(_set_ownership)
+        # Optional faction_id
+        obj.faction_id = str(data.get("faction_id")) if data.get("faction_id") else None
         # Load container fields
         def _load_container_fields():
             small_raw = data.get("container_small_slots")
@@ -343,6 +364,10 @@ class CharacterSheet:
     dexterity: int = 10
     intelligence: int = 10
     health: int = 10
+    # --- Combat/Morale System Additions ---
+    morale: int = 50            # Fighting spirit (0-100). Low = likely to yield.
+    yielded: bool = False       # True once entity yields (NPC stops fighting).
+    is_dead: bool = False       # Permadeath flag; players with True cannot act.
 
     # Secondary Characteristics
     hp: int = 10
@@ -399,8 +424,13 @@ class CharacterSheet:
     # Queue of planned actions produced by AI or offline planner. Each entry is a dict: {"tool": str, "args": dict}
     plan_queue: list[dict] = field(default_factory=list)
 
+    # --- Combat Equipment ---
+    equipped_weapon: str | None = None  # UUID of equipped weapon object
+    equipped_armor: str | None = None   # UUID of equipped armor object
+
     def to_dict(self) -> dict:
-        return {
+        # ...existing code...
+        d = {
             "display_name": self.display_name,
             "description": self.description,
             "inventory": self.inventory.to_dict(),
@@ -435,6 +465,9 @@ class CharacterSheet:
             "perception": self.perception,
             "fp": self.fp,
             "max_fp": self.max_fp,
+            "morale": self.morale,
+            "yielded": self.yielded,
+            "is_dead": self.is_dead,
             "high_concept": self.high_concept,
             "trouble": self.trouble,
             "destiny_points": self.destiny_points,
@@ -465,16 +498,15 @@ class CharacterSheet:
             # Action system
             "action_points": self.action_points,
             "plan_queue": list(self.plan_queue or []),
+            # Combat equipment
+            "equipped_weapon": self.equipped_weapon,
+            "equipped_armor": self.equipped_armor,
         }
+        return d
 
     @staticmethod
     def from_dict(data: dict) -> "CharacterSheet":
-        """Load CharacterSheet from dictionary data.
-        
-        Note: Backfill logic for needs system has been moved to Migration002.
-        This method now assumes data has been properly migrated.
-        """
-        # Helper functions for safe type conversion
+        # ...existing code...
         def _safe_int(val: Any, default: int) -> int:
             if val is None:
                 return default
@@ -534,6 +566,9 @@ class CharacterSheet:
             perception=_safe_int(data.get("perception"), 10),
             fp=_safe_int(data.get("fp"), 10),
             max_fp=_safe_int(data.get("max_fp"), 10),
+            morale=_safe_int(data.get("morale"), 50),
+            yielded=bool(data.get("yielded", False)),
+            is_dead=bool(data.get("is_dead", False)),
             high_concept=str(data.get("high_concept", "")),
             trouble=str(data.get("trouble", "")),
             destiny_points=_safe_int(data.get("destiny_points"), 3),
@@ -542,7 +577,7 @@ class CharacterSheet:
             advantages=list(data.get("advantages", [])) if isinstance(data.get("advantages"), list) else [],
             disadvantages=list(data.get("disadvantages", [])) if isinstance(data.get("disadvantages"), list) else [],
             quirks=list(data.get("quirks", [])) if isinstance(data.get("quirks"), list) else [],
-            narrative_traits=list(data.get("narrative_traits", [])) if isinstance(data.get("narrative_traits"), list) else [],
+            narrative_traits=list(data.get("narrative_traits", [])) if isinstance(data.get("narrative_traits", []), list) else [],
             sexuality_hom_het=_safe_int(data.get("sexuality_hom_het"), 0),
             physical_presentation_mas_fem=_safe_int(data.get("physical_presentation_mas_fem"), 0),
             social_presentation_mas_fem=_safe_int(data.get("social_presentation_mas_fem"), 0),
@@ -564,6 +599,9 @@ class CharacterSheet:
             # Action system
             action_points=_safe_int(data.get("action_points"), 0),
             plan_queue=list(data.get("plan_queue", [])),
+            # Combat equipment
+            equipped_weapon=data.get("equipped_weapon"),
+            equipped_armor=data.get("equipped_armor"),
         )
 
 
@@ -640,6 +678,8 @@ class Room:
     # New: optional door lock policies per door name
     # Schema: { door_name: { 'allow_ids': [entity_id,...], 'allow_rel': [ {'type': str, 'to': entity_id} ] } }
     door_locks: Dict[str, dict] = field(default_factory=dict)
+    # Faction ownership: optional faction_id that owns this room
+    faction_id: Optional[str] = None
     # Objects physically present in the room (includes doors/stairs as Objects)
     objects: Dict[str, Object] = field(default_factory=dict)  # key: object uuid -> Object
 
@@ -734,6 +774,8 @@ class Room:
             "stairs_down_id": self.stairs_down_id,
             # Door locks
             "door_locks": self.door_locks,
+            # Faction ownership
+            "faction_id": self.faction_id,
             # Objects in the room
             "objects": {oid: obj.to_dict() for oid, obj in self.objects.items()},
         }
@@ -754,6 +796,7 @@ class Room:
             stairs_up_id=data.get("stairs_up_id"),
             stairs_down_id=data.get("stairs_down_id"),
             door_locks=dict(data.get("door_locks", {})),
+            faction_id=str(data.get("faction_id")) if data.get("faction_id") else None,
             objects={},
         )
         # Load objects if present

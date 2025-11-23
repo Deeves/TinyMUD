@@ -45,6 +45,9 @@ def evaluate_npc_autonomy(world: World, npc_name: str, current_room_id: str) -> 
     actions.extend(_evaluate_wealth_desires(world, sheet, npc_name, room))
     actions.extend(_evaluate_social_status_needs(world, sheet, npc_name, room))
     
+    # Evaluate faction combat
+    actions.extend(_evaluate_faction_combat(world, sheet, npc_name, room))
+
     # Evaluate personality-driven behaviors
     actions.extend(_evaluate_responsibility_behaviors(world, sheet, npc_name, room))
     actions.extend(_evaluate_aggression_behaviors(world, sheet, npc_name, room))
@@ -140,6 +143,54 @@ def _evaluate_social_status_needs(world: World, sheet: CharacterSheet, npc_name:
                 'description': f'{npc_name} seeks to build reputation by helping'
             })
     
+    return actions
+
+
+def _evaluate_faction_combat(world: World, sheet: CharacterSheet, npc_name: str, room: Room) -> List[Dict]:
+    """Evaluate faction-based combat triggers."""
+    actions = []
+    
+    # Check if NPC belongs to a faction
+    npc_faction_id = getattr(sheet, 'faction_id', None)
+    if not npc_faction_id or npc_faction_id not in world.factions:
+        return actions
+        
+    npc_faction = world.factions[npc_faction_id]
+    
+    # Check for rival NPCs in the room
+    for other_npc_name in room.npcs:
+        if other_npc_name == npc_name:
+            continue
+            
+        other_sheet = world.npc_sheets.get(other_npc_name)
+        if not other_sheet or other_sheet.is_dead or other_sheet.yielded:
+            continue
+            
+        other_faction_id = getattr(other_sheet, 'faction_id', None)
+        if not other_faction_id or other_faction_id not in world.factions:
+            continue
+            
+        # Check if factions are rivals
+        if npc_faction.is_rival(other_faction_id):
+            # Found a rival!
+            # High priority to attack
+            
+            # Insult first
+            actions.append({
+                'tool': 'emote',
+                'args': {'message': f"insults {other_npc_name}: 'Your faction is a disgrace!'"},
+                'priority': 96,
+                'description': f'{npc_name} insults rival {other_npc_name}'
+            })
+            
+            # Then attack
+            actions.append({
+                'tool': 'attack',
+                'args': {'target': other_npc_name},
+                'priority': 95, # Very high priority
+                'description': f'{npc_name} attacks rival {other_npc_name}'
+            })
+            
     return actions
 
 

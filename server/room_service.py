@@ -75,15 +75,11 @@ def handle_room_command(world: "World", state_path: str, args: list[str], sid: s
     sub_args = args[1:]
 
     if sub == 'create':
-        def _parse_create_args():
-            parts_joined = " ".join(sub_args)
-            return _parse_pipe_parts(parts_joined, expected=2)
-        
-        parse_result = safe_call(_parse_create_args)
-        if parse_result is None:
-            return True, 'Usage: /room create <id> | <description>', emits, broadcasts
-        room_id, desc = parse_result
-        room_id = _strip_quotes(room_id)
+        # Always use first arg as id, rest as description
+        if not sub_args:
+            return True, 'Usage: /room create <id> <description>', emits, broadcasts
+        room_id = _strip_quotes(sub_args[0])
+        desc = " ".join(sub_args[1:]) if len(sub_args) > 1 else ""
         if not room_id:
             return True, 'Room id cannot be empty.', emits, broadcasts
         if room_id in world.rooms:

@@ -163,6 +163,9 @@ def _extract_json_payload(text: str) -> Optional[dict]:
 
     Expected schema:
     {
+      faction_name: string,
+      faction_description: string,
+      faction_relationships: [{ target_faction, type }...],
       rooms: [{ id, description }...3-6],
       links: [{ a, door_a, b, door_b }...],
       npcs: [{ name, description, room }...2-10],
@@ -197,6 +200,23 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
     created_rooms: List[str] = []
     created_npcs: List[str] = []
 
+    # 0) Create Faction
+    faction_name = str(graph.get('faction_name') or '').strip()
+    faction_desc = str(graph.get('faction_description') or '').strip()
+    faction = None
+    if faction_name:
+        try:
+            # Check if exists
+            existing = world.get_faction_by_name(faction_name)
+            if existing:
+                faction = existing
+            else:
+                faction = world.create_faction(faction_name, faction_desc)
+        except Exception:
+            pass
+
+    faction_id = faction.faction_id if faction else None
+
     # 1) Rooms
     rooms_in = graph.get('rooms') or []
     for r in rooms_in:
@@ -207,6 +227,8 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
         base = re.sub(r"[^A-Za-z0-9_\-]", "_", rid_raw or "faction_room")[:48] or "faction_room"
         rid = _uniq_room_id(world, base)
         room = Room(id=rid, description=desc)
+        if faction_id:
+            room.faction_id = faction_id
         world.rooms[rid] = room
         created_rooms.append(rid)
 
@@ -233,12 +255,16 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
                             link_target_room_id=target,
                         )
                         obj.uuid = oid
+                        if faction_id:
+                            obj.faction_id = faction_id
                         room.objects[oid] = obj
                     else:
                         o = room.objects[oid]
                         o.display_name = dname
                         o.object_tags = set(o.object_tags or set()) | {"Immovable", "Travel Point"}
                         o.link_target_room_id = target
+                        if faction_id:
+                            o.faction_id = faction_id
             except Exception:
                 pass
 
@@ -305,7 +331,9 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
             if desc:
                 sheet.description = desc
         try:
-            world.get_or_create_npc_id(name)
+            npc_id = world.get_or_create_npc_id(name)
+            if faction:
+                faction.add_member_npc(npc_id)
         except Exception:
             pass
         room_obj = world.rooms.get(rid_place)
@@ -313,7 +341,12 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
             room_obj.npcs.add(name)
             created_npcs.append(name)
             # Owned bed per NPC
-            _create_bed_for_npc(world, name, rid_place)
+            bed_uuid = _create_bed_for_npc(world, name, rid_place)
+            if bed_uuid and faction_id:
+                # Also set faction ownership on bed
+                bed = room_obj.objects.get(bed_uuid)
+                if bed:
+                    bed.faction_id = faction_id
 
     # 4) Relationships (directed)
     rels_in = graph.get('relationships') or []
@@ -339,6 +372,29 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
 
     # 5) Food & Water
     _ = _ensure_food_and_water(world, created_rooms)
+    if faction_id:
+        for rid in created_rooms:
+            r = world.rooms.get(rid)
+            if r:
+                for o in r.objects.values():
+                    if not o.faction_id:
+                        o.faction_id = faction_id
+
+    # 6) Faction Relationships
+    if faction:
+        f_rels = graph.get('faction_relationships') or []
+        for fr in f_rels:
+            if not isinstance(fr, dict): continue
+            target_name = str(fr.get('target_faction') or '').strip()
+            rtype = str(fr.get('type') or '').strip().lower()
+            target_faction = world.get_faction_by_name(target_name)
+            if target_faction and target_faction.faction_id != faction.faction_id:
+                if rtype == 'ally':
+                    faction.add_ally(target_faction.faction_id)
+                    target_faction.add_ally(faction.faction_id)
+                elif rtype == 'rival':
+                    faction.add_rival(target_faction.faction_id)
+                    target_faction.add_rival(faction.faction_id)
 
     # Best-effort save
     try:
@@ -352,6 +408,9 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
 def _offline_default_graph() -> dict:
     """Return a tiny synthesized faction graph for offline fallback."""
     return {
+        "faction_name": "The Iron Vanguard",
+        "faction_description": "A disciplined group of warriors dedicated to protecting the realm.",
+        "faction_relationships": [],
         "rooms": [
             {"id": "hall", "description": "A timbered meeting hall with a long table and a banner on the wall."},
             {"id": "bunks", "description": "Rows of simple bunk beds and footlockers."},
@@ -379,11 +438,14 @@ def _build_ai_prompt(world: World) -> str:
     conflict = getattr(world, 'world_conflict', None) or ''
     parts = [
         "Design a compact faction location for a text MUD.",
-        "Return ONLY JSON with keys: rooms, links, npcs, relationships. No prose, no markdown.",
+        "Return ONLY JSON with keys: faction_name, faction_description, faction_relationships, rooms, links, npcs, relationships. No prose, no markdown.",
         "Constraints: 3-6 rooms; 2-10 NPCs; rooms must be linked via named doors.",
         "Requirements: create meaningful relationships among NPCs. Keep names unique.",
         "Schema:",
         "{",
+        "  faction_name: string,",
+        "  faction_description: string,",
+        "  faction_relationships: [{target_faction: string, type: 'ally'|'rival'}],",
         "  rooms: [{id: string, description: string}],",
         "  links: [{a: string, door_a: string, b: string, door_b: string}],",
         "  npcs:  [{name: string, description: string, room: string}],",
@@ -393,6 +455,7 @@ def _build_ai_prompt(world: World) -> str:
         f"Name: {name}",
         f"Description: {desc}",
         f"Main Conflict: {conflict}",
+        "Existing Factions: " + ", ".join([f.name for f in world.factions.values()]),
         "Notes: keep descriptions concise; avoid unsafe content; names should fit the world.",
     ]
     return "\n".join(p for p in parts if p)

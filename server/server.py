@@ -171,6 +171,7 @@ from movement_service import move_through_door, move_stairs, teleport_player
 from room_service import handle_room_command
 from npc_service import handle_npc_command
 from faction_service import handle_faction_command
+from combat_service import attack
 from admin_service import (
     list_admins,
     promote_user,
@@ -1191,6 +1192,13 @@ def _npc_execute_action(npc_name: str, room_id: str, action: dict) -> None:
                     ok = False
             except Exception:
                 ok = False
+        elif tool == 'attack':
+            target_name = str(args.get('target') or args.get('target_name') or '').strip()
+            if target_name:
+                res_ok, _, _, _ = attack(world, STATE_PATH, None, target_name, sessions, admins, broadcast_to_room, socketio.emit, attacker_npc_name=npc_name, room_id=room_id)
+                ok = res_ok
+            else:
+                ok = False
         elif tool == 'do_nothing':
             ok, _ = _npc_exec_do_nothing(npc_name, room_id)
         elif tool == 'sleep':
@@ -1402,12 +1410,11 @@ def npc_think(npc_name: str) -> None:
         # If there are high-priority autonomous actions (priority > 80), use those instead
         urgent_actions = [a for a in autonomous_actions if a.get('priority', 0) > 80]
         if urgent_actions:
-            # Convert autonomous actions to GOAP format and use the most urgent one
-            top_action = urgent_actions[0]
+            # Use up to 3 urgent actions (already sorted by priority in evaluate_npc_autonomy)
             sheet.plan_queue = [{
-                'tool': top_action['tool'],
-                'args': top_action['args']
-            }]
+                'tool': a['tool'],
+                'args': a['args']
+            } for a in urgent_actions[:3]]
             return
     except Exception:
         # If autonomous service fails, continue with normal planning
@@ -3236,6 +3243,15 @@ def handle_command(sid: str | None, text: str) -> None:
 
     cmd = parts[0].lower()
     args = parts[1:]
+
+    # Permadeath gating: dead players may only use limited informational commands.
+    if sid and sid in world.players:
+        psheet = world.players[sid].sheet
+        if getattr(psheet, 'is_dead', False):
+            allowed = {"help", "who", "look"}
+            if cmd not in allowed:
+                emit(MESSAGE_OUT, {'type': 'error', 'content': 'You are dead (permadeath). Only /help, /who, /look are allowed.'})
+                return
     # Player ownership commands: /claim <object name>, /unclaim <object name>
     if cmd in ('claim', 'unclaim'):
         if sid is None:
@@ -3389,6 +3405,7 @@ def handle_command(sid: str | None, text: str) -> None:
     # Routers: auth & player utilities
     from command_context import CommandContext  # local import (avoid top-level weight during tests)
     import auth_router, player_router  # type: ignore
+    import combat_router  # type: ignore  # new combat commands (/attack)
     base_ctx = CommandContext(
         world=world,
         state_path=STATE_PATH,
@@ -3424,6 +3441,9 @@ def handle_command(sid: str | None, text: str) -> None:
     # Trade & barter router
     import trade_router  # type: ignore
     if trade_router.try_handle(base_ctx, sid, cmd, args, text, emit):
+        return
+    # Combat router
+    if combat_router.try_handle(base_ctx, sid, cmd, args, text, emit):
         return
 
 

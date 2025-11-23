@@ -7,6 +7,8 @@ Terminology:
 Supports:
     - /npc add <room name> | <npc name> | <npc description>
     - /npc remove <npc name>  (removes from the admin's current room)
+    - /npc generate  (contextual: generates NPC fitting current room and world)
+    - /npc generate <room name> | <npc name> | <description>  (explicit)
 
 Backward compatibility:
     - /npc add <room_id> <npc name...>
@@ -18,7 +20,7 @@ Backward compatibility:
     - /npc setaspect <npc name> | <type> | <value>
     - /npc setmatrix <npc name> | <axis> | <value>
     - /npc sheet <npc name>
-    - /npc generate <room name> | <npc name> | <description>
+    - /npc familygen <room name> | <target npc name> | <relationship>
 
 Service Contract:
     All public functions return 4-tuple: (handled, error, emits, broadcasts)
@@ -168,10 +170,84 @@ def _generate_nexus_profile(model, name: str, description: str, world_context: s
         "    \"rat_rom\": int (-10 to 10),\n"
         "    \"ske_abso\": int (-10 to 10)\n"
         "  }\n"
-        "}"
+        "}\n\n"
+        "IMPORTANT: Advantages must total ≤40 points, disadvantages ≥-40 points, quirks max 5."
     )
     try:
         resp = model.generate_content(prompt)
+        text = getattr(resp, 'text', None) or str(resp)
+        return _extract_json_object(text)
+    except Exception:
+        return None
+
+
+def _generate_contextual_npc(model, world_name: Optional[str], world_desc: Optional[str], 
+                              world_conflict: Optional[str], room_desc: str, 
+                              existing_npcs: List[str], safety_level: str) -> Optional[dict]:
+    """Generate a contextually appropriate NPC that fits the world and current room.
+    
+    Returns a dict with 'name', 'description', and full Nexus System profile.
+    """
+    world_context = []
+    if world_name:
+        world_context.append(f"World Name: {world_name}")
+    if world_desc:
+        world_context.append(f"World Description: {world_desc}")
+    if world_conflict:
+        world_context.append(f"Main Conflict: {world_conflict}")
+    
+    wc_text = "\n".join(world_context) if world_context else "A generic fantasy world."
+    
+    existing_text = ""
+    if existing_npcs:
+        existing_text = "\n[Existing NPCs in this room]\n" + "\n".join(existing_npcs)
+    
+    prompt = (
+        "You are a game master for a TTRPG using the Nexus System (GURPS + FATE + SWN).\n"
+        "Generate a complete NPC that would naturally fit in this location within the world.\n"
+        "The NPC should complement existing NPCs (not duplicate them) and fit the room's purpose.\n\n"
+        f"[World Context]\n{wc_text}\n\n"
+        f"[Room Description]\n{room_desc}\n"
+        f"{existing_text}\n\n"
+        "Return ONLY a JSON object with this schema:\n"
+        "{\n"
+        "  \"name\": \"string (unique, fitting name)\",\n"
+        "  \"description\": \"string (1-3 sentences about who they are)\",\n"
+        "  \"high_concept\": \"string (FATE aspect)\",\n"
+        "  \"trouble\": \"string (FATE aspect)\",\n"
+        "  \"background\": \"string (SWN background)\",\n"
+        "  \"focus\": \"string (SWN focus)\",\n"
+        "  \"strength\": int (3-18, avg 10),\n"
+        "  \"dexterity\": int (3-18, avg 10),\n"
+        "  \"intelligence\": int (3-18, avg 10),\n"
+        "  \"health\": int (3-18, avg 10),\n"
+        "  \"advantages\": [{\"name\": \"string\", \"cost\": int}],\n"
+        "  \"disadvantages\": [{\"name\": \"string\", \"cost\": int}],\n"
+        "  \"quirks\": [\"string\"],\n"
+        "  \"psychosocial_matrix\": {\n"
+        "    \"sexuality_hom_het\": int (-10 to 10),\n"
+        "    \"physical_presentation_mas_fem\": int (-10 to 10),\n"
+        "    \"social_presentation_mas_fem\": int (-10 to 10),\n"
+        "    \"auth_egal\": int (-10 to 10),\n"
+        "    \"cons_lib\": int (-10 to 10),\n"
+        "    \"spirit_mat\": int (-10 to 10),\n"
+        "    \"ego_alt\": int (-10 to 10),\n"
+        "    \"hed_asc\": int (-10 to 10),\n"
+        "    \"nih_mor\": int (-10 to 10),\n"
+        "    \"rat_rom\": int (-10 to 10),\n"
+        "    \"ske_abso\": int (-10 to 10)\n"
+        "  }\n"
+        "}\n\n"
+        "IMPORTANT: Advantages must total ≤40 points, disadvantages ≥-40 points, quirks max 5.\n"
+        "Make the NPC interesting and appropriate for the setting."
+    )
+    
+    try:
+        safety = _safety_settings_for_level(safety_level)
+        if safety is not None:
+            resp = model.generate_content(prompt, safety_settings=safety)
+        else:
+            resp = model.generate_content(prompt)
         text = getattr(resp, 'text', None) or str(resp)
         return _extract_json_object(text)
     except Exception:
@@ -186,7 +262,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
     emits: List[dict] = []
     broadcasts: List[Tuple[str, dict]] = []
     if not args:
-        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations|familygen> ...', emits, broadcasts
+        return True, 'Usage: /npc <add|remove|setdesc|setrelation|removerelations|familygen|generate|setattr|setaspect|setmatrix|sheet> ...', emits, broadcasts
 
     sub = args[0].lower()
     sub_args = args[1:]
@@ -663,64 +739,112 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
         return True, None, emits, broadcasts
 
     if sub == 'generate':
-        # /npc generate <room name> | <npc name> | <description>
-        try:
-            parts_joined = " ".join(sub_args)
-            room_in, name_in, desc_in = _parse_pipe_parts(parts_joined, expected=3)
-        except Exception:
-            return True, 'Usage: /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+        # /npc generate  (contextual to player's current room)
+        # OR /npc generate <room name> | <npc name> | <description>
         
-        room_in = _strip_quotes(room_in)
-        name_in = _strip_quotes(name_in)
-        desc_in = desc_in.strip()
-        
-        if not room_in or not name_in:
-            return True, 'Usage: /npc generate <room name> | <npc name> | <description>', emits, broadcasts
-
-        # Resolve room
-        okn, errn, norm = _normalize_room_input(world, sid, room_in)
-        if not okn:
-            return True, errn, emits, broadcasts
-        val = norm if isinstance(norm, str) else room_in
-        rok, rerr, room_res = _resolve_room_id(world, val)
-        if not rok or not room_res:
-            return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
-        room = world.rooms.get(room_res)
-        if not room:
-            return True, f"Room '{room_res}' not found.", emits, broadcasts
-
-        # Check for AI model
+        # Check for AI model first
         model = _get_gemini_model()
         if not model:
             return True, "AI generation is not available (no API key configured).", emits, broadcasts
 
-        # Build context
-        world_name = getattr(world, 'world_name', None)
-        world_desc = getattr(world, 'world_description', None)
-        world_context = []
-        if world_name:
-            world_context.append(f"Name: {world_name}")
-        if world_desc:
-            world_context.append(f"Description: {world_desc}")
-        wc_text = "\n".join(world_context)
-
-        emits.append({'type': 'system', 'content': f"Generating Nexus profile for '{name_in}'... please wait."})
+        # Determine if this is contextual (no args) or explicit (with args)
+        parts_joined = " ".join(sub_args)
+        contextual_mode = not parts_joined.strip() or '|' not in parts_joined
         
-        # Generate
-        profile = _generate_nexus_profile(model, name_in, desc_in, wc_text)
-        if not profile:
-            return True, "AI generation failed.", emits, broadcasts
+        if contextual_mode:
+            # Contextual generation: use player's current room
+            if not sid:
+                return True, 'Usage: /npc generate  (from your current room) OR /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+            
+            player = world.players.get(sid)
+            if not player:
+                return True, 'You must be logged in to use contextual generation.', emits, broadcasts
+            
+            room_res = player.room_id
+            room = world.rooms.get(room_res)
+            if not room:
+                return True, 'You are not in a valid room.', emits, broadcasts
 
-        # Create/Update NPC
-        sheet = world.npc_sheets.get(name_in)
-        if not sheet:
-            sheet = CharacterSheet(display_name=name_in, description=desc_in)
-            world.npc_sheets[name_in] = sheet
-            room.npcs.add(name_in)
+            # Build rich context from world and room
+            world_name = getattr(world, 'world_name', None)
+            world_desc = getattr(world, 'world_description', None)
+            world_conflict = getattr(world, 'world_conflict', None)
+            
+            # Get other NPCs in the room for context
+            existing_npcs = []
+            for npc_name in (room.npcs or set()):
+                npc_sheet = world.npc_sheets.get(npc_name)
+                if npc_sheet:
+                    existing_npcs.append(f"  - {npc_name}: {npc_sheet.description}")
+            
+            emits.append({'type': 'system', 'content': f"Generating contextual NPC for {room.id}... please wait."})
+            
+            # Generate a full NPC that fits the world and room
+            profile = _generate_contextual_npc(model, world_name, world_desc, world_conflict, room.description, existing_npcs, getattr(world, 'safety_level', 'G'))
+            if not profile:
+                return True, "AI generation failed.", emits, broadcasts
+            
+            npc_name = profile.get('name', 'Generated NPC')
+            npc_desc = profile.get('description', 'A generated character.')
+            
+        else:
+            # Explicit generation: parse arguments
             try:
-                world.get_or_create_npc_id(name_in)
+                room_in, name_in, desc_in = _parse_pipe_parts(parts_joined, expected=3)
+            except Exception:
+                return True, 'Usage: /npc generate  OR  /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+            
+            room_in = _strip_quotes(room_in)
+            name_in = _strip_quotes(name_in)
+            desc_in = desc_in.strip()
+            
+            if not room_in or not name_in:
+                return True, 'Usage: /npc generate  OR  /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+
+            # Resolve room
+            okn, errn, norm = _normalize_room_input(world, sid, room_in)
+            if not okn:
+                return True, errn, emits, broadcasts
+            val = norm if isinstance(norm, str) else room_in
+            rok, rerr, room_res = _resolve_room_id(world, val)
+            if not rok or not room_res:
+                return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
+            room = world.rooms.get(room_res)
+            if not room:
+                return True, f"Room '{room_res}' not found.", emits, broadcasts
+
+            # Build context
+            world_name = getattr(world, 'world_name', None)
+            world_desc = getattr(world, 'world_description', None)
+            world_context = []
+            if world_name:
+                world_context.append(f"Name: {world_name}")
+            if world_desc:
+                world_context.append(f"Description: {world_desc}")
+            wc_text = "\n".join(world_context)
+
+            emits.append({'type': 'system', 'content': f"Generating Nexus profile for '{name_in}'... please wait."})
+            
+            # Generate
+            profile = _generate_nexus_profile(model, name_in, desc_in, wc_text)
+            if not profile:
+                return True, "AI generation failed.", emits, broadcasts
+            
+            npc_name = name_in
+            npc_desc = desc_in
+
+        # Create/Update NPC with generated profile
+        sheet = world.npc_sheets.get(npc_name)
+        if not sheet:
+            sheet = CharacterSheet(display_name=npc_name, description=npc_desc)
+            world.npc_sheets[npc_name] = sheet
+            room.npcs.add(npc_name)
+            try:
+                world.get_or_create_npc_id(npc_name)
             except Exception:
                 pass
+        else:
+            sheet.description = npc_desc
         
         # Apply profile
         try:
@@ -732,16 +856,45 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             sheet.dexterity = int(profile.get('dexterity', 10))
             sheet.intelligence = int(profile.get('intelligence', 10))
             sheet.health = int(profile.get('health', 10))
-            sheet.advantages = list(profile.get('advantages', []))
-            sheet.disadvantages = list(profile.get('disadvantages', []))
-            sheet.quirks = list(profile.get('quirks', []))
             
+            # Process advantages with proper allocation (max 40 points spent)
+            advantages_raw = profile.get('advantages', [])
+            if isinstance(advantages_raw, list):
+                sheet.advantages = []
+                total_adv = 0
+                for adv in advantages_raw:
+                    if isinstance(adv, dict):
+                        cost = int(adv.get('cost', 5))
+                        if total_adv + cost <= 40:
+                            sheet.advantages.append(adv)
+                            total_adv += cost
+            
+            # Process disadvantages with proper allocation (max -40 points)
+            disadv_raw = profile.get('disadvantages', [])
+            if isinstance(disadv_raw, list):
+                sheet.disadvantages = []
+                total_disadv = 0
+                for dis in disadv_raw:
+                    if isinstance(dis, dict):
+                        cost = int(dis.get('cost', -5))
+                        if total_disadv + cost >= -40:
+                            sheet.disadvantages.append(dis)
+                            total_disadv += cost
+            
+            # Quirks (max 5, worth -1 each)
+            quirks_raw = profile.get('quirks', [])
+            if isinstance(quirks_raw, list):
+                sheet.quirks = quirks_raw[:5]
+            
+            # Psychosocial matrix
             matrix = profile.get('psychosocial_matrix', {})
             if isinstance(matrix, dict):
                 for k, v in matrix.items():
                     if hasattr(sheet, k):
                         try:
-                            setattr(sheet, k, int(v))
+                            # Clamp to valid range
+                            val = max(-10, min(10, int(v)))
+                            setattr(sheet, k, val)
                         except Exception:
                             pass
             
@@ -757,7 +910,7 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             return True, f"Error applying profile: {e}", emits, broadcasts
 
         _save_silent(world, state_path)
-        emits.append({'type': 'system', 'content': f"NPC '{name_in}' generated with Nexus stats."})
+        emits.append({'type': 'system', 'content': f"NPC '{npc_name}' generated with full Nexus stats in {room.id}."})
         return True, None, emits, broadcasts
 
     if sub == 'setattr':
