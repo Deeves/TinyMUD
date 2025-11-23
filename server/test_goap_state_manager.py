@@ -398,9 +398,12 @@ class TestGOAPModeTransitions:
 class TestCacheCleanup:
     """Test cleanup of planner-related caches."""
     
-    @patch('goap_state_manager.cleanup_rate_limiter')
-    def test_cache_cleanup_general_fallback(self, mock_cleanup):
+    @patch('rate_limiter.cleanup_rate_limiter')
+    @patch('rate_limiter.cleanup_npc_planning_rate_limits')
+    def test_cache_cleanup_general_fallback(self, mock_cleanup_npc, mock_cleanup):
         """Test general cache cleanup when introspection fails."""
+        # Make NPC cleanup fail to trigger fallback
+        mock_cleanup_npc.side_effect = Exception("NPC cleanup failed")
         mock_cleanup.return_value = None
         
         caches_cleaned, actions = cleanup_planner_caches()
@@ -409,19 +412,18 @@ class TestCacheCleanup:
         assert any("general rate limiter cleanup" in action for action in actions)
         mock_cleanup.assert_called_once()
     
-    @patch('goap_state_manager.get_rate_limit_status')
-    @patch('goap_state_manager.reset_rate_limit')
-    def test_cache_cleanup_specific_keys(self, mock_reset, mock_status):
+    @patch('rate_limiter.cleanup_npc_planning_rate_limits')
+    def test_cache_cleanup_specific_keys(self, mock_cleanup_npc):
         """Test cleanup of specific NPC planning keys."""
-        # Mock that some keys exist
-        mock_status.side_effect = lambda ctx, key: {"remaining": 5} if "TestNPC" in key else None
-        mock_reset.return_value = None
+        # Mock that some NPC planning keys were cleaned
+        mock_cleanup_npc.return_value = 3
         
         caches_cleaned, actions = cleanup_planner_caches()
         
-        # Should have tried to clean up found keys
-        assert caches_cleaned > 0
-        assert any("Reset rate limit for key" in action for action in actions)
+        # Should have cleaned up found keys
+        assert caches_cleaned == 3
+        assert any("Cleaned 3 NPC planning rate limits" in action for action in actions)
+        mock_cleanup_npc.assert_called_once()
 
 
 class TestWorldAudit:

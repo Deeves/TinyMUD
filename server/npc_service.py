@@ -14,6 +14,11 @@ Backward compatibility:
     - /npc setdesc <npc name> | <description>
     - /npc setrelation <source name> | <relationship type> | <target name>
     - /npc removerelations <source name> | <target name>
+    - /npc setattr <npc name> | <attribute> | <value>
+    - /npc setaspect <npc name> | <type> | <value>
+    - /npc setmatrix <npc name> | <axis> | <value>
+    - /npc sheet <npc name>
+    - /npc generate <room name> | <npc name> | <description>
 
 Service Contract:
     All public functions return 4-tuple: (handled, error, emits, broadcasts)
@@ -128,6 +133,49 @@ def _normalize_room_input(world, sid: str | None, typed: str) -> tuple[bool, str
             return False, 'You are nowhere.', None
         return True, None, rid
     return True, None, t
+
+
+def _generate_nexus_profile(model, name: str, description: str, world_context: str) -> Optional[dict]:
+    """Generate a full Nexus System character profile using AI."""
+    prompt = (
+        "You are a game master for a TTRPG using the Nexus System (GURPS + FATE + SWN).\n"
+        f"Create a full character profile for an NPC named '{name}'.\n"
+        f"Description: {description}\n\n"
+        f"[World Context]\n{world_context}\n\n"
+        "Return ONLY a JSON object with the following schema:\n"
+        "{\n"
+        "  \"high_concept\": \"string (FATE aspect)\",\n"
+        "  \"trouble\": \"string (FATE aspect)\",\n"
+        "  \"background\": \"string (SWN style)\",\n"
+        "  \"focus\": \"string (SWN style)\",\n"
+        "  \"strength\": int (3-18, avg 10),\n"
+        "  \"dexterity\": int (3-18, avg 10),\n"
+        "  \"intelligence\": int (3-18, avg 10),\n"
+        "  \"health\": int (3-18, avg 10),\n"
+        "  \"advantages\": [{\"name\": \"string\", \"cost\": int}],\n"
+        "  \"disadvantages\": [{\"name\": \"string\", \"cost\": int}],\n"
+        "  \"quirks\": [\"string\"],\n"
+        "  \"psychosocial_matrix\": {\n"
+        "    \"sexuality_hom_het\": int (-10 to 10),\n"
+        "    \"physical_presentation_mas_fem\": int (-10 to 10),\n"
+        "    \"social_presentation_mas_fem\": int (-10 to 10),\n"
+        "    \"auth_egal\": int (-10 to 10),\n"
+        "    \"cons_lib\": int (-10 to 10),\n"
+        "    \"spirit_mat\": int (-10 to 10),\n"
+        "    \"ego_alt\": int (-10 to 10),\n"
+        "    \"hed_asc\": int (-10 to 10),\n"
+        "    \"nih_mor\": int (-10 to 10),\n"
+        "    \"rat_rom\": int (-10 to 10),\n"
+        "    \"ske_abso\": int (-10 to 10)\n"
+        "  }\n"
+        "}"
+    )
+    try:
+        resp = model.generate_content(prompt)
+        text = getattr(resp, 'text', None) or str(resp)
+        return _extract_json_object(text)
+    except Exception:
+        return None
 
 
 def handle_npc_command(world, state_path: str, sid: str | None, args: list[str]) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
@@ -612,6 +660,214 @@ def handle_npc_command(world, state_path: str, sid: str | None, args: list[str])
             emits.append({'type': 'system', 'content': f"Removed relationships between {src_disp} and {tgt_disp}."})
         else:
             emits.append({'type': 'system', 'content': 'No relationships existed to remove.'})
+        return True, None, emits, broadcasts
+
+    if sub == 'generate':
+        # /npc generate <room name> | <npc name> | <description>
+        try:
+            parts_joined = " ".join(sub_args)
+            room_in, name_in, desc_in = _parse_pipe_parts(parts_joined, expected=3)
+        except Exception:
+            return True, 'Usage: /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+        
+        room_in = _strip_quotes(room_in)
+        name_in = _strip_quotes(name_in)
+        desc_in = desc_in.strip()
+        
+        if not room_in or not name_in:
+            return True, 'Usage: /npc generate <room name> | <npc name> | <description>', emits, broadcasts
+
+        # Resolve room
+        okn, errn, norm = _normalize_room_input(world, sid, room_in)
+        if not okn:
+            return True, errn, emits, broadcasts
+        val = norm if isinstance(norm, str) else room_in
+        rok, rerr, room_res = _resolve_room_id(world, val)
+        if not rok or not room_res:
+            return True, (rerr or f"Room '{room_in}' not found."), emits, broadcasts
+        room = world.rooms.get(room_res)
+        if not room:
+            return True, f"Room '{room_res}' not found.", emits, broadcasts
+
+        # Check for AI model
+        model = _get_gemini_model()
+        if not model:
+            return True, "AI generation is not available (no API key configured).", emits, broadcasts
+
+        # Build context
+        world_name = getattr(world, 'world_name', None)
+        world_desc = getattr(world, 'world_description', None)
+        world_context = []
+        if world_name:
+            world_context.append(f"Name: {world_name}")
+        if world_desc:
+            world_context.append(f"Description: {world_desc}")
+        wc_text = "\n".join(world_context)
+
+        emits.append({'type': 'system', 'content': f"Generating Nexus profile for '{name_in}'... please wait."})
+        
+        # Generate
+        profile = _generate_nexus_profile(model, name_in, desc_in, wc_text)
+        if not profile:
+            return True, "AI generation failed.", emits, broadcasts
+
+        # Create/Update NPC
+        sheet = world.npc_sheets.get(name_in)
+        if not sheet:
+            sheet = CharacterSheet(display_name=name_in, description=desc_in)
+            world.npc_sheets[name_in] = sheet
+            room.npcs.add(name_in)
+            try:
+                world.get_or_create_npc_id(name_in)
+            except Exception:
+                pass
+        
+        # Apply profile
+        try:
+            sheet.high_concept = str(profile.get('high_concept', ''))
+            sheet.trouble = str(profile.get('trouble', ''))
+            sheet.background = str(profile.get('background', ''))
+            sheet.focus = str(profile.get('focus', ''))
+            sheet.strength = int(profile.get('strength', 10))
+            sheet.dexterity = int(profile.get('dexterity', 10))
+            sheet.intelligence = int(profile.get('intelligence', 10))
+            sheet.health = int(profile.get('health', 10))
+            sheet.advantages = list(profile.get('advantages', []))
+            sheet.disadvantages = list(profile.get('disadvantages', []))
+            sheet.quirks = list(profile.get('quirks', []))
+            
+            matrix = profile.get('psychosocial_matrix', {})
+            if isinstance(matrix, dict):
+                for k, v in matrix.items():
+                    if hasattr(sheet, k):
+                        try:
+                            setattr(sheet, k, int(v))
+                        except Exception:
+                            pass
+            
+            # Recalculate derived stats
+            sheet.hp = sheet.strength
+            sheet.max_hp = sheet.strength
+            sheet.will = sheet.intelligence
+            sheet.perception = sheet.intelligence
+            sheet.fp = sheet.health
+            sheet.max_fp = sheet.health
+            
+        except Exception as e:
+            return True, f"Error applying profile: {e}", emits, broadcasts
+
+        _save_silent(world, state_path)
+        emits.append({'type': 'system', 'content': f"NPC '{name_in}' generated with Nexus stats."})
+        return True, None, emits, broadcasts
+
+    if sub == 'setattr':
+        # /npc setattr <npc name> | <attribute> | <value>
+        try:
+            parts_joined = " ".join(sub_args)
+            npc_in, attr_in, val_in = _parse_pipe_parts(parts_joined, expected=3)
+        except Exception:
+            return True, 'Usage: /npc setattr <npc name> | <attribute> | <value>', emits, broadcasts
+        
+        npc_name = _strip_quotes(npc_in)
+        attr = attr_in.strip().lower()
+        try:
+            val = int(val_in.strip())
+        except ValueError:
+            return True, 'Value must be an integer.', emits, broadcasts
+
+        sheet = world.npc_sheets.get(npc_name)
+        if not sheet:
+            return True, f"NPC '{npc_name}' not found.", emits, broadcasts
+
+        valid_attrs = {'strength', 'dexterity', 'intelligence', 'health', 'hp', 'max_hp', 'will', 'perception', 'fp', 'max_fp'}
+        if attr not in valid_attrs:
+            return True, f"Invalid attribute. Valid: {', '.join(sorted(valid_attrs))}", emits, broadcasts
+
+        setattr(sheet, attr, val)
+        _save_silent(world, state_path)
+        emits.append({'type': 'system', 'content': f"Set {npc_name}'s {attr} to {val}."})
+        return True, None, emits, broadcasts
+
+    if sub == 'setaspect':
+        # /npc setaspect <npc name> | <type> | <value>
+        try:
+            parts_joined = " ".join(sub_args)
+            npc_in, type_in, val_in = _parse_pipe_parts(parts_joined, expected=3)
+        except Exception:
+            return True, 'Usage: /npc setaspect <npc name> | <high_concept|trouble|background|focus> | <value>', emits, broadcasts
+        
+        npc_name = _strip_quotes(npc_in)
+        aspect_type = type_in.strip().lower()
+        val = val_in.strip()
+
+        sheet = world.npc_sheets.get(npc_name)
+        if not sheet:
+            return True, f"NPC '{npc_name}' not found.", emits, broadcasts
+
+        valid_types = {'high_concept', 'trouble', 'background', 'focus'}
+        if aspect_type not in valid_types:
+            return True, f"Invalid type. Valid: {', '.join(sorted(valid_types))}", emits, broadcasts
+
+        setattr(sheet, aspect_type, val)
+        _save_silent(world, state_path)
+        emits.append({'type': 'system', 'content': f"Set {npc_name}'s {aspect_type} to '{val}'."})
+        return True, None, emits, broadcasts
+
+    if sub == 'setmatrix':
+        # /npc setmatrix <npc name> | <axis> | <value>
+        try:
+            parts_joined = " ".join(sub_args)
+            npc_in, axis_in, val_in = _parse_pipe_parts(parts_joined, expected=3)
+        except Exception:
+            return True, 'Usage: /npc setmatrix <npc name> | <axis> | <value>', emits, broadcasts
+        
+        npc_name = _strip_quotes(npc_in)
+        axis = axis_in.strip().lower()
+        try:
+            val = int(val_in.strip())
+            if not (-10 <= val <= 10):
+                raise ValueError
+        except ValueError:
+            return True, 'Value must be an integer between -10 and 10.', emits, broadcasts
+
+        sheet = world.npc_sheets.get(npc_name)
+        if not sheet:
+            return True, f"NPC '{npc_name}' not found.", emits, broadcasts
+
+        # Check if axis exists on sheet and is an int (heuristic)
+        if not hasattr(sheet, axis) or not isinstance(getattr(sheet, axis), int):
+             return True, f"Invalid matrix axis '{axis}'.", emits, broadcasts
+
+        setattr(sheet, axis, val)
+        _save_silent(world, state_path)
+        emits.append({'type': 'system', 'content': f"Set {npc_name}'s {axis} to {val}."})
+        return True, None, emits, broadcasts
+
+    if sub == 'sheet':
+        # /npc sheet <npc name>
+        try:
+            parts_joined = " ".join(sub_args)
+            npc_in = _strip_quotes(parts_joined)
+        except Exception:
+            return True, 'Usage: /npc sheet <npc name>', emits, broadcasts
+        
+        sheet = world.npc_sheets.get(npc_in)
+        if not sheet:
+            return True, f"NPC '{npc_in}' not found.", emits, broadcasts
+
+        lines = [
+            f"[b]{sheet.display_name}[/b]",
+            f"{sheet.description}",
+            f"[b]High Concept:[/b] {sheet.high_concept}",
+            f"[b]Trouble:[/b] {sheet.trouble}",
+            f"[b]Background:[/b] {sheet.background}  [b]Focus:[/b] {sheet.focus}",
+            f"[b]ST:[/b] {sheet.strength} [b]DX:[/b] {sheet.dexterity} [b]IQ:[/b] {sheet.intelligence} [b]HT:[/b] {sheet.health}",
+            f"[b]HP:[/b] {sheet.hp}/{sheet.max_hp} [b]Will:[/b] {sheet.will} [b]Per:[/b] {sheet.perception} [b]FP:[/b] {sheet.fp}/{sheet.max_fp}",
+            "[b]Matrix:[/b]",
+            f"  Auth/Egal: {sheet.auth_egal}  Cons/Lib: {sheet.cons_lib}",
+            f"  Ego/Alt: {sheet.ego_alt}  Rat/Rom: {sheet.rat_rom}",
+        ]
+        emits.append({'type': 'system', 'content': "\n".join(lines)})
         return True, None, emits, broadcasts
 
     return False, None, emits, broadcasts

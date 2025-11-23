@@ -69,6 +69,8 @@ MODULES_TO_REFRESH = ("server", "dialogue_router", "trade_router")
 def fresh_server_modules():
     # Ensure TEST_MODE so server suppresses heartbeat threads for determinism
     os.environ['TEST_MODE'] = '1'
+    # Disable rate limiting for tests to prevent interference between test runs
+    os.environ['MUD_RATE_ENABLE'] = '0'
     # Optional: enable trade debug to diagnose session step transitions (safe noisy output)
     os.environ.setdefault('MUD_DEBUG_TRADE', '1')
     # Remove targeted modules; keep a copy of whether they existed for debugging
@@ -85,6 +87,9 @@ def fresh_server_modules():
         importlib.invalidate_caches()
         import server  # type: ignore  # noqa: F401
         server = importlib.reload(server)
+        # Reset the global world to a fresh empty state for tests
+        from world import World
+        server.world = World()  # Replace loaded world with fresh empty world
         # Reload dialogue router to pick up fast-path logic reliably
         try:
             import dialogue_router  # type: ignore

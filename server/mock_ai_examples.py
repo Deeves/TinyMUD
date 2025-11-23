@@ -47,7 +47,7 @@ def test_npc_familygen_with_mock_ai():
         import npc_service as ns
         
         # Test family generation (this would normally call Gemini)
-        handled, err, emits = ns.handle_npc_command(
+        handled, err, emits, broadcasts = ns.handle_npc_command(
             server.world,
             'test_state.json',
             None,  # No socketio needed for this test

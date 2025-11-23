@@ -327,12 +327,14 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
 
     # /npc
     if cmd == 'npc':
-        handled, err, emits2 = ctx.handle_npc_command(world, ctx.state_path, sid, args)
+        handled, err, emits2, broadcasts2 = ctx.handle_npc_command(world, ctx.state_path, sid, args)
         if err:
             _emit_error(emit, MESSAGE_OUT, err)
             return True
         for payload in emits2:
             emit(MESSAGE_OUT, payload)
+        for room_id, payload in broadcasts2:
+            ctx.broadcast_to_room(room_id, payload, sid)
         return True if handled else False
 
     return False  # should not reach (all admin_cmds covered) but safe fallback

@@ -318,6 +318,82 @@ class CharacterSheet:
     # When sleeping, ticks remaining and the bed object uuid (to validate the spot each tick)
     sleeping_ticks_remaining: int = 0
     sleeping_bed_uuid: str | None = None
+    
+    # Enhanced Needs System (Priority 1: Radiant AI expansion)
+    # Additional needs beyond the basic four, driving more complex behaviors
+    safety: float = 100.0      # Security/threat avoidance - drops near danger, restored in safe areas
+    wealth_desire: float = 50.0  # Drive to accumulate resources/currency - influences trading/hoarding
+    social_status: float = 50.0  # Desire for reputation/standing - affects interaction choices
+    
+    # Personality Traits (0-100 scale, like Oblivion's attributes)
+    # These influence how NPCs pursue their needs and interact with the world
+    responsibility: int = 50    # Moral compass - low values increase criminal behavior likelihood
+    aggression: int = 30       # Combat/conflict tendency - affects fight-or-flight decisions
+    confidence: int = 50       # Risk-taking behavior - influences bold vs cautious choices
+    curiosity: int = 50        # Exploration drive - affects movement and investigation behaviors
+    
+    # Memory and Relationship System
+    # Simple lists to track recent events and social connections
+    memories: list[dict] = field(default_factory=list)  # Recent events/interactions this NPC remembers
+    relationships: dict[str, float] = field(default_factory=dict)  # NPC_ID/Player_ID -> relationship score (-100 to +100)
+    
+    # --- Nexus System Attributes ---
+    # Core Attributes (GURPS)
+    strength: int = 10
+    dexterity: int = 10
+    intelligence: int = 10
+    health: int = 10
+
+    # Secondary Characteristics
+    hp: int = 10
+    max_hp: int = 10
+    will: int = 10
+    perception: int = 10
+    fp: int = 10
+    max_fp: int = 10
+    
+    # Narrative (FATE)
+    high_concept: str = ""
+    trouble: str = ""
+    destiny_points: int = 3
+
+    # Background (SWN)
+    background: str = ""
+    focus: str = ""
+
+    # Traits
+    advantages: List[Dict[str, Any]] = field(default_factory=list)
+    disadvantages: List[Dict[str, Any]] = field(default_factory=list)
+    quirks: List[str] = field(default_factory=list)
+    narrative_traits: List[str] = field(default_factory=list)
+
+    # Psychosocial Matrix (Sliders -10 to +10)
+    # Sexuality & Identity
+    sexuality_hom_het: int = 0
+    physical_presentation_mas_fem: int = 0
+    social_presentation_mas_fem: int = 0
+    is_dominant: bool = False
+    is_submissive: bool = False
+    is_asexual: bool = False
+
+    # Emotional State
+    rage_terror: int = 0
+    loathing_admiration: int = 0
+    grief_ecstasy: int = 0
+    amaze_vigil: int = 0
+
+    # Political State
+    auth_egal: int = 0
+    cons_lib: int = 0
+
+    # Philosophical State
+    spirit_mat: int = 0
+    ego_alt: int = 0
+    hed_asc: int = 0
+    nih_mor: int = 0
+    rat_rom: int = 0
+    ske_abso: int = 0
+
     # Action economy: how many actions an NPC can take per tick. Players ignore this.
     action_points: int = 0
     # Queue of planned actions produced by AI or offline planner. Each entry is a dict: {"tool": str, "args": dict}
@@ -336,6 +412,57 @@ class CharacterSheet:
             "sleep": self.sleep,
             "sleeping_ticks_remaining": int(self.sleeping_ticks_remaining or 0),
             "sleeping_bed_uuid": self.sleeping_bed_uuid,
+            # Enhanced needs system
+            "safety": self.safety,
+            "wealth_desire": self.wealth_desire,
+            "social_status": self.social_status,
+            # Personality traits
+            "responsibility": self.responsibility,
+            "aggression": self.aggression,
+            "confidence": self.confidence,
+            "curiosity": self.curiosity,
+            # Memory and relationships
+            "memories": list(self.memories or []),
+            "relationships": dict(self.relationships or {}),
+            # Nexus System
+            "strength": self.strength,
+            "dexterity": self.dexterity,
+            "intelligence": self.intelligence,
+            "health": self.health,
+            "hp": self.hp,
+            "max_hp": self.max_hp,
+            "will": self.will,
+            "perception": self.perception,
+            "fp": self.fp,
+            "max_fp": self.max_fp,
+            "high_concept": self.high_concept,
+            "trouble": self.trouble,
+            "destiny_points": self.destiny_points,
+            "background": self.background,
+            "focus": self.focus,
+            "advantages": self.advantages,
+            "disadvantages": self.disadvantages,
+            "quirks": self.quirks,
+            "narrative_traits": self.narrative_traits,
+            "sexuality_hom_het": self.sexuality_hom_het,
+            "physical_presentation_mas_fem": self.physical_presentation_mas_fem,
+            "social_presentation_mas_fem": self.social_presentation_mas_fem,
+            "is_dominant": self.is_dominant,
+            "is_submissive": self.is_submissive,
+            "is_asexual": self.is_asexual,
+            "rage_terror": self.rage_terror,
+            "loathing_admiration": self.loathing_admiration,
+            "grief_ecstasy": self.grief_ecstasy,
+            "amaze_vigil": self.amaze_vigil,
+            "auth_egal": self.auth_egal,
+            "cons_lib": self.cons_lib,
+            "spirit_mat": self.spirit_mat,
+            "ego_alt": self.ego_alt,
+            "hed_asc": self.hed_asc,
+            "nih_mor": self.nih_mor,
+            "rat_rom": self.rat_rom,
+            "ske_abso": self.ske_abso,
+            # Action system
             "action_points": self.action_points,
             "plan_queue": list(self.plan_queue or []),
         }
@@ -384,6 +511,57 @@ class CharacterSheet:
             sleep=_safe_float(data.get("sleep"), 100.0),
             sleeping_ticks_remaining=_safe_int(data.get("sleeping_ticks_remaining"), 0),
             sleeping_bed_uuid=str(data.get("sleeping_bed_uuid")) if data.get("sleeping_bed_uuid") else None,
+            # Enhanced needs system - backfill with sensible defaults
+            safety=_safe_float(data.get("safety"), 100.0),
+            wealth_desire=_safe_float(data.get("wealth_desire"), 50.0),
+            social_status=_safe_float(data.get("social_status"), 50.0),
+            # Personality traits - backfill with moderate defaults (Oblivion-style)
+            responsibility=_safe_int(data.get("responsibility"), 50),
+            aggression=_safe_int(data.get("aggression"), 30),
+            confidence=_safe_int(data.get("confidence"), 50),
+            curiosity=_safe_int(data.get("curiosity"), 50),
+            # Memory and relationships - safe list/dict loading
+            memories=list(data.get("memories", [])) if isinstance(data.get("memories"), list) else [],
+            relationships=dict(data.get("relationships", {})) if isinstance(data.get("relationships"), dict) else {},
+            # Nexus System
+            strength=_safe_int(data.get("strength"), 10),
+            dexterity=_safe_int(data.get("dexterity"), 10),
+            intelligence=_safe_int(data.get("intelligence"), 10),
+            health=_safe_int(data.get("health"), 10),
+            hp=_safe_int(data.get("hp"), 10),
+            max_hp=_safe_int(data.get("max_hp"), 10),
+            will=_safe_int(data.get("will"), 10),
+            perception=_safe_int(data.get("perception"), 10),
+            fp=_safe_int(data.get("fp"), 10),
+            max_fp=_safe_int(data.get("max_fp"), 10),
+            high_concept=str(data.get("high_concept", "")),
+            trouble=str(data.get("trouble", "")),
+            destiny_points=_safe_int(data.get("destiny_points"), 3),
+            background=str(data.get("background", "")),
+            focus=str(data.get("focus", "")),
+            advantages=list(data.get("advantages", [])) if isinstance(data.get("advantages"), list) else [],
+            disadvantages=list(data.get("disadvantages", [])) if isinstance(data.get("disadvantages"), list) else [],
+            quirks=list(data.get("quirks", [])) if isinstance(data.get("quirks"), list) else [],
+            narrative_traits=list(data.get("narrative_traits", [])) if isinstance(data.get("narrative_traits"), list) else [],
+            sexuality_hom_het=_safe_int(data.get("sexuality_hom_het"), 0),
+            physical_presentation_mas_fem=_safe_int(data.get("physical_presentation_mas_fem"), 0),
+            social_presentation_mas_fem=_safe_int(data.get("social_presentation_mas_fem"), 0),
+            is_dominant=bool(data.get("is_dominant", False)),
+            is_submissive=bool(data.get("is_submissive", False)),
+            is_asexual=bool(data.get("is_asexual", False)),
+            rage_terror=_safe_int(data.get("rage_terror"), 0),
+            loathing_admiration=_safe_int(data.get("loathing_admiration"), 0),
+            grief_ecstasy=_safe_int(data.get("grief_ecstasy"), 0),
+            amaze_vigil=_safe_int(data.get("amaze_vigil"), 0),
+            auth_egal=_safe_int(data.get("auth_egal"), 0),
+            cons_lib=_safe_int(data.get("cons_lib"), 0),
+            spirit_mat=_safe_int(data.get("spirit_mat"), 0),
+            ego_alt=_safe_int(data.get("ego_alt"), 0),
+            hed_asc=_safe_int(data.get("hed_asc"), 0),
+            nih_mor=_safe_int(data.get("nih_mor"), 0),
+            rat_rom=_safe_int(data.get("rat_rom"), 0),
+            ske_abso=_safe_int(data.get("ske_abso"), 0),
+            # Action system
             action_points=_safe_int(data.get("action_points"), 0),
             plan_queue=list(data.get("plan_queue", [])),
         )
@@ -599,6 +777,264 @@ class Room:
         return room
 
 
+class Faction:
+    """A faction represents an organized group of players and NPCs with shared goals.
+    
+    Factions provide a way to organize characters into meaningful groups with 
+    relationships to other factions. Each faction maintains lists of member entities,
+    allied factions, and rival factions for dynamic political gameplay.
+    """
+    
+    def __init__(self, 
+                 faction_id: str, 
+                 name: str, 
+                 description: str = "",
+                 member_player_ids: Optional[List[str]] = None,
+                 member_npc_ids: Optional[List[str]] = None,
+                 ally_faction_ids: Optional[List[str]] = None,
+                 rival_faction_ids: Optional[List[str]] = None) -> None:
+        """Initialize a new faction.
+        
+        Args:
+            faction_id: Unique identifier for this faction (UUID format)
+            name: Display name of the faction
+            description: Optional description of the faction's purpose/background
+            member_player_ids: List of player IDs (session IDs) who are members
+            member_npc_ids: List of NPC IDs who are members  
+            ally_faction_ids: List of faction IDs that are allies
+            rival_faction_ids: List of faction IDs that are rivals
+        """
+        # Core faction identity
+        self.faction_id: str = faction_id
+        self.name: str = name
+        self.description: str = description
+        
+        # Member lists - we store entity IDs for persistence stability
+        # Player members are identified by their user_id (not session sid)
+        # NPC members are identified by their stable NPC UUID from world.npc_ids
+        self.member_player_ids: List[str] = member_player_ids or []
+        self.member_npc_ids: List[str] = member_npc_ids or []
+        
+        # Political relationships with other factions
+        self.ally_faction_ids: List[str] = ally_faction_ids or []
+        self.rival_faction_ids: List[str] = rival_faction_ids or []
+        
+        # Faction metadata - could be extended later
+        self.created_timestamp: Optional[float] = None
+        self.leader_player_id: Optional[str] = None  # Optional designated leader
+        
+    def add_member_player(self, player_id: str) -> bool:
+        """Add a player to this faction's membership.
+        
+        Args:
+            player_id: The player's user ID (not session ID)
+            
+        Returns:
+            True if added successfully, False if already a member
+        """
+        if player_id not in self.member_player_ids:
+            self.member_player_ids.append(player_id)
+            return True
+        return False
+        
+    def add_member_npc(self, npc_id: str) -> bool:
+        """Add an NPC to this faction's membership.
+        
+        Args:
+            npc_id: The NPC's stable UUID from world.npc_ids
+            
+        Returns:
+            True if added successfully, False if already a member
+        """
+        if npc_id not in self.member_npc_ids:
+            self.member_npc_ids.append(npc_id)
+            return True
+        return False
+        
+    def remove_member_player(self, player_id: str) -> bool:
+        """Remove a player from this faction's membership.
+        
+        Args:
+            player_id: The player's user ID
+            
+        Returns:
+            True if removed successfully, False if not a member
+        """
+        try:
+            self.member_player_ids.remove(player_id)
+            return True
+        except ValueError:
+            return False
+            
+    def remove_member_npc(self, npc_id: str) -> bool:
+        """Remove an NPC from this faction's membership.
+        
+        Args:
+            npc_id: The NPC's stable UUID
+            
+        Returns:
+            True if removed successfully, False if not a member
+        """
+        try:
+            self.member_npc_ids.remove(npc_id)
+            return True
+        except ValueError:
+            return False
+    
+    def add_ally(self, faction_id: str) -> bool:
+        """Add an allied faction relationship.
+        
+        Args:
+            faction_id: The faction ID to mark as ally
+            
+        Returns:
+            True if added successfully, False if already an ally
+        """
+        if faction_id not in self.ally_faction_ids:
+            self.ally_faction_ids.append(faction_id)
+            return True
+        return False
+        
+    def add_rival(self, faction_id: str) -> bool:
+        """Add a rival faction relationship.
+        
+        Args:
+            faction_id: The faction ID to mark as rival
+            
+        Returns:
+            True if added successfully, False if already a rival
+        """
+        if faction_id not in self.rival_faction_ids:
+            self.rival_faction_ids.append(faction_id)
+            return True
+        return False
+        
+    def remove_ally(self, faction_id: str) -> bool:
+        """Remove an allied faction relationship.
+        
+        Args:
+            faction_id: The faction ID to remove from allies
+            
+        Returns:
+            True if removed successfully, False if not an ally
+        """
+        try:
+            self.ally_faction_ids.remove(faction_id)
+            return True
+        except ValueError:
+            return False
+            
+    def remove_rival(self, faction_id: str) -> bool:
+        """Remove a rival faction relationship.
+        
+        Args:
+            faction_id: The faction ID to remove from rivals
+            
+        Returns:
+            True if removed successfully, False if not a rival
+        """
+        try:
+            self.rival_faction_ids.remove(faction_id)
+            return True
+        except ValueError:
+            return False
+    
+    def get_total_members(self) -> int:
+        """Get the total number of faction members (players + NPCs).
+        
+        Returns:
+            Total count of all members
+        """
+        return len(self.member_player_ids) + len(self.member_npc_ids)
+        
+    def is_player_member(self, player_id: str) -> bool:
+        """Check if a player is a member of this faction.
+        
+        Args:
+            player_id: The player's user ID
+            
+        Returns:
+            True if the player is a member
+        """
+        return player_id in self.member_player_ids
+        
+    def is_npc_member(self, npc_id: str) -> bool:
+        """Check if an NPC is a member of this faction.
+        
+        Args:
+            npc_id: The NPC's stable UUID
+            
+        Returns:
+            True if the NPC is a member
+        """
+        return npc_id in self.member_npc_ids
+        
+    def is_ally(self, faction_id: str) -> bool:
+        """Check if another faction is an ally.
+        
+        Args:
+            faction_id: The other faction's ID
+            
+        Returns:
+            True if the faction is an ally
+        """
+        return faction_id in self.ally_faction_ids
+        
+    def is_rival(self, faction_id: str) -> bool:
+        """Check if another faction is a rival.
+        
+        Args:
+            faction_id: The other faction's ID
+            
+        Returns:
+            True if the faction is a rival
+        """
+        return faction_id in self.rival_faction_ids
+    
+    def to_dict(self) -> dict:
+        """Serialize faction to dictionary for persistence.
+        
+        Returns:
+            Dictionary representation of the faction
+        """
+        return {
+            'faction_id': self.faction_id,
+            'name': self.name,
+            'description': self.description,
+            'member_player_ids': self.member_player_ids,
+            'member_npc_ids': self.member_npc_ids,
+            'ally_faction_ids': self.ally_faction_ids,
+            'rival_faction_ids': self.rival_faction_ids,
+            'created_timestamp': self.created_timestamp,
+            'leader_player_id': self.leader_player_id,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Faction":
+        """Deserialize faction from dictionary data.
+        
+        Args:
+            data: Dictionary containing faction data
+            
+        Returns:
+            Faction instance restored from the data
+        """
+        faction = cls(
+            faction_id=data.get('faction_id', ''),
+            name=data.get('name', ''),
+            description=data.get('description', ''),
+            member_player_ids=data.get('member_player_ids', []),
+            member_npc_ids=data.get('member_npc_ids', []),
+            ally_faction_ids=data.get('ally_faction_ids', []),
+            rival_faction_ids=data.get('rival_faction_ids', [])
+        )
+        
+        # Load optional metadata
+        faction.created_timestamp = data.get('created_timestamp')
+        faction.leader_player_id = data.get('leader_player_id')
+        
+        return faction
+
 class World:
     def __init__(self) -> None:
         self.rooms: Dict[str, Room] = {}
@@ -612,6 +1048,9 @@ class World:
         # New: Global mapping of NPC display name -> stable UUID
         # Names are globally unique in this simple world; ids provide stability.
         self.npc_ids: Dict[str, str] = {}
+        # Faction system: organized groups of players and NPCs with political relationships
+        # Key is faction_id (UUID), value is Faction instance  
+        self.factions: Dict[str, Faction] = {}
         # World metadata configured by the first admin via setup wizard
         self.world_name: Optional[str] = None
         self.world_description: Optional[str] = None
@@ -633,7 +1072,7 @@ class World:
         self.debug_creative_mode = False
         # Schema version for migrations: tracks the data format version
         # New worlds start at latest version; old worlds are migrated on load
-        self.world_version: int = 0  # Will be set to latest during save/load
+        self.world_version: int = 0  # Will be set to latest during save/load  # Will be set to latest during save/load
 
     def ensure_default_room(self) -> Optional[Room]:
         """No longer auto-creates a default room; setup wizard defines the first room."""
@@ -724,6 +1163,8 @@ class World:
             "users": {uid: user.to_dict() for uid, user in self.users.items()},
             # Persist npc id mapping
             "npc_ids": self.npc_ids,
+            # Faction system data
+            "factions": {fid: faction.to_dict() for fid, faction in self.factions.items()},
             # World metadata
             "world_name": self.world_name,
             "world_description": self.world_description,
@@ -798,6 +1239,18 @@ class World:
         npc_ids = data.get("npc_ids", {})
         if isinstance(npc_ids, dict):
             w.npc_ids = dict(npc_ids)
+        
+        # Load factions with safe error handling
+        factions = data.get("factions", {})
+        if isinstance(factions, dict):
+            for fid, fdata in factions.items():
+                if isinstance(fdata, dict):
+                    try:
+                        faction = Faction.from_dict(fdata)
+                        w.factions[faction.faction_id] = faction
+                    except Exception:
+                        # Skip malformed faction entries but log for debugging
+                        print(f"Warning: Skipped malformed faction data for {fid}")
         
         # Load users
         users = data.get("users", {})
@@ -1028,6 +1481,166 @@ class World:
         self.users[uid] = user
         return user
 
+    # --- Faction helpers ---
+    def create_faction(self, name: str, description: str = "", leader_player_id: Optional[str] = None) -> Faction:
+        """Create a new faction with a unique ID.
+        
+        Args:
+            name: Display name for the faction
+            description: Optional description of the faction
+            leader_player_id: Optional player ID to designate as leader
+            
+        Returns:
+            The newly created Faction instance
+            
+        Raises:
+            ValueError: If a faction with the same name already exists
+        """
+        # Check for duplicate names (case-insensitive)
+        name_lower = name.strip().lower()
+        for faction in self.factions.values():
+            if faction.name.lower() == name_lower:
+                raise ValueError(f"Faction name '{name}' already exists")
+        
+        # Create faction with unique ID
+        import uuid
+        faction_id = str(uuid.uuid4())
+        faction = Faction(
+            faction_id=faction_id,
+            name=name.strip(),
+            description=description
+        )
+        
+        # Set creation timestamp
+        import time
+        faction.created_timestamp = time.time()
+        
+        # Set leader if provided
+        if leader_player_id:
+            faction.leader_player_id = leader_player_id
+        
+        # Store in world
+        self.factions[faction_id] = faction
+        return faction
+    
+    def get_faction_by_name(self, name: str) -> Optional[Faction]:
+        """Find a faction by its display name (case-insensitive).
+        
+        Args:
+            name: The faction name to search for
+            
+        Returns:
+            The Faction instance if found, None otherwise
+        """
+        name_lower = name.strip().lower()
+        for faction in self.factions.values():
+            if faction.name.lower() == name_lower:
+                return faction
+        return None
+    
+    def get_player_factions(self, player_id: str) -> List[Faction]:
+        """Get all factions that a player is a member of.
+        
+        Args:
+            player_id: The player's user ID
+            
+        Returns:
+            List of Faction instances the player belongs to
+        """
+        return [faction for faction in self.factions.values() 
+                if faction.is_player_member(player_id)]
+    
+    def get_npc_factions(self, npc_id: str) -> List[Faction]:
+        """Get all factions that an NPC is a member of.
+        
+        Args:
+            npc_id: The NPC's stable UUID
+            
+        Returns:
+            List of Faction instances the NPC belongs to
+        """
+        return [faction for faction in self.factions.values() 
+                if faction.is_npc_member(npc_id)]
+    
+    def remove_faction(self, faction_id: str) -> bool:
+        """Remove a faction from the world.
+        
+        This also removes any references to this faction from other factions'
+        ally and rival lists to maintain referential integrity.
+        
+        Args:
+            faction_id: The faction ID to remove
+            
+        Returns:
+            True if the faction was removed, False if it didn't exist
+        """
+        if faction_id not in self.factions:
+            return False
+        
+        # Remove the faction
+        del self.factions[faction_id]
+        
+        # Clean up references from other factions
+        for other_faction in self.factions.values():
+            other_faction.remove_ally(faction_id)
+            other_faction.remove_rival(faction_id)
+        
+        return True
+    
+    def validate_faction_integrity(self) -> List[str]:
+        """Validate faction system integrity and return error messages.
+        
+        This checks for:
+        - Invalid player/NPC references
+        - Invalid ally/rival faction references  
+        - Circular relationships
+        
+        Returns:
+            List of error message strings
+        """
+        errors = []
+        
+        for faction_id, faction in self.factions.items():
+            # Validate player members exist
+            for player_id in faction.member_player_ids:
+                if player_id not in self.users:
+                    errors.append(f"Faction '{faction.name}' references non-existent player: {player_id}")
+            
+            # Validate NPC members exist  
+            for npc_id in faction.member_npc_ids:
+                # Check if NPC ID exists in our mapping
+                npc_exists = any(mapped_id == npc_id for mapped_id in self.npc_ids.values())
+                if not npc_exists:
+                    errors.append(f"Faction '{faction.name}' references non-existent NPC: {npc_id}")
+            
+            # Validate ally factions exist
+            for ally_id in faction.ally_faction_ids:
+                if ally_id not in self.factions:
+                    errors.append(f"Faction '{faction.name}' has non-existent ally: {ally_id}")
+                elif ally_id == faction_id:
+                    errors.append(f"Faction '{faction.name}' lists itself as an ally")
+            
+            # Validate rival factions exist
+            for rival_id in faction.rival_faction_ids:
+                if rival_id not in self.factions:
+                    errors.append(f"Faction '{faction.name}' has non-existent rival: {rival_id}")
+                elif rival_id == faction_id:
+                    errors.append(f"Faction '{faction.name}' lists itself as a rival")
+            
+            # Check for conflicting ally/rival relationships
+            for ally_id in faction.ally_faction_ids:
+                if ally_id in faction.rival_faction_ids:
+                    errors.append(f"Faction '{faction.name}' lists {ally_id} as both ally and rival")
+            
+            # Validate leader exists and is a member
+            if faction.leader_player_id:
+                if faction.leader_player_id not in self.users:
+                    errors.append(f"Faction '{faction.name}' has non-existent leader: {faction.leader_player_id}")
+                elif not faction.is_player_member(faction.leader_player_id):
+                    errors.append(f"Faction '{faction.name}' leader is not a member: {faction.leader_player_id}")
+        
+        return errors
+
     def validate(self) -> List[str]:
         """Validate world state and return a list of error messages.
         
@@ -1036,6 +1649,7 @@ class World:
         - Referential integrity (room links, player locations, NPC references)
         - Object consistency (travel points, inventory constraints)
         - User/account consistency
+        - Faction system integrity
         
         Returns:
             List of error message strings. Empty list indicates no validation errors.
@@ -1047,6 +1661,7 @@ class World:
             if not isinstance(uid, str):
                 return False
             try:
+                import uuid
                 uuid.UUID(uid)
                 return True
             except ValueError:
@@ -1084,11 +1699,14 @@ class World:
             if room.stairs_down_to and room.stairs_down_to not in self.rooms:
                 errors.append(f"Room '{room_id}' stairs_down_to points to non-existent room: {room.stairs_down_to}")
             
-            # Validate door IDs
+            # Validate door IDs (only check if they don't correspond to objects)
             for door_name in (room.doors or {}).keys():
                 door_id = (room.door_ids or {}).get(door_name)
                 if door_id:
-                    _check_uuid_unique(door_id, f"room '{room_id}' door '{door_name}' id")
+                    # Only check door ID uniqueness if there's no corresponding object
+                    # (if there is an object, it will be checked in the objects section)
+                    if door_id not in (room.objects or {}):
+                        _check_uuid_unique(door_id, f"room '{room_id}' door '{door_name}' id")
             
             # Validate stairs IDs
             if hasattr(room, 'stairs_up_id') and room.stairs_up_id:
@@ -1328,5 +1946,15 @@ class World:
         # 12. Validate NPC integrity (sheets ↔ IDs consistency)
         npc_integrity_errors = self.validate_npc_integrity()
         errors.extend(npc_integrity_errors)
+        
+        # 13. Validate faction system integrity
+        faction_integrity_errors = self.validate_faction_integrity()
+        errors.extend(faction_integrity_errors)
+        
+        # Also validate faction UUIDs are unique
+        for faction_id, faction in self.factions.items():
+            _check_uuid_unique(faction_id, f"faction '{faction.name}' id")
+            if faction.faction_id != faction_id:
+                errors.append(f"Faction key mismatch: key={faction_id}, faction.faction_id={faction.faction_id}")
         
         return errors

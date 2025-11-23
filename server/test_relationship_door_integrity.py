@@ -15,6 +15,8 @@ user deletions, and relationship changes without compromising security.
 """
 
 import tempfile
+import pytest
+import os
 from world import World, Room
 from account_service import create_account_and_login
 from movement_service import move_through_door
@@ -35,6 +37,7 @@ def setup_world_with_locked_door():
     Returns:
         tuple: (world, alice_sid, bob_sid, tmpfile_path, alice_uid, bob_uid)
     """
+    import uuid
     tmpfile = create_tmpfile()
     w = World()
 
@@ -44,25 +47,28 @@ def setup_world_with_locked_door():
     w.rooms['start'].doors['oak door'] = 'hall'
     w.start_room_id = 'start'
 
-    # Create two users
+    # Create two users with unique session IDs to avoid rate limiter collisions
     sessions = {}
     admins = set()
 
-    alice_sid = 'alice_sid'
+    # Use unique session IDs per test to avoid rate limiting collisions
+    unique_suffix = str(uuid.uuid4())[:8]
+    alice_sid = f'alice_{unique_suffix}'
+    bob_sid = f'bob_{unique_suffix}'
+    
     ok1, err1, _, _ = create_account_and_login(
-        w, alice_sid, 'Alice', 'pw1', 'Alice desc', sessions, admins, tmpfile)
+        w, alice_sid, f'Alice_{unique_suffix}', 'pw1', 'Alice desc', sessions, admins, tmpfile)
     assert ok1 and not err1, f"Failed to create Alice: {err1}"
 
-    bob_sid = 'bob_sid'
     ok2, err2, _, _ = create_account_and_login(
-        w, bob_sid, 'Bob', 'pw2', 'Bob desc', sessions, admins, tmpfile)
+        w, bob_sid, f'Bob_{unique_suffix}', 'pw2', 'Bob desc', sessions, admins, tmpfile)
     assert ok2 and not err2, f"Failed to create Bob: {err2}"
 
     # Get user IDs for relationship setup
     alice_uid = next(
-        uid for uid, u in w.users.items() if u.display_name == 'Alice')
+        uid for uid, u in w.users.items() if u.display_name == f'Alice_{unique_suffix}')
     bob_uid = next(
-        uid for uid, u in w.users.items() if u.display_name == 'Bob')
+        uid for uid, u in w.users.items() if u.display_name == f'Bob_{unique_suffix}')
 
     return w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid
 
@@ -74,6 +80,9 @@ class TestRevokedRelationships:
         """Test that revoking a relationship immediately prevents door access."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Establish relationship: Bob is Alice's friend
         w.relationships = w.relationships or {}
         w.relationships.setdefault(bob_uid, {})[alice_uid] = 'friend'
@@ -81,7 +90,7 @@ class TestRevokedRelationships:
         # Lock door to require 'friend' relationship with Alice
         handled, err, _, _ = handle_room_command(
             w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         assert handled and not err, f"Failed to lock door: {err}"
         
         # Bob should be able to pass initially
@@ -103,6 +112,9 @@ class TestRevokedRelationships:
         """Test behavior when relationships are partially cleaned up."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Set up relationships
         w.relationships = {
             bob_uid: {alice_uid: 'friend'},
@@ -112,7 +124,7 @@ class TestRevokedRelationships:
         # Lock door requiring friend relationship
         handle_room_command(
             w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Clear all of Bob's relationships but leave Alice's intact
         w.relationships[bob_uid] = {}
@@ -122,14 +134,17 @@ class TestRevokedRelationships:
         assert not ok and err and 'locked' in err.lower()
     
     def test_empty_relationships_dict(self):
-        """Test behavior when relationships dict becomes empty."""
+        """Test behavior when relationships dict is completely empty."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
+        
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
 
         # Set up relationship and lock
         w.relationships = {bob_uid: {alice_uid: 'friend'}}
         _, _, _, _ = handle_room_command(
             w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Clear entire relationships dict
         w.relationships = {}
@@ -146,11 +161,14 @@ class TestCorruptedRelationshipData:
         """Test behavior when relationships dict is None."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Set up valid relationship and lock
         w.relationships = {bob_uid: {alice_uid: 'friend'}}
         handle_room_command(
             w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Corrupt relationships to None
         w.relationships = None
@@ -163,9 +181,12 @@ class TestCorruptedRelationshipData:
         """Test handling of non-string relationship values."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Lock door first
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Set malformed relationship values
         test_cases = [
@@ -188,8 +209,11 @@ class TestCorruptedRelationshipData:
         """Test handling when relationship structure is not a dict."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Test various non-dict structures
         bad_structures = [
@@ -213,10 +237,13 @@ class TestMissingUserIntegrity:
         """Test behavior when target user in relationship is deleted."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Set up relationship and lock
         w.relationships = {bob_uid: {alice_uid: 'friend'}}
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Delete Alice's user account but leave relationship intact  
         del w.users[alice_uid]
@@ -229,10 +256,13 @@ class TestMissingUserIntegrity:
         """Test behavior when user with relationships is deleted."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Set up relationship and lock
         w.relationships = {bob_uid: {alice_uid: 'friend'}}
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Delete Bob's user account but leave player and relationships
         del w.users[bob_uid]
@@ -245,8 +275,11 @@ class TestMissingUserIntegrity:
         """Test relationships pointing to non-existent user IDs."""
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Create relationship to non-existent user
         fake_uid = 'nonexistent_user_id'
@@ -322,9 +355,12 @@ class TestActorResolutionEdgeCases:
         """Test behavior when player exists but has no matching user.""" 
         w, alice_sid, bob_sid, tmpfile, alice_uid, bob_uid = setup_world_with_locked_door()
         
+        # Get Alice's actual display name for the door lock command
+        alice_name = w.users[alice_uid].display_name
+        
         # Set up lock requiring relationship
         handle_room_command(w, tmpfile,
-            ['lockdoor', 'oak door|relationship: friend with Alice'], alice_sid)
+            ['lockdoor', f'oak door|relationship: friend with {alice_name}'], alice_sid)
         
         # Break the player->user sheet reference
         bob_player = w.players[bob_sid]

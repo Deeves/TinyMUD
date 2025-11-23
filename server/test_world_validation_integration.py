@@ -28,19 +28,24 @@ def test_validate_real_world_configuration():
         ok1, err1, emits1, broadcasts1 = handle_room_command(world, state_path, 
                                                             ['create', 'lobby', 'The main lobby'])
         assert ok1 and not err1, f"Failed to create lobby: {err1}"
+        print(f"After lobby creation, rooms: {list(world.rooms.keys())}")
         
         ok2, err2, emits2, broadcasts2 = handle_room_command(world, state_path, 
                                                             ['create', 'garden', 'A beautiful garden'])
         assert ok2 and not err2, f"Failed to create garden: {err2}"
+        print(f"After garden creation, rooms: {list(world.rooms.keys())}")
         
         ok3, err3, emits3, broadcasts3 = handle_room_command(world, state_path, 
                                                             ['create', 'upstairs', 'The upper floor'])
         assert ok3 and not err3, f"Failed to create upstairs: {err3}"
+        print(f"After upstairs creation, rooms: {list(world.rooms.keys())}")
         
         # Add doors between lobby and garden
+        print(f"Before adding door, rooms: {list(world.rooms.keys())}")
         ok4, err4, emits4, broadcasts4 = handle_room_command(world, state_path, 
                                                            ['adddoor', 'lobby|garden door|garden'])
         assert ok4 and not err4, f"Failed to add door: {err4}"
+        print(f"After adding door, rooms: {list(world.rooms.keys())}")
         
         # Add stairs between lobby and upstairs
         ok5, err5, emits5, broadcasts5 = handle_room_command(world, state_path, 

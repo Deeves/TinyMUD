@@ -103,7 +103,7 @@ def test_npc_familygen_before_and_after():
             world = World()
             world.rooms['start'] = Room(id='start', description='Test room')
             
-            handled, err, emits = ns.handle_npc_command(
+            handled, err, emits, broadcasts = ns.handle_npc_command(
                 world, 'test.json', None, ['familygen', 'start', 'TestNPC', 'sister']
             )
             
@@ -141,7 +141,7 @@ def test_npc_familygen_before_and_after():
             world.rooms['start'].npcs.add('TestNPC')
             
             # Now we can test the actual AI-powered family generation
-            handled, err, emits = ns.handle_npc_command(
+            handled, err, emits, broadcasts = ns.handle_npc_command(
                 world, 'test.json', None, ['familygen', 'start', 'TestNPC', 'sister']
             )
             

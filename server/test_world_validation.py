@@ -30,33 +30,31 @@ def test_simple_valid_world_passes_validation():
     w.rooms["room1"] = room1
     w.rooms["room2"] = room2
     
-    # Create reciprocal doors with proper objects
-    door1_id = str(uuid.uuid4())
-    door2_id = str(uuid.uuid4())
-    
-    room1.doors["north"] = "room2"
-    room1.door_ids["north"] = door1_id
-    room2.doors["south"] = "room1"
-    room2.door_ids["south"] = door2_id
-    
-    # Create door objects
+    # Create door objects first, then set up doors with their UUIDs
     door1_obj = Object(
         display_name="north door",
         object_tags={"Immovable", "Travel Point"},
         link_target_room_id="room2"
     )
-    door1_obj.uuid = door1_id
-    room1.objects[door1_id] = door1_obj
-    
     door2_obj = Object(
         display_name="south door",
         object_tags={"Immovable", "Travel Point"},
         link_target_room_id="room1"
     )
-    door2_obj.uuid = door2_id
-    room2.objects[door2_id] = door2_obj
     
-    # Add a player
+    # Use the auto-generated UUIDs from the objects
+    door1_id = door1_obj.uuid
+    door2_id = door2_obj.uuid
+
+    # Create reciprocal doors with proper objects
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door1_id
+    room2.doors["south"] = "room1"
+    room2.door_ids["south"] = door2_id
+
+    # Store the objects using their UUIDs as keys
+    room1.objects[door1_id] = door1_obj
+    room2.objects[door2_id] = door2_obj    # Add a player
     w.add_player("sid123", "TestPlayer", "room1")
     
     # Add an NPC with sheet
@@ -291,30 +289,30 @@ def test_validation_after_world_mutations():
     errors = w.validate()
     assert errors == []
     
-    # Add reciprocal doors with proper objects (mutation)
-    door1_id = str(uuid.uuid4())
-    door2_id = str(uuid.uuid4())
-    
-    room1.doors["north"] = "room2"
-    room1.door_ids["north"] = door1_id
-    room2.doors["south"] = "room1"
-    room2.door_ids["south"] = door2_id
-    
-    # Create door objects
+    # Create door objects first, then set up doors with their UUIDs (mutation)
     door1_obj = Object(
         display_name="north door",
         object_tags={"Immovable", "Travel Point"},
         link_target_room_id="room2"
     )
-    door1_obj.uuid = door1_id
-    room1.objects[door1_id] = door1_obj
-    
     door2_obj = Object(
         display_name="south door",
         object_tags={"Immovable", "Travel Point"},
         link_target_room_id="room1"
     )
-    door2_obj.uuid = door2_id
+    
+    # Use the auto-generated UUIDs from the objects
+    door1_id = door1_obj.uuid
+    door2_id = door2_obj.uuid
+    
+    # Add reciprocal doors with proper objects
+    room1.doors["north"] = "room2"
+    room1.door_ids["north"] = door1_id
+    room2.doors["south"] = "room1"
+    room2.door_ids["south"] = door2_id
+    
+    # Store the objects using their UUIDs as keys
+    room1.objects[door1_id] = door1_obj
     room2.objects[door2_id] = door2_obj
     
     # Should be clean after proper setup

@@ -78,7 +78,7 @@ def validate_npc_planner_state(world: World) -> Tuple[bool, List[str]]:
                 issues.append(f"NPC '{npc_name}' plan_queue[{i}] args is not dict: {type(args)}")
         
         # Validate need values are in proper ranges (0-100)
-        needs_to_check = ['hunger', 'thirst', 'socialization', 'sleep']
+        needs_to_check = ['hunger', 'thirst', 'socialization', 'sleep', 'safety', 'wealth_desire', 'social_status']
         for need in needs_to_check:
             value = getattr(sheet, need, 100.0)
             if not isinstance(value, (int, float)):
@@ -154,19 +154,26 @@ def clean_npc_planner_state(world: World, reset_plans: bool = True,
         
         # Reset needs if requested
         if reset_needs:
+            # Reset basic needs
             sheet.hunger = 100.0
             sheet.thirst = 100.0
             sheet.socialization = 100.0
             sheet.sleep = 100.0
+            # Reset enhanced needs to defaults
+            sheet.safety = 100.0
+            sheet.wealth_desire = 50.0
+            sheet.social_status = 50.0
             actions_taken.append(f"Reset needs for NPC '{npc_name}'")
             npc_had_issues = True
         else:
             # Clamp existing needs to valid ranges
             needs_clamped = False
-            for need_name in ['hunger', 'thirst', 'socialization', 'sleep']:
-                current_value = getattr(sheet, need_name, 100.0)
+            all_needs = ['hunger', 'thirst', 'socialization', 'sleep', 'safety', 'wealth_desire', 'social_status']
+            for need_name in all_needs:
+                current_value = getattr(sheet, need_name, 100.0 if need_name in ['hunger', 'thirst', 'socialization', 'sleep', 'safety'] else 50.0)
                 if not isinstance(current_value, (int, float)):
-                    setattr(sheet, need_name, 100.0)
+                    default_val = 100.0 if need_name in ['hunger', 'thirst', 'socialization', 'sleep', 'safety'] else 50.0
+                    setattr(sheet, need_name, default_val)
                     needs_clamped = True
                 else:
                     clamped_value = max(0.0, min(100.0, float(current_value)))
@@ -423,21 +430,33 @@ def on_world_reload_cleanup(world: World) -> List[str]:
     """
     all_actions = []
     
+    # Step 1: Clean up external caches
     try:
-        # Step 1: Clean up external caches
         caches_cleaned, cache_actions = cleanup_planner_caches()
         all_actions.extend(cache_actions)
-        
-        # Step 2: Validate and clean NPC state
+    except Exception as e:
+        logger.error(f"Error during world reload cleanup: {e}")
+        all_actions.append(f"Cleanup error: {e}")
+    
+    # Step 2: Validate and clean NPC state
+    try:
         npcs_cleaned, npc_actions = clean_npc_planner_state(world, reset_plans=False)
         all_actions.extend(npc_actions)
-        
-        # Step 3: Ensure GOAP mode is consistently applied
+    except Exception as e:
+        logger.error(f"Error during NPC state cleanup: {e}")
+        all_actions.append(f"NPC cleanup error: {e}")
+    
+    # Step 3: Ensure GOAP mode is consistently applied
+    try:
         current_mode = getattr(world, 'advanced_goap_enabled', False)
         mode_success, mode_actions = reset_goap_mode_safely(world, current_mode)
         all_actions.extend(mode_actions)
-        
-        # Step 4: Final validation
+    except Exception as e:
+        logger.error(f"Error during GOAP mode reset: {e}")
+        all_actions.append(f"Mode reset error: {e}")
+    
+    # Step 4: Final validation (always attempt this for health reporting)
+    try:
         audit = audit_world_planner_integrity(world)
         health_score = audit.get('health_score', 0)
         
@@ -445,9 +464,10 @@ def on_world_reload_cleanup(world: World) -> List[str]:
         
         if health_score < 90:
             all_actions.append(f"Warning: {len(audit.get('validation_issues', []))} integrity issues remain")
-    
     except Exception as e:
-        logger.error(f"Error during world reload cleanup: {e}")
-        all_actions.append(f"Cleanup error: {e}")
+        logger.error(f"Error during final audit: {e}")
+        all_actions.append(f"Audit error: {e}")
+        # Provide fallback health report
+        all_actions.append("World reload cleanup completed - Health score: 0.0% (audit failed)")
     
     return all_actions
