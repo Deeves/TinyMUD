@@ -2,12 +2,16 @@
 
 Note: The actual disconnect() must be performed by the caller since it depends
 on Flask-SocketIO. This module performs lookups and returns messages to emit.
+
+All functions return (handled/ok: bool, error: str | None, emits: list[dict], broadcasts: list[tuple[str, dict]]).
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 import os
+
+from persistence_utils import save_world
 from world import World
 
 
@@ -18,14 +22,15 @@ def list_admins(world) -> List[str]:
         return []
 
 
-def promote_user(world, sessions: Dict[str, str], admins: set[str], target_name: str, state_path: str) -> Tuple[bool, str | None, List[dict]]:
+def promote_user(world, sessions: Dict[str, str], admins: set[str], target_name: str, state_path: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     user = world.get_user_by_display_name(target_name)
     if not user:
-        return True, f"User '{target_name}' not found.", emits
+        return True, f"User '{target_name}' not found.", emits, broadcasts
     if user.is_admin:
         emits.append({'type': 'system', 'content': f"'{user.display_name}' is already an admin."})
-        return True, None, emits
+        return True, None, emits, broadcasts
     user.is_admin = True
     _save_silent(world, state_path)
     # Grant admin to any connected SIDs for this user
@@ -36,23 +41,24 @@ def promote_user(world, sessions: Dict[str, str], admins: set[str], target_name:
     except Exception:
         pass
     emits.append({'type': 'system', 'content': f"Promoted '{user.display_name}' to admin."})
-    return True, None, emits
+    return True, None, emits, broadcasts
 
 
-def demote_user(world, sessions: Dict[str, str], admins: set[str], target_name: str, state_path: str) -> Tuple[bool, str | None, List[dict]]:
+def demote_user(world, sessions: Dict[str, str], admins: set[str], target_name: str, state_path: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     emits: List[dict] = []
+    broadcasts: List[Tuple[str, dict]] = []
     user = world.get_user_by_display_name(target_name)
     if not user:
-        return True, f"User '{target_name}' not found.", emits
+        return True, f"User '{target_name}' not found.", emits, broadcasts
     if not user.is_admin:
         emits.append({'type': 'system', 'content': f"'{user.display_name}' is not an admin."})
-        return True, None, emits
+        return True, None, emits, broadcasts
     try:
         admin_count = sum(1 for u in world.users.values() if u.is_admin)
     except Exception:
         admin_count = 1
     if admin_count <= 1:
-        return True, 'Cannot demote the last remaining admin.', emits
+        return True, 'Cannot demote the last remaining admin.', emits, broadcasts
     user.is_admin = False
     _save_silent(world, state_path)
     try:
@@ -62,7 +68,7 @@ def demote_user(world, sessions: Dict[str, str], admins: set[str], target_name: 
     except Exception:
         pass
     emits.append({'type': 'system', 'content': f"Demoted '{user.display_name}' from admin."})
-    return True, None, emits
+    return True, None, emits, broadcasts
 
 
 def find_player_sid_by_name(world, player_name: str) -> Optional[str]:
@@ -108,14 +114,15 @@ def execute_purge(state_path: str) -> World:
         pass
     new_world = World()
     try:
-        new_world.save_to_file(state_path)
+        save_world(new_world, state_path, debounced=False)
     except Exception:
         pass
     return new_world
 
 
 def _save_silent(world, state_path: str) -> None:
+    """Helper to save world state silently using the persistence façade."""
     try:
-        world.save_to_file(state_path)
+        save_world(world, state_path, debounced=True)
     except Exception:
         pass

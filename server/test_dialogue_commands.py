@@ -20,14 +20,24 @@ import pytest
 
 @pytest.fixture()
 def server_ctx(monkeypatch):
-    # Import the server module once per test context
-    import server as srv
+    # Always reload server & dialogue_router to avoid stale in-memory modules between rapid runs
+    import importlib
+    import server as _srv_import
+    srv = importlib.reload(_srv_import)
+    try:
+        import dialogue_router as _dr_import
+        importlib.reload(_dr_import)
+    except Exception:
+        pass
+    # Ensure we are on a sufficiently recent build (instrumentation build id >= 5)
+    assert getattr(srv, 'get_server_build_id', None) is not None, "Server missing build ID accessor"
+    assert srv.get_server_build_id() >= 7, f"Outdated server build id: {getattr(srv,'SERVER_BUILD_ID', '?')}"
 
     # Replace the world with a fresh instance (avoid persisted state or startup side-effects)
     from world import World, Room
-    srv.world = World()
+    srv.world = World()  # type: ignore[attr-defined]
     # No AI calls in tests; ensure offline fallback path
-    srv.model = None
+    srv.model = None  # type: ignore[attr-defined]
 
     # Minimal world: one room with two players and two NPCs
     room = Room(id="start", description="Start room")
@@ -76,6 +86,12 @@ def server_ctx(monkeypatch):
 
     # Expose helpers to switch the current caller sid and to drive the handler
     def send_as(sid: str, text: str):
+        # Reset transient dialogue flags between messages to simulate clean per-message context
+        try:
+            if hasattr(srv, '_reset_dialogue_flags'):
+                srv._reset_dialogue_flags()
+        except Exception:
+            pass
         current_sid["sid"] = sid
         srv.handle_message({"content": text})
 
@@ -216,3 +232,27 @@ def test_targeted_gesture_to_npc_triggers_reply(server_ctx):
     assert any(m.get("type") == "system" and "[i]Alice bows to Innkeeper[/i]" == m.get("content") for m in b_msgs)
     # NPC reply should appear locally to Alice
     assert any(m.get("type") == "npc" for m in a_msgs), "Expected NPC to react to the gesture"
+
+
+def test_invalid_payload_shape_emits_error(monkeypatch):
+    # Import fresh server; ensure model disabled
+    import importlib
+    srv = importlib.import_module('server')
+    setattr(srv, 'model', None)
+
+    # Capture emits to the implicit current sid
+    captured = []
+    def fake_emit(event_name: str, payload=None, **kwargs):
+        if event_name == "message" and payload is not None:
+            captured.append(payload)
+    monkeypatch.setattr(srv, "emit", fake_emit, raising=True)
+    # get_sid isn't used for invalid shape path, but keep it defined
+    monkeypatch.setattr(srv, "get_sid", lambda: "sidZ", raising=True)
+
+    # Send bad payloads
+    srv.handle_message(None)
+    srv.handle_message({})
+    srv.handle_message({"wrong": "field"})
+
+    # We should have at least one error emission
+    assert any(p.get('type') == 'error' and 'Invalid payload' in p.get('content','') for p in captured)

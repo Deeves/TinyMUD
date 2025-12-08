@@ -3,9 +3,12 @@ from __future__ import annotations
 """
 interaction_service.py — Player-facing object interaction flow.
 
-Contract:
-- begin_interaction(world, sid, room, object_name, sessions) -> (ok: bool, err: str|None, emits: list[dict])
-- handle_interaction_input(world, sid, text, sessions) -> (handled: bool, emits: list[dict])
+Service Contract:
+    All public functions return 4-tuple: (handled, error, emits, broadcasts)
+    - handled: bool - whether the command was recognized
+    - error: str | None - error message if any
+    - emits: List[dict] - messages to send to the acting player
+    - broadcasts: List[Tuple[str, dict]] - (room_id, message) pairs for room broadcasts
 
 This service is intentionally tiny and side-effect free (no socket calls here).
 It lists possible interactions based on an Object's tags and guides the player
@@ -16,10 +19,12 @@ We derive interactions from tags in a conservative way. Unknown tags just don't
 add actions. "Step Away" is always available so players can cancel.
 """
 
-from typing import Tuple, List, Dict, Any
+from typing import Dict, Any
+from concurrency_utils import atomic
 import random
 from dice_utils import roll as dice_roll
 from movement_service import move_through_door
+from rate_limiter import check_rate_limit, OperationType
 
 
 # Map object tags -> human actions (labels). Keep these short and friendly.
@@ -27,9 +32,12 @@ _TAG_TO_ACTIONS: dict[str, list[str]] = {
     # Mobility / world geometry
     "Travel Point": ["Move Through"],
     # Carrying / equipment
-    "one-hand": ["Pick Up"],
-    "two-hand": ["Pick Up"],
+    "small": ["Pick Up"],
+    "large": ["Pick Up"],
     "weapon": ["Wield"],
+    # Resting
+    # The 'bed' tag enables a direct Sleep interaction for players (with ownership check)
+    "bed": ["Sleep"],
     # Common affordances (optional future use)
     "Edible": ["Eat"],
     "Drinkable": ["Drink"],
@@ -58,12 +66,51 @@ def _actions_for_object(world, obj) -> list[str]:
     actions: list[str] = []
     try:
         tags = set(getattr(obj, 'object_tags', []) or [])
-        # Static tag-based actions
+        # 1) Static tag-based actions (exact tag matches only)
         for t in list(tags):
             tstr = str(t)
             if tstr in _TAG_TO_ACTIONS:
                 actions.extend(_TAG_TO_ACTIONS[tstr])
-        # Dynamic: craft spot:<template_key>
+
+    # 2) Numeric-aware nutrition tags: 'Edible: N' and 'Drinkable: N'
+        def _parse_tag_val(ts: set[str], key: str) -> int | None:
+            keyl = key.lower()
+            for x in ts:
+                s = str(x)
+                parts = s.split(':', 1)
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip().lower() == keyl:
+                    r = parts[1].strip()
+                    if r.startswith('+'):
+                        r = r[1:]
+                    if r.lstrip('-').isdigit():
+                        try:
+                            return int(r)
+                        except Exception:
+                            return None
+            return None
+        has_edible = any(str(t).split(':', 1)[0].strip().lower() == 'edible' for t in tags)
+        has_drink = any(str(t).split(':', 1)[0].strip().lower() == 'drinkable' for t in tags)
+        val_e = _parse_tag_val(tags, 'Edible') if has_edible else None
+        val_d = _parse_tag_val(tags, 'Drinkable') if has_drink else None
+    # If numeric provided, replace plain label with formatted one; if missing,
+    # remove the action entirely
+        if has_edible:
+            # Remove any prior Eat variants
+            actions = [a for a in actions if not (a == 'Eat' or a.lower().startswith('eat (+'))]
+            if val_e is not None:
+                actions.append(f"Eat (+{val_e})")
+        if has_drink:
+            actions = [
+                a for a in actions
+                if not (a == 'Drink' or a.lower().startswith('drink (+'))
+            ]
+            if val_d is not None:
+                actions.append(f"Drink (+{val_d})")
+
+        # 3) Dynamic: craft spot:<template_key>
+        store = getattr(world, 'object_templates', {}) or {}
         for t in list(tags):
             try:
                 tstr = str(t)
@@ -74,7 +121,6 @@ def _actions_for_object(world, obj) -> list[str]:
                 key_raw = tstr.split(':', 1)[1].strip()
                 if not key_raw:
                     continue
-                store = getattr(world, 'object_templates', {}) or {}
                 key_match = None
                 if key_raw in store:
                     key_match = key_raw
@@ -87,7 +133,10 @@ def _actions_for_object(world, obj) -> list[str]:
                 label_name = key_raw
                 try:
                     if key_match and store.get(key_match):
-                        label_name = getattr(store[key_match], 'display_name', key_match) or key_match
+                        label_name = (
+                            getattr(store[key_match], 'display_name', key_match)
+                            or key_match
+                        )
                 except Exception:
                     label_name = key_raw
                 actions.append(f"Craft {label_name}")
@@ -108,47 +157,66 @@ def _format_choices(title: str, actions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def begin_interaction(world, sid: str, room, object_name: str, sessions: Dict[str, dict]) -> tuple[bool, str | None, list[dict]]:
+def begin_interaction(
+    world,
+    sid: str,
+    room,
+    object_name: str,
+    sessions: Dict[str, dict],
+) -> tuple[bool, str | None, list[dict], list[tuple[str, dict]]]:
+    """Begin an interaction with an object.
+    
+    Returns: (handled, error, emits, broadcasts)
+    """
+    broadcasts: list[tuple[str, dict]] = []
     if not sid or sid not in world.players:
-        return False, 'Please authenticate first.', []
+        return False, 'Please authenticate first.', [], broadcasts
     if not room:
-        return False, 'You are nowhere.', []
-    from look_service import resolve_object_in_room  # local import to avoid cycles at module import time
+        return False, 'You are nowhere.', [], broadcasts
+    # Local import to avoid cycles at module import time
+    from look_service import resolve_object_in_room
     obj, suggestions = resolve_object_in_room(room, object_name)
     if obj is None:
         if suggestions:
-            return False, "Did you mean: " + ", ".join(suggestions) + "?", []
-        return False, f"You don't see '{object_name}' here.", []
+            return False, "Did you mean: " + ", ".join(suggestions) + "?", [], broadcasts
+        return False, f"You don't see '{object_name}' here.", [], broadcasts
 
     actions = _actions_for_object(world, obj)
     # Stash session state
-    sessions[sid] = {
-        'step': 'choose',
-        'obj_uuid': getattr(obj, 'uuid', None),
-        'obj_name': getattr(obj, 'display_name', 'object'),
-        'actions': actions,
-    }
+    with atomic('interaction_sessions'):
+        sessions[sid] = {
+            'step': 'choose',
+            'obj_uuid': getattr(obj, 'uuid', None),
+            'obj_name': getattr(obj, 'display_name', 'object'),
+            'actions': actions,
+        }
     # Build emits
     title = f"Interactions for {getattr(obj, 'display_name', 'object')}"
     emits = [
         {'type': 'system', 'content': _format_choices(title, actions)}
     ]
-    return True, None, emits
+    return True, None, emits, broadcasts
 
 
-def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dict]) -> tuple[bool, list[dict], list[tuple[str, dict]]]:
+def handle_interaction_input(
+    world,
+    sid: str,
+    text: str,
+    sessions: Dict[str, dict],
+) -> tuple[bool, str | None, list[dict], list[tuple[str, dict]]]:
     """Handle a follow-up input while in the interaction session.
 
-    Returned handled=False if no active session; otherwise True with resulting emits.
+    Returns: (handled, error, emits, broadcasts)
     """
     sess = sessions.get(sid)
     if not sess:
-        return False, [], []
+        return False, None, [], []
     step = sess.get('step')
     if step != 'choose':
         # Unknown state: fail-safe cancel
-        sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': 'Interaction cancelled.'}], []
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
+        return True, None, [{'type': 'system', 'content': 'Interaction cancelled.'}], []
 
     raw = (text or '').strip()
     low = raw.lower()
@@ -158,8 +226,9 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
 
     # Friendly cancel words
     if low in ('cancel', 'back', 'exit', 'quit', 'step away'):
-        sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': f'You step away from {name}.'}], []
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
+        return True, None, [{'type': 'system', 'content': f'You step away from {name}.'}], []
 
     chosen: str | None = None
     # Allow numeric selection 1..N
@@ -187,15 +256,22 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         # Reprint menu
         title = f"Interactions for {name}"
         msg = _format_choices(title, actions)
-        return True, [
-            {'type': 'system', 'content': "I didn't catch that. Please pick one of the options (number or name)."},
+        return True, None, [
+            {
+                'type': 'system',
+                'content': (
+                    "I didn't catch that. Please pick one of the options "
+                    "(number or name)."
+                ),
+            },
             {'type': 'system', 'content': msg},
         ], []
 
     # Always allow cancelling via Step Away
     if chosen.lower() == 'step away':
-        sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': f'You step away from {name}.'}], []
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
+        return True, None, [{'type': 'system', 'content': f'You step away from {name}.'}], []
 
     # Locate the object by uuid in the current room or player's inventory
     player = world.players.get(sid)
@@ -215,17 +291,33 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         for i in range(0, 2):
             it = inv.slots[i]
             if it and getattr(it, 'uuid', None) == obj_uuid:
-                obj = it; obj_loc = 'hand'; hand_index = i; break
+                obj = it
+                obj_loc = 'hand'
+                hand_index = i
+                break
         if not obj:
             for i in range(2, 6):
                 it = inv.slots[i]
                 if it and getattr(it, 'uuid', None) == obj_uuid:
-                    obj = it; obj_loc = 'small'; stow_index = i; break
+                    obj = it
+                    obj_loc = 'small'
+                    stow_index = i
+                    break
         if not obj:
             for i in range(6, 8):
                 it = inv.slots[i]
                 if it and getattr(it, 'uuid', None) == obj_uuid:
-                    obj = it; obj_loc = 'large'; stow_large_index = i; break
+                    obj = it
+                    obj_loc = 'large'
+                    stow_large_index = i
+                    break
+
+    # Helper: simple clamp to keep needs within 0..100
+    def _clamp_need(v: float | int | None) -> float:
+        try:
+            return max(0.0, min(100.0, float(v or 0.0)))
+        except Exception:
+            return 0.0
 
     if chosen.lower() == 'move through':
         # Delegate to movement service using the object's display name
@@ -235,16 +327,25 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         else:
             target_name = getattr(obj, 'display_name', name)
         ok, err, emits_m, broadcasts_m = move_through_door(world, sid, target_name)
-        sessions.pop(sid, None)
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
         if not ok:
-            return True, [{'type': 'error', 'content': err or 'You cannot go that way.'}], []
-        return True, emits_m, broadcasts_m
+            return True, None, [{'type': 'error', 'content': err or 'You cannot go that way.'}], []
+        return True, None, emits_m, broadcasts_m
 
     # Craft action(s): derived from 'craft spot:<template_key>' tags
     if chosen.lower().startswith('craft'):
+        # Rate limiting: protect against crafting spam
+        if not check_rate_limit(sid, OperationType.MODERATE, "crafting"):
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'error',
+                'content': 'You are crafting too quickly. Please wait before crafting again.',
+            }], []
+        
         # Recompute dynamic mapping in case actions list was truncated by UI
         target_key: str | None = None
-        target_label: str | None = None
         try:
             tags = set(getattr(obj, 'object_tags', []) or []) if obj else set()
         except Exception:
@@ -269,34 +370,59 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 label_name = key_raw
                 if key_match and store.get(key_match):
                     try:
-                        label_name = getattr(store[key_match], 'display_name', key_match) or key_match
+                        label_name = (
+                            getattr(store[key_match], 'display_name', key_match)
+                            or key_match
+                        )
                     except Exception:
                         label_name = key_match
                 candidates.append((f"Craft {label_name}", key_match or key_raw))
         # Resolve which candidate the user picked
         if len(candidates) == 1 and chosen.lower() == 'craft':
-            target_label, target_key = candidates[0]
+            target_key = candidates[0][1]
         else:
             low = chosen.lower()
             for lbl, key in candidates:
                 if lbl.lower() == low or lbl.lower().startswith(low):
-                    target_label, target_key = lbl, key
+                    target_key = key
                     break
         if not target_key:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': 'This crafting spot is misconfigured or offers nothing to craft.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'error',
+                'content': (
+                    'This crafting spot is misconfigured or offers nothing to craft.'
+                )
+            }], []
         # Locate template and spawn a fresh instance into the current room
-        tmpl = store.get(target_key) or next((store[k] for k in store.keys() if k.lower() == target_key.lower()), None)
+        tmpl = (
+            store.get(target_key)
+            or next(
+                (store[k] for k in store.keys() if k.lower() == target_key.lower()),
+                None,
+            )
+        )
         if not tmpl:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': f"Crafting failed: template '{target_key}' not found."}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'error',
+                'content': (
+                    f"Crafting failed: template '{target_key}' not found."
+                ),
+            }], []
         try:
             # If the template specifies a crafting_recipe, require the player to have
             # each listed component in their inventory (match by display_name, case-insensitive).
-            # The station (craft spot object) itself is not a component; only crafting_recipe items.
+            # The station (craft spot) itself is not a component; only
+            # crafting_recipe items.
             # If any component is missing, report what's needed and abort.
             try:
-                required = [getattr(o, 'display_name', None) for o in (getattr(tmpl, 'crafting_recipe', []) or [])]
+                required = [
+                    getattr(o, 'display_name', None)
+                    for o in (getattr(tmpl, 'crafting_recipe', []) or [])
+                ]
                 required = [str(n).strip() for n in required if n and str(n).strip()]
             except Exception:
                 required = []
@@ -323,10 +449,18 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                         else:
                             missing_list.append(f"{deficit}x {example}")
                 if missing_list:
-                    sessions.pop(sid, None)
-                    return True, [{'type': 'error', 'content': 'You lack the required components to craft this: ' + ", ".join(missing_list)}], []
+                    with atomic('interaction_sessions'):
+                        sessions.pop(sid, None)
+                    return True, None, [{
+                        'type': 'error',
+                        'content': (
+                            'You lack the required components to craft this: '
+                            + ", ".join(missing_list)
+                        ),
+                    }], []
                 # Consume components: remove the needed number of items from inventory slots.
-                # Strategy: scan slots left-to-right and null out matching items until counts satisfied.
+                # Strategy: scan slots left-to-right and null out matching items
+                # until counts satisfied.
                 if inv is not None:
                     to_remove = dict(req_counts)
                     for idx in range(0, len(inv.slots)):
@@ -342,51 +476,79 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                             to_remove[nm] -= 1
                     # Safety check: if for some reason we couldn't remove all, abort
                     if any(v > 0 for v in to_remove.values()):
-                        sessions.pop(sid, None)
-                        return True, [{'type': 'error', 'content': 'Crafting failed: inventory changed and components are no longer available.'}], []
+                        with atomic('interaction_sessions'):
+                            sessions.pop(sid, None)
+                        return True, None, [{
+                            'type': 'error',
+                            'content': (
+                                'Crafting failed: inventory changed and components '
+                                'are no longer available.'
+                            ),
+                        }], []
             from world import Object as _Obj
-            made = _Obj.from_dict(tmpl.to_dict()) if hasattr(tmpl, 'to_dict') else _Obj.from_dict(tmpl)
+            made = (
+                _Obj.from_dict(tmpl.to_dict())
+                if hasattr(tmpl, 'to_dict')
+                else _Obj.from_dict(tmpl)
+            )
             # Place in room (simple initial rule: spawns into the world at the spot)
             if room is None:
                 # Fallback if room missing
-                sessions.pop(sid, None)
-                return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+                with atomic('interaction_sessions'):
+                    sessions.pop(sid, None)
+                return True, None, [{'type': 'error', 'content': 'You are nowhere.'}], []
             room.objects[made.uuid] = made
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f"You craft a {getattr(made, 'display_name', 'mystery item')}."}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': (
+                    f"You craft a {getattr(made, 'display_name', 'mystery item')}."
+                ),
+            }], []
         except Exception as e:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': f'Crafting failed: {e}'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': f'Crafting failed: {e}'}], []
 
     def _place_in_hand(o) -> tuple[bool, str | None, int | None]:
-        # Prefer right hand (1), then left hand (0)
+        # Enhanced version with duplicate UUID checking and safer placement
         if inv is None:
             return False, 'No inventory available.', None
-        if inv.slots[1] is None:
-            inv.slots[1] = o
-            # Remove 'stowed' if present
-            try:
-                getattr(o, 'object_tags', set()).discard('stowed')
-            except Exception:
-                pass
-            return True, None, 1
-        if inv.slots[0] is None:
-            inv.slots[0] = o
-            try:
-                getattr(o, 'object_tags', set()).discard('stowed')
-            except Exception:
-                pass
-            return True, None, 0
-        return False, 'Your hands are full.', None
+        
+        # Check for duplicate UUID in inventory before placing
+        for idx, existing_obj in enumerate(inv.slots):
+            if existing_obj and existing_obj.uuid == o.uuid:
+                return False, f'Object already exists in slot {idx}.', None
+        
+        # Prefer right hand (1), then left hand (0) with validation
+        for slot_idx in [1, 0]:
+            if inv.slots[slot_idx] is None and inv.can_place(slot_idx, o):
+                inv.slots[slot_idx] = o
+                # Remove 'stowed' tag if present
+                try:
+                    getattr(o, 'object_tags', set()).discard('stowed')
+                except Exception:
+                    pass
+                return True, None, slot_idx
+        
+        return False, 'Your hands are full or object cannot be held.', None
 
     def _place_stowed(o) -> tuple[bool, str | None]:
         if inv is None:
             return False, 'No inventory available.'
+            
+        # Enhanced version with duplicate UUID checking and validation
+        # Check for duplicate UUID in inventory before placing
+        for idx, existing_obj in enumerate(inv.slots):
+            if existing_obj and existing_obj.uuid == o.uuid:
+                return False, f'Object already exists in slot {idx}.'
+        
         tags = set(getattr(o, 'object_tags', []) or [])
-        # two-hand items go to large, one-hand to small
-        if 'two-hand' in tags:
+        # large items go to large slots (6-7), small to small slots (2-5)
+        if 'large' in tags:
             for i in range(6, 8):
-                if inv.slots[i] is None:
+                if inv.slots[i] is None and inv.can_place(i, o):
                     inv.slots[i] = o
                     try:
                         getattr(o, 'object_tags', set()).add('stowed')
@@ -394,9 +556,10 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                         pass
                     return True, None
             return False, 'No large slot available to stow it.'
-        # default one-hand
+        
+        # default small items
         for i in range(2, 6):
-            if inv.slots[i] is None:
+            if inv.slots[i] is None and inv.can_place(i, o):
                 inv.slots[i] = o
                 try:
                     getattr(o, 'object_tags', set()).add('stowed')
@@ -407,23 +570,36 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
 
     if chosen.lower() == 'pick up':
         if not player or not room:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'You are nowhere.'}], []
         if not obj and obj_uuid:
             # Perhaps someone else took it
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} is no longer here.',
+            }], []
         if obj is None:
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} is no longer here.',
+            }], []
         # Don't allow picking up immovable/travel points
         try:
             tags = set(getattr(obj, 'object_tags', []) or [])
         except Exception:
             tags = set()
         if 'Immovable' in tags or 'Travel Point' in tags:
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'The {name} cannot be picked up.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} cannot be picked up.',
+            }], []
         # Default policy: stow into appropriate slot; if none, try hands
         # Remove from room first
         try:
@@ -431,6 +607,8 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 room.objects.pop(obj.uuid, None)
         except Exception:
             pass
+            
+        # Attempt to place object in inventory with enhanced validation
         okp, errp = _place_stowed(obj)
         if not okp:
             okh, errh, _idx = _place_in_hand(obj)
@@ -442,20 +620,37 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 except Exception:
                     pass
                 sessions.pop(sid, None)
-                return True, [{'type': 'error', 'content': errp or errh or 'No space to pick that up.'}], []
+                return True, None, [{
+                    'type': 'error',
+                    'content': (errp or errh or 'No space to pick that up.'),
+                }], []
+        
+        # Object successfully picked up - transfer ownership atomically
+        if obj and player:
+            try:
+                # Transfer ownership to the picking player
+                obj.owner_id = player.user_id  # type: ignore[attr-defined]
+            except Exception:
+                # If ownership transfer fails, continue anyway (non-critical)
+                pass
+        
         sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': f'You pick up the {name}.'}], []
+        return True, None, [{'type': 'system', 'content': f'You pick up the {name}.'}], []
 
     if chosen.lower() == 'wield':
         if not player or not room:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'You are nowhere.'}], []
         # If in room, take it; if stowed, move it; if already in hand, just confirm
         source = obj_loc or ('room' if obj_uuid and obj_uuid in (room.objects or {}) else None)
         if source == 'room' or source is None:
             if not obj and obj_uuid:
                 sessions.pop(sid, None)
-                return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+                return True, None, [{
+                    'type': 'system',
+                    'content': f'The {name} is no longer here.',
+                }], []
             # Remove from room and place in hand
             try:
                 if obj is not None:
@@ -471,14 +666,29 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 except Exception:
                     pass
                 sessions.pop(sid, None)
-                return True, [{'type': 'error', 'content': errh or 'Your hands are full.'}], []
+                return True, None, [{
+                    'type': 'error',
+                    'content': errh or 'Your hands are full.',
+                }], []
+            
+            # Transfer ownership when wielding from room
+            if obj and player:
+                try:
+                    obj.owner_id = player.user_id  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                    
             hand_name = 'right hand' if which == 1 else 'left hand'
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'You wield the {name} in your {hand_name}.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'You wield the {name} in your {hand_name}.',
+            }], []
         if source in ('small', 'large'):
             if inv is None:
                 sessions.pop(sid, None)
-                return True, [{'type': 'error', 'content': 'No inventory available.'}], []
+                return True, None, [{'type': 'error', 'content': 'No inventory available.'}], []
             # Move from stowed to a hand
             # Remove from slot
             if source == 'small' and stow_index is not None:
@@ -493,35 +703,159 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 if source == 'large' and stow_large_index is not None:
                     inv.slots[stow_large_index] = obj
                 sessions.pop(sid, None)
-                return True, [{'type': 'error', 'content': errh or 'Your hands are full.'}], []
+                return True, None, [{
+                    'type': 'error',
+                    'content': errh or 'Your hands are full.',
+                }], []
             hand_name = 'right hand' if which == 1 else 'left hand'
-            sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'You wield the {name} in your {hand_name}.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'You wield the {name} in your {hand_name}.',
+            }], []
         if source == 'hand':
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'You are already holding the {name}.'}], []
+            return True, None, [{
+                'type': 'system',
+                'content': f'You are already holding the {name}.',
+            }], []
 
-    if chosen.lower() in ('eat', 'drink'):
+    # Sleep interaction on a bed (must be owned by the player)
+    if chosen.lower() == 'sleep':
+        if not player:
+            sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'Please authenticate first.'}], []
+        room = world.rooms.get(player.room_id) if player else None
+        if not room:
+            sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'You are nowhere.'}], []
+        if not obj and obj_uuid:
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} is no longer here.',
+            }], []
+        # Verify the target is a bed by tag (case-insensitive)
+        try:
+            tags_now = {str(t).strip().lower() for t in (getattr(obj, 'object_tags', []) or [])}
+        except Exception:
+            tags_now = set()
+        if 'bed' not in tags_now:
+            sessions.pop(sid, None)
+            return True, None, [{'type': 'system', 'content': "You can't sleep on that."}], []
+        # Resolve acting user id by matching the player's sheet to a user record
+        actor_uid = None
+        try:
+            for uid, user in (getattr(world, 'users', {}) or {}).items():
+                if getattr(user, 'sheet', None) is player.sheet:
+                    actor_uid = uid
+                    break
+        except Exception:
+            actor_uid = None
+        if not actor_uid:
+            sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'Session error.'}], []
+        # Ownership check: player must own the bed
+        owner = getattr(obj, 'owner_id', None)
+        if owner != actor_uid:
+            sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'system',
+                'content': 'You can only sleep in a bed you own.',
+            }], []
+        # Restore a chunk of sleep and set home bed
+        try:
+            cur = getattr(player.sheet, 'sleep', 100.0) or 0.0
+            # Use the same default refill amount as server's constant (10.0)
+            # to avoid importing server.py
+            player.sheet.sleep = _clamp_need(cur + 10.0)
+        except Exception:
+            pass
+        try:
+            user = (getattr(world, 'users', {}) or {}).get(actor_uid)
+            if user is not None:
+                user.home_bed_uuid = getattr(obj, 'uuid', None)
+        except Exception:
+            pass
+        # Build emits/broadcasts; server will persist after handling
+        broadcasts.append((
+            player.room_id,
+            {
+                'type': 'system',
+                'content': (
+                    f"[i]{player.sheet.display_name} takes a quick rest on their bed.[/i]"
+                ),
+            },
+        ))
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
+        return True, None, [{
+            'type': 'system',
+            'content': 'Your data was saved. You feel well rested.',
+        }], broadcasts
+
+    if (
+        chosen.lower() == 'eat'
+        or chosen.lower().startswith('eat (')
+        or chosen.lower() == 'drink'
+        or chosen.lower().startswith('drink (')
+    ):
         if not player or not room:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': 'You are nowhere.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'You are nowhere.'}], []
+        # Enforce numeric tag presence before consuming when the tag exists
+        tags_now = set(getattr(obj, 'object_tags', []) or []) if obj else set()
+
+        def _parse_tag_val2(ts: set[str], key: str) -> int | None:
+            keyl = key.lower()
+            for x in ts:
+                s = str(x)
+                parts = s.split(':', 1)
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip().lower() == keyl:
+                    r = parts[1].strip()
+                    if r.startswith('+'):
+                        r = r[1:]
+                    if r.lstrip('-').isdigit():
+                        try:
+                            return int(r)
+                        except Exception:
+                            return None
+            return None
+        need_key = 'Drinkable' if chosen.lower().startswith('drink') else 'Edible'
+        has_key = any(
+            str(t).split(':', 1)[0].strip().lower() == need_key.lower()
+            for t in tags_now
+        )
+        if has_key and _parse_tag_val2(tags_now, need_key) is None:
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{
+                'type': 'error',
+                'content': (
+                    f"This item requires a numeric '{need_key}: N' tag to be used."
+                ),
+            }], []
         # Remove source (room or inventory) and spawn deconstruct outputs into room
-        removed = False
         if inv is None:
-            sessions.pop(sid, None)
-            return True, [{'type': 'error', 'content': 'No inventory available.'}], []
+            with atomic('interaction_sessions'):
+                sessions.pop(sid, None)
+            return True, None, [{'type': 'error', 'content': 'No inventory available.'}], []
         if obj_loc == 'hand' and hand_index is not None:
-            inv.slots[hand_index] = None; removed = True
+            inv.slots[hand_index] = None
         elif obj_loc == 'small' and stow_index is not None:
-            inv.slots[stow_index] = None; removed = True
+            inv.slots[stow_index] = None
         elif obj_loc == 'large' and stow_large_index is not None:
-            inv.slots[stow_large_index] = None; removed = True
+            inv.slots[stow_large_index] = None
         elif room and obj and obj.uuid in (room.objects or {}):
             try:
                 room.objects.pop(obj.uuid, None)
-                removed = True
             except Exception:
-                removed = False
+                pass
         # Spawn outputs
         created_names: list[str] = []
         try:
@@ -533,35 +867,46 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 try:
                     # Clone via to_dict/from_dict to ensure new UUID
                     from world import Object as _Obj
-                    clone = _Obj.from_dict(base.to_dict()) if hasattr(base, 'to_dict') else _Obj.from_dict(base)
+                    if hasattr(base, 'to_dict'):
+                        clone = _Obj.from_dict(base.to_dict())
+                    else:
+                        clone = _Obj.from_dict(base)
                     room.objects[clone.uuid] = clone
                     created_names.append(getattr(clone, 'display_name', 'Object'))
                 except Exception:
                     continue
-        sessions.pop(sid, None)
-        line = 'drink' if chosen.lower() == 'drink' else 'eat'
+        with atomic('interaction_sessions'):
+            sessions.pop(sid, None)
+        line = 'drink' if chosen.lower().startswith('drink') else 'eat'
         msg = f'You {line} the {name}.'
         if created_names:
             msg += " You now have: " + ", ".join(created_names) + "."
-        return True, [{'type': 'system', 'content': msg}], []
+        return True, None, [{'type': 'system', 'content': msg}], []
 
     if chosen.lower() == 'open':
         # Container inventory listing
         if not obj:
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} is no longer here.',
+            }], []
         tags = set(getattr(obj, 'object_tags', []) or [])
         if 'Container' not in tags:
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f"The {name} can't be opened."}], []
+            return True, None, [{'type': 'system', 'content': f"The {name} can't be opened."}], []
         if not getattr(obj, 'container_searched', False):
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f"You should search the {name} before opening it."}], []
+            return True, None, [{
+                'type': 'system',
+                'content': f"You should search the {name} before opening it.",
+            }], []
         # Mark opened and print contents
         try:
             obj.container_opened = True
         except Exception:
             pass
+
         def _names(lst):
             return [getattr(o, 'display_name', 'Unnamed') for o in lst if o]
         small = _names(getattr(obj, 'container_small_slots', []) or [])
@@ -576,19 +921,28 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 bits.append("Large: " + ", ".join(large))
             content = f"You open the {name}. Inside: " + "; ".join(bits)
         sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': content}], []
+        return True, None, [{'type': 'system', 'content': content}], []
 
     if chosen.lower() == 'search':
         if not obj:
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f'The {name} is no longer here.'}], []
+            return True, None, [{
+                'type': 'system',
+                'content': f'The {name} is no longer here.',
+            }], []
         tags = set(getattr(obj, 'object_tags', []) or [])
         if 'Container' not in tags:
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f"You find nothing noteworthy."}], []
+            return True, None, [{
+                'type': 'system',
+                'content': "You find nothing noteworthy.",
+            }], []
         if getattr(obj, 'container_searched', False):
             sessions.pop(sid, None)
-            return True, [{'type': 'system', 'content': f"You've already searched the {name}."}], []
+            return True, None, [{
+                'type': 'system',
+                'content': f"You've already searched the {name}.",
+            }], []
         # Mark searched
         try:
             obj.container_searched = True
@@ -608,26 +962,35 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
                 for tmpl in (getattr(world, 'object_templates', {}) or {}).values():
                     try:
                         llh = getattr(tmpl, 'loot_location_hint', None)
-                        if llh and getattr(llh, 'display_name', '').strip().lower() == (getattr(obj, 'display_name', '').strip().lower()):
+                        obj_name = getattr(obj, 'display_name', '').strip().lower()
+                        loot_name = getattr(llh, 'display_name', '').strip().lower()
+                        if llh and loot_name == obj_name:
                             matches.append(tmpl)
                     except Exception:
                         continue
                 if matches:
                     base = random.choice(matches)
-                    spawned = _Obj.from_dict(base.to_dict()) if hasattr(base, 'to_dict') else _Obj.from_dict(base)
+                    if hasattr(base, 'to_dict'):
+                        spawned = _Obj.from_dict(base.to_dict())
+                    else:
+                        spawned = _Obj.from_dict(base)
                     # Place into appropriate container slot
                     tags2 = set(getattr(spawned, 'object_tags', []) or [])
                     placed = False
-                    if 'two-hand' in tags2:
+                    if 'large' in tags2:
                         for i in range(0, 2):
-                            if getattr(obj, 'container_large_slots', [None, None])[i] is None:
+                            slots = getattr(obj, 'container_large_slots', [None, None])
+                            if slots[i] is None:
                                 obj.container_large_slots[i] = spawned
-                                placed = True; break
+                                placed = True
+                                break
                     else:
                         for i in range(0, 2):
-                            if getattr(obj, 'container_small_slots', [None, None])[i] is None:
+                            slots = getattr(obj, 'container_small_slots', [None, None])
+                            if slots[i] is None:
                                 obj.container_small_slots[i] = spawned
-                                placed = True; break
+                                placed = True
+                                break
                     if not placed:
                         spawned = None  # no space; discard spawn silently
             except Exception:
@@ -638,8 +1001,12 @@ def handle_interaction_input(world, sid: str, text: str, sessions: Dict[str, dic
         else:
             msg += " You don't find anything of value."
         sessions.pop(sid, None)
-        return True, [{'type': 'system', 'content': msg}], []
+        return True, None, [{'type': 'system', 'content': msg}], []
 
     # Default acknowledgement
-    sessions.pop(sid, None)
-    return True, [{'type': 'system', 'content': f"You attempt to {chosen.lower()} the {name}."}], []
+    with atomic('interaction_sessions'):
+        sessions.pop(sid, None)
+    return True, None, [{
+        'type': 'system',
+        'content': f"You attempt to {chosen.lower()} the {name}.",
+    }], []

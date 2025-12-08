@@ -238,6 +238,35 @@ def format_object_summary(obj: Any, w) -> str:
         except Exception:
             pass
 
+        # Ownership line (if any)
+        try:
+            owner_id = getattr(obj, 'owner_id', None)
+            if owner_id:
+                owner_name = None
+                # Try resolve as player user_id
+                try:
+                    for u in getattr(w, 'users', {}).values():
+                        if getattr(u, 'user_id', None) == owner_id:
+                            owner_name = getattr(u, 'display_name', None)
+                            break
+                except Exception:
+                    pass
+                if owner_name is None:
+                    # Try resolve as NPC id via reverse lookup
+                    try:
+                        npc_map = getattr(w, 'npc_ids', {}) or {}
+                        for nm, nid in npc_map.items():
+                            if nid == owner_id:
+                                owner_name = nm; break
+                    except Exception:
+                        pass
+                if owner_name:
+                    lines.append(f"Owned by: {owner_name}")
+                else:
+                    lines.append("Owned by: [unknown]")
+        except Exception:
+            pass
+
         return "\n".join(lines)
     except Exception:
         try:

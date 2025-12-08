@@ -13,6 +13,11 @@ if TYPE_CHECKING:  # import only for typing to avoid runtime cycles
     from world import World, Room
 
 
+def _safe_player_name(player) -> str:
+    """Get player display name safely, handling cases where sheet might be None."""
+    return player.sheet.display_name if player and player.sheet else 'Someone'
+
+
 def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, str | None, List[dict], List[Tuple[str, dict]]]:
     """Move through a named door or any Travel Point object in the player's current room.
 
@@ -117,7 +122,11 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
     try:
         locks = getattr(room, 'door_locks', {}) or {}
         policy = locks.get(name_in)
-        if policy:
+        if name_in in locks:  # Policy exists (even if None) - door is locked
+            # SECURITY FIX: Validate policy structure - deny access if corrupted
+            if not isinstance(policy, dict):
+                return False, f"The {name_in} is locked.", emits, broadcasts
+            
             # Determine acting entity id (user id)
             actor_uid = None
             try:
@@ -134,23 +143,35 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
             # If we couldn't resolve, deny by default to be safe
             if not actor_uid:
                 return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
+            
             allow_ids = set(policy.get('allow_ids') or [])
+            rel_rules = policy.get('allow_rel') or []
+            
+            # SECURITY FIX: If no restrictions are defined, deny access (empty policy bypass)
+            if not allow_ids and not rel_rules:
+                return False, f"The {name_in} is locked.", emits, broadcasts
+            
             if actor_uid in allow_ids:
                 pass  # allowed
             else:
                 # Check relationship rule(s)
-                rel_rules = policy.get('allow_rel') or []
                 permitted = False
                 relationships = getattr(world, 'relationships', {}) or {}
                 for rule in rel_rules:
-                    rtype = str(rule.get('type') or '').strip()
-                    to_id = rule.get('to')
-                    if not rtype or not to_id:
-                        continue
-                    # Check if actor has relationship rtype towards to_id
-                    if relationships.get(actor_uid, {}).get(to_id) == rtype:
-                        permitted = True
-                        break
+                    try:
+                        rtype = str(rule.get('type') or '').strip()
+                        to_id = rule.get('to')
+                        if not rtype or not to_id:
+                            continue
+                        # Check if actor has relationship rtype towards to_id
+                        if relationships.get(actor_uid, {}).get(to_id) == rtype:
+                            # SECURITY FIX: Validate that relationship target user still exists (orphaned relationship fix)
+                            if to_id not in getattr(world, 'users', {}):
+                                continue  # Skip this relationship rule - target user deleted
+                            permitted = True
+                            break
+                    except Exception:
+                        continue  # Skip malformed rules
                 if not permitted:
                     return False, f"The {name_in} is locked. You are not permitted to pass.", emits, broadcasts
     except Exception:
@@ -158,11 +179,12 @@ def move_through_door(world: "World", sid: str, door_name: str) -> Tuple[bool, s
         return False, f"The {name_in} is locked.", emits, broadcasts
 
     # Announce departure
-    broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} leaves through the {name_in}."}))
+    player_name = _safe_player_name(player)
+    broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player_name} leaves through the {name_in}."}))
     # Move
     world.move_player(sid, target)
     # Announce arrival
-    broadcasts.append((target, {'type': 'system', 'content': f"{player.sheet.display_name} enters."}))
+    broadcasts.append((target, {'type': 'system', 'content': f"{player_name} enters."}))
     emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
     return True, None, emits, broadcasts
 
@@ -185,9 +207,10 @@ def move_stairs(world: "World", sid: str, direction: str) -> Tuple[bool, str | N
             return False, 'There are no stairs leading up here.', emits, broadcasts
         if target not in world.rooms:
             return False, f"Stairs up lead to unknown room '{target}'.", emits, broadcasts
-        broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} ascends the stairs."}))
+        player_name = _safe_player_name(player)
+        broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player_name} ascends the stairs."}))
         world.move_player(sid, target)
-        broadcasts.append((target, {'type': 'system', 'content': f"{player.sheet.display_name} arrives from below."}))
+        broadcasts.append((target, {'type': 'system', 'content': f"{player_name} arrives from below."}))
         emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
         return True, None, emits, broadcasts
 
@@ -197,9 +220,10 @@ def move_stairs(world: "World", sid: str, direction: str) -> Tuple[bool, str | N
             return False, 'There are no stairs leading down here.', emits, broadcasts
         if target not in world.rooms:
             return False, f"Stairs down lead to unknown room '{target}'.", emits, broadcasts
-        broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player.sheet.display_name} descends the stairs."}))
+        player_name = _safe_player_name(player)
+        broadcasts.append((player.room_id, {'type': 'system', 'content': f"{player_name} descends the stairs."}))
         world.move_player(sid, target)
-        broadcasts.append((target, {'type': 'system', 'content': f"{player.sheet.display_name} arrives from above."}))
+        broadcasts.append((target, {'type': 'system', 'content': f"{player_name} arrives from above."}))
         emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
         return True, None, emits, broadcasts
 
@@ -224,14 +248,16 @@ def teleport_player(world: "World", sid: str, target_room_id: str) -> Tuple[bool
 
     cur_room_id = player.room_id
     # Announce departure from current room
+    player_name = _safe_player_name(player)
     if cur_room_id in world.rooms:
-        broadcasts.append((cur_room_id, {'type': 'system', 'content': f"{player.sheet.display_name} vanishes in a flash of light."}))
+        broadcasts.append((cur_room_id, {'type': 'system', 'content': f"{player_name} vanishes in a flash of light."}))
 
     # Move silently via world helper
     world.move_player(sid, target_room_id)
 
     # Announce arrival in target room
-    broadcasts.append((target_room_id, {'type': 'system', 'content': f"{player.sheet.display_name} appears out of thin air."}))
+    player_name = _safe_player_name(player)  # Get again in case player moved
+    broadcasts.append((target_room_id, {'type': 'system', 'content': f"{player_name} appears out of thin air."}))
     # Show the new room description to the player
     emits.append({'type': 'system', 'content': world.describe_room_for(sid)})
     return True, None, emits, broadcasts

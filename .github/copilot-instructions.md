@@ -1,64 +1,85 @@
-# TinyMUD – AI agent working notes
+# TinyMUD – AI Agent Coding Guide
 
-Use this as the “you’re new here but need to be productive fast” guide. 
+Use this as your "you're new here but need to be productive fast" reference.
 
+## Architecture Overview
 
-## Architecture in 6 bullets
-- Client: Godot 4 (GDScript). Main scene `ChatUI.tscn` with `src/chat_ui.gd`; minimal Socket.IO v4 client in `src/socket_io_client.gd` built on `WebSocketPeer`.
-- Server: Python Flask‑SocketIO in `server/server.py` (prefers eventlet). Small, testable helpers live in `server/*_service.py` and pure data model in `server/world.py`.
-- Transport: Socket.IO (EIO v4) over ws. Client emits `message_to_server`; server emits `message`.
-- AI: Optional Google Gemini via `google-generativeai`. If no key, server sends a friendly offline fallback.
-- Persistence: Single JSON file `server/world_state.json` via `World.save_to_file`/`load_from_file`. Backfills missing UUIDs/fields for compatibility.
-- Tests: Pytest unit tests for wizards/services in `server/test_*.py`.
+**TinyMUD is a modern text-based MUD with AI-powered NPCs.** The system uses a modular Router → Service → Emit pattern designed for incremental refactoring from a monolithic server.
 
-## Message contracts (don’t break these)
-- Client → Server event: `message_to_server` with `{ "content": string }`.
-- Server → Client event: `message` with `{ "type": "system"|"player"|"npc"|"error", "content": string, "name"?: string }`.
-- Chat UI expects BBCode-friendly text; types colorize output. Keep keys and casing stable.
+- **Client**: Godot 4 (GDScript) with minimal Socket.IO v4 client (`src/socket_io_client.gd`)
+- **Server**: Python Flask-SocketIO (`server/server.py`) delegates to service modules (`server/*_service.py`)  
+- **Transport**: Socket.IO (EIO v4) over WebSocket; client emits `message_to_server`, server emits `message`
+- **AI**: Optional Google Gemini for NPC chat + GOAP planning with offline fallbacks
+- **Persistence**: Single JSON file (`server/world_state.json`) with migration support
+- **World Model**: `World` holds `rooms`, `players`, `users`, `npc_sheets`, relationships, object templates
 
-## Server patterns you must follow
-- Most “features” are extracted into pure service modules that return payloads; socket emission happens in `server.py`.
-  - Example contracts:
-    - `account_service.create_account_and_login(...) -> (ok, err, emits, broadcasts)`
-    - `room_service.handle_room_command(...) -> (handled, err, emits)`
-- Normalize and parse user input via helpers from `id_parse_utils` (e.g., `_strip_quotes`, `_parse_pipe_parts`, fuzzy resolvers). Accept `'here'` for room arguments.
-- After mutating world state, attempt to persist: `world.save_to_file(STATE_PATH)` (best‑effort; swallow errors).
-- Use `broadcast_to_room(room_id, payload, exclude_sid=sid)` to echo to others; use `emit('message', payload)` for the sender.
-- Admin gating: check `sid in admins` before admin commands. First created user is auto‑admin.
+## Critical Development Patterns
 
-## World model and linking
-- `World` holds `rooms`, `players`, `users`, `npc_sheets`, `npc_ids`, `relationships`, and `object_templates`.
-- Rooms keep stable UUIDs for rooms/doors/stairs plus `objects` where doors/stairs are persisted as `Object` with tags `{ "Immovable", "Travel Point" }`.
-- When renaming rooms or adding doors/stairs, update reciprocal links and ensure `door_ids`/`stairs_*_id` and corresponding `objects` exist.
+### Service Contract (MANDATORY)
+All services return 4-tuple: `(handled: bool, error: str|None, emits: List[dict], broadcasts: List[Tuple[str, dict]])`
 
-## AI integration
-- `server.py` builds a prompt from: world meta, player sheet, NPC sheet, and relationship context; then calls Gemini.
-- Safety level is set per‑world (`world.safety_level`): `G | PG-13 | R | OFF`. Map to SDK `safety_settings` if available. Always keep an offline fallback.
+```python
+# Example service signature from account_service.py
+def create_account_and_login(world, sid, name, password, description, sessions, admins, state_path):
+    return True, None, [{'type': 'system', 'content': 'Account created!'}], []
+```
 
-## Comments
-- A file containing code should be roughly 70% code and 30% comments as a rule of thumb.
-- Use comments to explain the "why" behind complex logic, not just the "what".
-- Write comments with an authorial style, tone, and voice of a proud and excited programmer explaining how every piece of the program works to a novice programmer that wants to contribute to the codebase but isn't confident with how and where to start.
+### Router Pattern
+Commands flow: Router → Service → Emit. Routers in `server.py` call services, handle emissions.
+New routers should accept `CommandContext` to access shared state (`world`, `sessions`, `admins`, etc.).
 
-## Common workflows (PowerShell)
-- Install deps: `python -m pip install -r .\requirements.txt` (run from repo root or `server\..` accordingly).
-- Run server locally: `python server\server.py` (prints “Gemini API configured successfully.” when key is valid).
-- Optional key: `$env:GEMINI_API_KEY = "..."` (or `GOOGLE_API_KEY`).
-- Run tests (from repo root): `pytest -q server`.
+```python
+# Adding new command family
+def try_handle_my_feature(ctx: CommandContext, sid: str, cmd: str, args: list[str], raw: str, emit: Callable) -> bool:
+    if cmd == 'mycommand':
+        ok, err, emits, broadcasts = my_service.handle_command(ctx.world, args)
+        # Handle emissions...
+        return True  # Command handled
+    return False  # Not our command
+```
 
-## Adding commands (tiny example)
-- For a new admin command, parse in `handle_command` then delegate to a service function:
-  - Service returns `handled/ok, err, emits[, broadcasts]`.
-  - In `server.py`, loop `emit('message', p)` and `broadcast_to_room(...)` as appropriate.
-  - Save world if you mutated it; keep try/except around saves.
+### Input Parsing (CRUCIAL)
+Always use `id_parse_utils` helpers for user input:
 
-## Client expectations
-- Don’t change event names or JSON shape. `src/chat_ui.gd` renders based on `type` and optional `name`.
-- The minimal Socket.IO client assumes EIO v4 and default namespace (`/`). Avoid server changes that require namespaces/acks.
+```python
+from id_parse_utils import strip_quotes, parse_pipe_parts, fuzzy_resolve
 
-## Pitfalls and invariants
-- Never block the server thread; prefer eventlet (installed via requirements) to avoid Werkzeug WS quirks.
-- Keep fuzzy resolvers tolerant but deterministic (exact CI > unique prefix > unique substring). Return helpful suggestions on misses.
-- On any world mutation, ensure related UUID maps and linked objects are maintained (doors/stairs/objects).
+# Fuzzy resolution: exact → ci-exact → unique prefix → unique substring
+ok, err, resolved = fuzzy_resolve("ap", ["apple", "application", "approve"])
+# Returns deterministic, stable ordering for ambiguous matches
+```
 
-Key files: `server/server.py`, `server/world.py`, `server/*_service.py`, `src/chat_ui.gd`, `src/socket_io_client.gd`, `README.md`, `docs/architecture.md`.
+### Safe Execution
+Replace bare `except Exception: pass` with `safe_call()` from `safe_utils.py`:
+
+```python
+from safe_utils import safe_call
+result = safe_call(risky_function, default_value)  # Logs first occurrence
+```
+
+## Developer Workflows
+
+- **Run Server**: `python server/server.py` (prints AI status on startup)
+- **Run Tests**: `pytest -q server` (runs fast unit tests)
+- **Reset World**: `python server/server.py --purge --yes` (deletes `world_state.json`)
+- **Linting**: `flake8` (max line length 99), `mypy` (strict)
+
+## Client-Server Contract
+
+- **Client → Server**: `message_to_server` event with `{ "content": string }`
+- **Server → Client**: `message` event with `{ "type": "system"|"player"|"npc"|"error", "content": string, "name"?: string }`
+- **Formatting**: Client expects BBCode-friendly text. Types determine color.
+
+## Project Conventions
+
+- **File Size**: Keep `server/server.py` under 1,500 lines (refactor to services/routers).
+- **Comments**: ~30% comment density. Explain "why" with an enthusiastic, teaching voice.
+- **AI Integration**: Dual models (Chat + GOAP). Always provide offline fallbacks.
+- **World Mutation**: After mutating `world`, call `world.save_to_file(STATE_PATH)` (best-effort).
+
+## Key Files
+- `server/server.py`: Main entry point, socket handlers.
+- `server/world.py`: Data model (Room, Player, User, Object).
+- `server/*_service.py`: Pure logic modules.
+- `server/command_context.py`: Shared state container.
+- `src/chat_ui.gd`: Main client logic.

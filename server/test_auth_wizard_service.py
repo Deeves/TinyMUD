@@ -40,6 +40,10 @@ def test_create_flow(ctx):
     assert sid in w.players
     # First user becomes admin
     assert sid in admins
+    
+    # Validate world integrity after account creation mutations
+    validation_errors = w.validate()
+    assert validation_errors == [], f"World validation failed after account creation: {validation_errors}"
 
 
 def test_login_flow(ctx):

@@ -15,6 +15,10 @@ run/main_scene="uid://ba8tqqbwwdoco"
 config/features=PackedStringArray("4.5")
 config/icon="res://icon.svg"
 
+[dotnet]
+
+project/assembly_name="AI Multi User Dungeon"
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

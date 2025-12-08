@@ -42,7 +42,7 @@ def test_familygen_offline_fallback(tmpfile):
     w.npc_sheets[target_name] = CharacterSheet(display_name=target_name, description='A salty sailor with a quick wit.')
 
     # Execute familygen
-    handled, err, emits = handle_npc_cmd(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
+    handled, err, emits, broadcasts = handle_npc_cmd(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
     assert_true(handled and err is None, f"familygen offline failed: {err}")
     # Verify a new NPC was created and placed in room with a description
     new_names = [n for n in w.npc_sheets.keys() if n != target_name]
@@ -79,7 +79,7 @@ def test_familygen_json_parsing(tmpfile):
         w = World()
         w.rooms['start'] = Room(id='start', description='Start room')
         w.npc_sheets['Edda Greywater'] = CharacterSheet(display_name='Edda Greywater', description='A salty sailor with a quick wit.')
-        handled, err, emits = ns.handle_npc_command(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
+        handled, err, emits, broadcasts = ns.handle_npc_command(w, tmpfile, None, ['familygen', 'start|Edda Greywater|sister'])
         assert_true(handled and err is None, f"familygen (json) failed: {err}")
         # Verify specific parsed name and desc used (not fallback)
         assert_true('Maris Greywater' in w.npc_sheets, 'parsed JSON name not used')
@@ -104,15 +104,15 @@ def test_accounts_and_admins(tmpfile):
     names = list_admins(w)
     assert_true('Alice' in names, 'first user should be admin')
     # Attempt demote should fail for last remaining admin
-    ok, err, emits2 = demote_user(w, sessions, admins, 'Alice', tmpfile)
+    ok, err, emits2, broadcasts2 = demote_user(w, sessions, admins, 'Alice', tmpfile)
     assert_true(err is not None and 'last remaining admin' in err, 'demote should fail for single admin')
     # Create Bob, promote Bob to admin, then demote Alice should succeed
     sid2 = 'sid2'
     ok, err, emitsB, broadcastsB = create_account_and_login(w, sid2, 'Bob', 'pw2', 'desc2', sessions, admins, tmpfile)
     assert_true(ok and not err, f"create Bob failed: {err}")
-    ok, err, emitsP = promote_user(w, sessions, admins, 'Bob', tmpfile)
+    ok, err, emitsP, broadcastsP = promote_user(w, sessions, admins, 'Bob', tmpfile)
     assert_true(ok and not err, f"promote Bob failed: {err}")
-    ok, err, emitsD = demote_user(w, sessions, admins, 'Alice', tmpfile)
+    ok, err, emitsD, broadcastsD = demote_user(w, sessions, admins, 'Alice', tmpfile)
     assert_true(ok and not err, f"demote Alice failed: {err}")
 
 
@@ -150,7 +150,7 @@ def test_lockdoor(tmpfile):
     ok2, err2, emits2, broadcasts2 = create_account_and_login(w, sid_bob, 'Bob', 'pw2', 'desc2', sessions, admins, tmpfile)
     assert_true(ok2 and not err2, f"setup create Bob failed: {err2}")
     # Lock door to allow only Alice by name
-    handled, err, emits = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|Alice'], sid_admin)
+    handled, err, emits, broadcasts = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|Alice'], sid_admin)
     assert_true(handled and not err, f"lockdoor allow Alice failed: {err}")
     # Bob should be denied
     ok, err, emitsM, broadcastsM = move_through_door(w, sid_bob, 'oak door')
@@ -167,7 +167,7 @@ def test_lockdoor(tmpfile):
     uid_bob = next(uid for uid, u in w.users.items() if u.display_name == 'Bob')
     w.relationships.setdefault(uid_bob, {})[uid_alice] = 'friend'
     # Relock with relationship rule
-    handled2, errR, emitsR = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|relationship: friend with Alice'], sid_admin)
+    handled2, errR, emitsR, broadcastsR = handle_room_command(w, tmpfile, ['lockdoor', 'oak door|relationship: friend with Alice'], sid_admin)
     assert_true(handled2 and not errR, f"lockdoor relationship failed: {errR}")
     # Bob should now be able to pass
     ok4, err4, emits4, broadcasts4 = move_through_door(w, sid_bob, 'oak door')
@@ -207,24 +207,24 @@ def test_room_adddoor_suggestions(tmpfile):
     w.rooms['attic'] = Room(id='attic', description='B')
     w.rooms['beta'] = Room(id='beta', description='B')
     # 1) Adddoor to missing source with suggestions (should suggest alpha, attic for 'a...')
-    handled, err, emits = handle_room_command(w, tmpfile, ['adddoor', 'amber|oak door|beta'])
+    handled, err, emits, broadcasts = handle_room_command(w, tmpfile, ['adddoor', 'amber|oak door|beta'])
     assert_true(handled and err is not None, 'expected error for missing room')
     e1 = err or ""
     assert_true('Did you mean' in e1 and 'alpha' in e1 and 'attic' in e1, 'suggestions missing expected ids')
     # 2) Missing source with no matching first letter should have no suggestion suffix
-    handled2, err2, emits2 = handle_room_command(w, tmpfile, ['adddoor', 'zoo|oak door|beta'])
+    handled2, err2, emits2, broadcasts2 = handle_room_command(w, tmpfile, ['adddoor', 'zoo|oak door|beta'])
     assert_true(handled2 and err2 is not None, 'expected error for missing room (zoo)')
     e2 = err2 or ""
     assert_true('Did you mean' not in e2, 'should not include suggestions when none match')
     # 3) Valid adddoor path works
-    handled3, err3, emits3 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|oak door|beta'])
+    handled3, err3, emits3, broadcasts3 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|oak door|beta'])
     assert_true(handled3 and err3 is None, f'unexpected error on valid adddoor: {err3}')
     assert_true(w.rooms['alpha'].doors.get('oak door') == 'beta', 'door not set correctly')
     # Reciprocal door should also be created in beta pointing back to alpha
     assert_true(any(rid == 'alpha' for rid in w.rooms['beta'].doors.values()), 'reciprocal door not created in target room')
 
     # 4) Adding a door to an unknown target should keep one-way and inform via emits
-    handled4, err4, emits4 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|mystery door|gamma'])
+    handled4, err4, emits4, broadcasts4 = handle_room_command(w, tmpfile, ['adddoor', 'alpha|mystery door|gamma'])
     assert_true(handled4 and err4 is None, 'adddoor to missing target should be handled without fatal error')
     assert_true(w.rooms['alpha'].doors.get('mystery door') == 'gamma', 'one-way door to missing target not stored')
 
@@ -242,7 +242,7 @@ def test_room_rename(tmpfile):
     sid = 'sidZ'
     w.add_player(sid, name='Zed', room_id='alpha')
     # Rename alpha -> town_square
-    handled, err, emits = handle_room_command(w, tmpfile, ['rename', 'alpha|town_square'])
+    handled, err, emits, broadcasts = handle_room_command(w, tmpfile, ['rename', 'alpha|town_square'])
     assert_true(handled and not err, f"rename failed: {err}")
     # New key exists, old removed
     assert_true('town_square' in w.rooms and 'alpha' not in w.rooms, 'rooms mapping not updated')

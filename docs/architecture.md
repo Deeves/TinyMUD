@@ -6,6 +6,48 @@ TinyMUD is a thought experiment in revisiting the concept of a minimalistic, ext
 
 - Crafting spots: Any Object can advertise a crafting action by adding an object tag of the form `craft spot:<template_key>`. When players interact with the object, a "Craft <Template Display Name>" action appears. Choosing it spawns a fresh instance of the referenced template into the room. If the template key is missing, an error is shown. This aligns with the service pattern—interactions are handled in `interaction_service.py`.
 
+## Object tags and behaviors
+
+Object tags are simple strings that drive interactions and inventory rules. Tags are case-sensitive unless otherwise noted. Here are the canonical tags supported right now and what they do:
+
+- Size and carrying
+  - `small`: The item is small. Players can Pick Up the item. By default it stows into a small inventory slot (indices 2–5); if those are full, it falls back to a free hand (1 then 0). Containers also have small slots for storing small items.
+  - `large`: The item is large. Players can Pick Up the item. By default it stows into a large inventory slot (indices 6–7); if those are full, it falls back to a free hand (1 then 0). Containers also have large slots for large items.
+
+- Mobility and world navigation
+  - `Travel Point`: Adds the “Move Through” interaction. When selected, the movement service attempts to traverse a door or stair linked to this object. These are typically paired with `Immovable` and created automatically for doors/stairs so they persist across saves.
+  - `Immovable`: Marks an object that cannot be picked up. Often used with `Travel Point` and `Container` props embedded in rooms.
+
+- Containers
+  - `Container`: Enables “Open” and “Search” interactions. Containers have two small and two large internal slots. Behavior:
+    - Search: First search has a chance to spawn loot from templates that hint they belong here (via a template’s `loot_location_hint.display_name` matching the container’s display name). Subsequent searches are blocked (“already searched”).
+    - Open: Requires that the container has been searched at least once; then shows contents, grouped as Small and Large.
+
+- Affordances and use actions
+  - `weapon`: Adds the “Wield” interaction. Wielding moves the object into a hand (right hand prefers index 1, then left hand index 0) and clears the runtime `stowed` marker if present.
+  - `Edible: N`: Adds “Eat (+N)” and allows consuming the item, then spawns any `deconstruct_recipe` outputs into the room. N must be an integer; the `Edible` key is matched case-insensitively when parsing the number. If an item carries an `Edible` key without a number, the system will show an error when trying to eat it—use the numeric form.
+  - `Drinkable: N`: Adds “Drink (+N)” and allows consuming the item, analogously to `Edible: N`. Again, the numeric suffix is required for use.
+  - `cutting damage`: Adds a “Cut” interaction today with no special behavior beyond an acknowledgement; it’s a placeholder for future combat or tool effects.
+
+- Dynamic crafting spots
+  - `craft spot:<template_key>`: Dynamically adds a Craft action for the given template. If the template exists in `world.object_templates`, selecting the action spawns a fresh instance of that template into the current room. If the template defines a `crafting_recipe` (list of component Objects by display name), the player must have those components in inventory; components are consumed by display-name counts (case-insensitive). Missing templates or components yield helpful error messages.
+
+- Runtime marker (not for authoring)
+  - `stowed`: Applied automatically when items are placed into stow slots (small/large). It’s removed when an item is moved to a hand. Authors generally shouldn’t set this tag manually.
+
+Inventory layout reference (indexes):
+
+- 0: Left hand
+- 1: Right hand
+- 2–5: Small stow slots
+- 6–7: Large stow slots
+
+Authoring tips:
+
+- Use only `small` or `large` for size; these are the canonical size tags.
+- For world geometry (doors/stairs), prefer the room/door helpers; they ensure reciprocal links and add `Immovable` + `Travel Point` objects with stable UUIDs.
+- For food/drink, prefer the numeric forms `Edible: N` and `Drinkable: N` so the actions are both listed and usable.
+
 ## Big picture
 
 - Godot (client) shows a chat window and sends your text to the server.
@@ -84,6 +126,32 @@ The first account ever created becomes an admin automatically. Admins can kick u
 ## Where the AI fits
 
 If a Gemini API key is configured, the server builds a prompt using both the player’s and NPC’s character sheets and asks Gemini to reply. Without a key, a friendly fallback reply is sent so the game remains playable offline.
+
+## Configuration and Constants
+
+TinyMUD centralizes its configuration in `server/constants.py` to reduce magic strings and make the codebase more maintainable. This file contains:
+
+**Socket.IO Protocol Constants:**
+- `MESSAGE_IN` = 'message_to_server' (client → server event)  
+- `MESSAGE_OUT` = 'message' (server → client event)
+
+**Message Type Constants:**
+- `MSG_TYPE_SYSTEM`, `MSG_TYPE_PLAYER`, `MSG_TYPE_NPC`, `MSG_TYPE_ERROR`
+- Used by the client to apply different colors and formatting
+
+**Command Parsing Constants:**
+- `COMMAND_PREFIX` = '/' (for slash commands like /help, /auth)
+- `ROOM_BUILD_PREFIX` = '+' (for room creation like +room, +door)
+
+**Environment Variables and Defaults:**
+- `ENV_GEMINI_API_KEY`, `ENV_GOOGLE_API_KEY` for AI configuration
+- `DEFAULT_MAX_MESSAGE_LENGTH`, `DEFAULT_SAFETY_LEVEL`, etc.
+
+**Helper Functions:**
+- `get_message_payload()` creates standardized Socket.IO message structures
+- `is_slash_command()`, `validate_world_name()`, etc. for input validation
+
+This approach makes it easy to adjust protocol details, message limits, and other configuration without hunting through multiple files. New contributors can quickly understand the system's communication patterns by examining the constants file.
 
 ## Glossary (terminology)
 
