@@ -72,7 +72,7 @@ def try_handle_flow(ctx: CommandContext, sid: str | None, player_message: str, t
 
     # --- Look / look at ---
     if text_lower == "look" or text_lower == "l" or text_lower.startswith("look ") or text_lower.startswith("l "):
-        from server import _format_look, _resolve_player_in_room, _resolve_npcs_in_room, _ensure_npc_sheet, _resolve_object_in_room  # type: ignore
+        from server import _format_look, _resolve_player_in_room, _resolve_npcs_in_room, _ensure_npc_sheet, _resolve_object_in_room, _format_object_summary  # type: ignore
         from server import sessions, admins  # globals
         from server import _strip_quotes  # type: ignore
         if text_lower in ("look", "l"):

@@ -1,31 +1,14 @@
 {
   "world_version": 4,
   "rooms": {
-    "r1": {
-      "id": "r1",
-      "description": "Room 1",
+    "start": {
+      "id": "start",
+      "description": "The starting room.",
       "npcs": [],
       "doors": {},
       "stairs_up_to": null,
       "stairs_down_to": null,
-      "uuid": "d79594e2-6b2a-43eb-96ca-52d4311f7abe",
-      "door_ids": {},
-      "stairs_up_id": null,
-      "stairs_down_id": null,
-      "door_locks": {},
-      "faction_id": null,
-      "objects": {},
-      "tags": [],
-      "owner_id": null
-    },
-    "r2": {
-      "id": "r2",
-      "description": "Room 2",
-      "npcs": [],
-      "doors": {},
-      "stairs_up_to": null,
-      "stairs_down_to": null,
-      "uuid": "262941d7-cb0b-44b4-b714-152bcd4330b3",
+      "uuid": "42502875-e253-4917-aba0-6f87d2fc76a8",
       "door_ids": {},
       "stairs_up_id": null,
       "stairs_down_id": null,
@@ -39,14 +22,14 @@
   "npc_sheets": {},
   "object_templates": {},
   "users": {
-    "18629257-2bc4-4525-9b23-20f57d3ccd88": {
-      "user_id": "18629257-2bc4-4525-9b23-20f57d3ccd88",
-      "display_name": "admin",
-      "password": "pass",
-      "description": "Admin User",
+    "d2df7d65-4688-49c2-b5b8-c43219443604": {
+      "user_id": "d2df7d65-4688-49c2-b5b8-c43219443604",
+      "display_name": "TestPlayer",
+      "password": "password123",
+      "description": "A brave adventurer",
       "sheet": {
-        "display_name": "admin",
-        "description": "Admin User",
+        "display_name": "TestPlayer",
+        "description": "A brave adventurer",
         "inventory": {
           "slots": [
             null,
@@ -132,7 +115,7 @@
   "world_name": null,
   "world_description": null,
   "world_conflict": null,
-  "start_room_id": "r1",
+  "start_room_id": "start",
   "setup_complete": false,
   "safety_level": "G",
   "advanced_goap_enabled": false,

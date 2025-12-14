@@ -21,4 +21,4 @@ project/assembly_name="AI Multi User Dungeon"
 
 [rendering]
 
-renderer/rendering_method="gl_compatibility"
+renderer/rendering_method="mobile"
