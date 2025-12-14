@@ -77,22 +77,30 @@ def test_attack_npc_yield(tmp_path):
 def test_attack_with_weapon_and_armor():
     """Test attack damage calculation with weapon and armor modifiers."""
     from combat_service import attack
-    from world import World, CharacterSheet, Object
+    from world import World, CharacterSheet, Object, Room, Player, Inventory
     # Setup world, rooms, players
     world = World()
-    world.rooms["room1"] = type("Room", (), {"objects": [], "npcs": set(), "display_name": "Room1"})()
-    world.rooms["room2"] = type("Room", (), {"objects": [], "npcs": set(), "display_name": "Room2"})()
+    room1 = Room(id="room1", description="Room1")
+    room2 = Room(id="room2", description="Room2")
+    world.rooms["room1"] = room1
+    world.rooms["room2"] = room2
     # Weapon and armor objects
     sword = Object(display_name="Sword", weapon_damage=5, uuid="w1")
     shield = Object(display_name="Shield", armor_defense=3, uuid="a1")
-    # Attacker setup
-    attacker_sheet = CharacterSheet(display_name="Attacker", strength=10, inventory=type("Inv", (), {"objects": [sword]})(), equipped_weapon="w1")
-    attacker = type("Player", (), {"sheet": attacker_sheet, "room_id": "room1"})()
-    # Target setup
-    target_sheet = CharacterSheet(display_name="Target", hp=20, max_hp=20, inventory=type("Inv", (), {"objects": [shield]})(), equipped_armor="a1")
-    target = type("Player", (), {"sheet": target_sheet, "room_id": "room1"})()
+    # Attacker setup with weapon in inventory
+    attacker_inv = Inventory()
+    attacker_inv.slots[0] = sword  # Put sword in left hand
+    attacker_sheet = CharacterSheet(display_name="Attacker", strength=10, inventory=attacker_inv, equipped_weapon="w1")
+    attacker = Player(sid="sid1", room_id="room1", sheet=attacker_sheet)
+    # Target setup with armor in inventory
+    target_inv = Inventory()
+    target_inv.slots[0] = shield  # Put shield in left hand
+    target_sheet = CharacterSheet(display_name="Target", hp=20, max_hp=20, inventory=target_inv, equipped_armor="a1")
+    target = Player(sid="sid2", room_id="room1", sheet=target_sheet)
     world.players["sid1"] = attacker
     world.players["sid2"] = target
+    room1.players.add("sid1")
+    room1.players.add("sid2")
     # Dummy context
     emits, broadcasts = [], []
     def dummy_emit(ev, payload):
@@ -108,19 +116,20 @@ def test_attack_with_weapon_and_armor():
 def test_flee_command():
     """Test flee command moves player to adjacent room."""
     from combat_service import flee
-    from world import World, CharacterSheet, Object
+    from world import World, CharacterSheet, Object, Room, Player, Inventory
     # Setup world, rooms, player
     world = World()
-    room1 = type("Room", (), {"objects": [], "npcs": set(), "display_name": "Room1"})()
-    room2 = type("Room", (), {"objects": [], "npcs": set(), "display_name": "Room2"})()
+    room1 = Room(id="room1", description="Room1")
+    room2 = Room(id="room2", description="Room2")
     # Add a door object linking to room2
-    door = Object(display_name="Door", link_target_room_id="room2", uuid="d1")
-    room1.objects.append(door)
+    door = Object(display_name="Door", link_target_room_id="room2", uuid="d1", object_tags={"Travel Point", "Immovable"})
+    room1.objects["d1"] = door
     world.rooms["room1"] = room1
     world.rooms["room2"] = room2
-    sheet = CharacterSheet(display_name="FleePlayer", hp=10, max_hp=10, inventory=type("Inv", (), {"objects": []})())
-    player = type("Player", (), {"sheet": sheet, "room_id": "room1"})()
+    sheet = CharacterSheet(display_name="FleePlayer", hp=10, max_hp=10, inventory=Inventory())
+    player = Player(sid="sid1", room_id="room1", sheet=sheet)
     world.players["sid1"] = player
+    room1.players.add("sid1")
     emits, broadcasts = [], []
     def dummy_emit(ev, payload):
         emits.append(payload)
@@ -129,4 +138,5 @@ def test_flee_command():
     # Flee
     handled, err, out_emits, out_broadcasts = flee(world, "", "sid1", {}, set(), dummy_broadcast, dummy_emit)
     assert player.room_id == "room2", f"Expected room2, got {player.room_id}"
-    assert any("flee to Room2" in e["content"] for e in out_emits), "Flee message missing"
+    assert any("flee to room2" in e["content"] for e in out_emits), "Flee message missing"
+

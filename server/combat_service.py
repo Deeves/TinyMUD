@@ -100,8 +100,8 @@ def attack(world: World, state_path: str, attacker_sid: str, target_token: str, 
     # Get attacker's weapon
     weapon_obj = None
     if sheet.equipped_weapon:
-        for obj in sheet.inventory.objects:
-            if getattr(obj, 'uuid', None) == sheet.equipped_weapon:
+        for obj in (sheet.inventory.slots if sheet.inventory else []):
+            if obj and getattr(obj, 'uuid', None) == sheet.equipped_weapon:
                 weapon_obj = obj
                 break
     weapon_damage = getattr(weapon_obj, 'weapon_damage', None) if weapon_obj else None
@@ -111,8 +111,8 @@ def attack(world: World, state_path: str, attacker_sid: str, target_token: str, 
     # Get target's armor
     armor_obj = None
     if target_sheet.equipped_armor:
-        for obj in target_sheet.inventory.objects:
-            if getattr(obj, 'uuid', None) == target_sheet.equipped_armor:
+        for obj in (target_sheet.inventory.slots if target_sheet.inventory else []):
+            if obj and getattr(obj, 'uuid', None) == target_sheet.equipped_armor:
                 armor_obj = obj
                 break
     armor_defense = getattr(armor_obj, 'armor_defense', None) if armor_obj else None
@@ -182,13 +182,12 @@ def flee(world: World, state_path: str, sid: str, sessions: dict, admins: set, b
 
     # Find adjacent rooms via doors/stairs/links
     adjacent_ids = set()
-    for obj in room.objects:
+    for obj in room.objects.values():
         if getattr(obj, 'link_target_room_id', None):
             adjacent_ids.add(obj.link_target_room_id)
     if not adjacent_ids:
         return True, "No exits to flee through!", emits, broadcasts
 
-    import random
     dest_id = random.choice(list(adjacent_ids))
     if dest_id not in world.rooms:
         return True, "Destination room not found.", emits, broadcasts
@@ -196,7 +195,7 @@ def flee(world: World, state_path: str, sid: str, sessions: dict, admins: set, b
     # Move player
     old_room_id = player.room_id
     player.room_id = dest_id
-    emits.append({"type": "system", "content": f"You flee to {world.rooms[dest_id].display_name}."})
+    emits.append({"type": "system", "content": f"You flee to {world.rooms[dest_id].id}."})
     broadcasts.append((MESSAGE_OUT, {"type": "system", "content": f"{sheet.display_name} flees from combat!"}))
 
     # Persist world
