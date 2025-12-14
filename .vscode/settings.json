@@ -1,0 +1,39 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "server",
+    "-v"
+  ],
+  // Force VS Code to use the workspace venv's pytest to avoid global launcher issues
+  "python.testing.pytestPath": "${workspaceFolder}/.venv/Scripts/pytest.exe",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/server"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "warning",
+    "reportMissingTypeStubs": "none"
+  },
+  "terminal.integrated.env.windows": {
+    "PIP_REQUIRE_VIRTUALENV": "false"
+  },
+  "godotTools.editorPath.godot4": "c:\\Users\\deeves\\Desktop\\GodotCSharp\\Godot_v4.5.1-stable_mono_win64\\Godot_v4.5.1-stable_mono_win64.exe",
+  // Editor settings
+  "editor.rulers": [
+    120
+  ],
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  // File settings  
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    ".pytest_cache": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "**/world_state.json": true
+  }
+}

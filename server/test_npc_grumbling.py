@@ -1,6 +1,18 @@
 import pytest
 import server
+import game_loop
 from world import World, Room, CharacterSheet
+
+
+def _sync_context_for_test(world, broadcast_fn):
+    """Sync game_loop context with test mocks."""
+    try:
+        ctx = game_loop.get_context()
+        ctx.world = world
+        ctx.broadcast_to_room = broadcast_fn
+    except RuntimeError:
+        pass
+
 
 def test_npc_grumble_on_missing_item(monkeypatch):
     """Test that an NPC grumbles when trying to pick up a missing object."""
@@ -22,6 +34,7 @@ def test_npc_grumble_on_missing_item(monkeypatch):
     
     monkeypatch.setattr(server, 'world', world)
     monkeypatch.setattr(server, 'broadcast_to_room', mock_broadcast)
+    _sync_context_for_test(world, mock_broadcast)
     
     # Simulate one tick of action execution logic
     # We can't easily call _world_tick because it's an infinite loop, 
@@ -69,6 +82,7 @@ def test_npc_grumble_on_locked_door(monkeypatch):
         
     monkeypatch.setattr(server, 'world', world)
     monkeypatch.setattr(server, 'broadcast_to_room', mock_broadcast)
+    _sync_context_for_test(world, mock_broadcast)
     
     # Simulate execution
     action = sheet.plan_queue.pop(0)

@@ -6,4 +6,9 @@ python-engineio>=4.9.0
 python-socketio>=5.11.0
 eventlet>=0.36.1
 pytest>=8.2.0
+pytest-cov>=4.1.0
 python-dotenv>=1.0.1
+
+# Type stubs for better IDE support
+types-Flask>=1.1.6
+types-requests>=2.32.0

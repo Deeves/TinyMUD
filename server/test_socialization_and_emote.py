@@ -25,6 +25,7 @@ def test_offline_plan_emote_when_social_low():
 
 def test_emote_exec_refills_socialization(monkeypatch):
     import server as srv
+    import game_loop
     from world import Room, CharacterSheet, World
 
     # Fresh world and room so broadcast_to_room won't fail on lookups
@@ -39,6 +40,14 @@ def test_emote_exec_refills_socialization(monkeypatch):
     setattr(sheet, 'socialization', 10.0)
     srv.world.npc_sheets[npc_name] = sheet
     srv.world.npc_ids[npc_name] = str(__import__('uuid').uuid4())  # Ensure NPC has ID mapping
+
+    # Sync game_loop context with test world
+    try:
+        ctx = game_loop.get_context()
+        ctx.world = srv.world
+    except RuntimeError:
+        pass
+
 
     # Capture broadcasts
     captured: list[dict] = []

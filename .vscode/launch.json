@@ -1,0 +1,69 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run TinyMUD Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/server/server.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/server",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/server"
+            },
+            "justMyCode": true
+        },
+        {
+            "name": "Run All Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-v",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/server",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Run Current Test File",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${file}",
+                "-v",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/server",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Run Tests (Quick)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-q",
+                "--tb=line"
+            ],
+            "cwd": "${workspaceFolder}/server",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Purge World State",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/server/server.py",
+            "args": [
+                "--purge",
+                "--yes"
+            ],
+            "cwd": "${workspaceFolder}/server",
+            "console": "integratedTerminal"
+        }
+    ]
+}

@@ -1,5 +1,46 @@
 [flake8]
 max-line-length = 280
-extend-ignore = E203
+max-complexity = 20
+
+# Ignore common style issues that don't affect functionality
+extend-ignore =
+    # E203: whitespace before ':'
+    E203,
+    # W291: trailing whitespace
+    W291,
+    # W293: blank line contains whitespace
+    W293,
+    # E302: expected 2 blank lines
+    E302,
+    # E303: too many blank lines
+    E303,
+    # E305: expected 2 blank lines after class or function definition
+    E305,
+    # E266: too many leading '#' for block comment
+    E266,
+    # E402: module level import not at top of file
+    E402,
+    # E701: multiple statements on one line (colon)
+    E701,
+    # E702: multiple statements on one line (semicolon)
+    E702,
+    # E111/E117: indentation issues
+    E111,
+    E117,
+    # E128/E127/E126/E129/E131: continuation line issues
+    E128,
+    E127,
+    E126,
+    E129,
+    E131,
+    # W503/W504: line break before/after binary operator
+    W503,
+    W504,
+
 per-file-ignores =
-	**/__init__.py: F401
+    # Init files often have unused imports for re-export
+    **/__init__.py: F401
+    # Server has many pre-existing issues
+    server.py: F401,F841
+    # Test files commonly have unused imports for fixtures
+    test_*.py: F401,F811

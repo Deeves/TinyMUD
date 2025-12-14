@@ -1,0 +1,143 @@
+[project]
+name = "tinymud"
+version = "0.1.0"
+description = "AI-powered Multi-User Dungeon with GOAP NPCs and dynamic world simulation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "TinyMUD Contributors"}
+]
+keywords = ["mud", "game", "ai", "goap", "socketio", "flask"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Flask",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment :: Role-Playing",
+]
+
+dependencies = [
+    "flask>=3.0.0",
+    "flask-socketio>=5.3.6",
+    "simple-websocket>=1.0.0",
+    "google-generativeai>=0.7.2",
+    "python-engineio>=4.9.0",
+    "python-socketio>=5.11.0",
+    "eventlet>=0.36.1",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-cov>=4.1.0",
+    "flake8>=7.0.0",
+]
+typing = [
+    "mypy>=1.8.0",
+    "types-Flask>=1.1.6",
+]
+
+[project.scripts]
+tinymud = "server:main"
+
+[project.urls]
+Repository = "https://github.com/yourusername/TinyMUD"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
+
+# ============================================================
+# pytest configuration
+# ============================================================
+[tool.pytest.ini_options]
+testpaths = ["server"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "--tb=short",
+    "-ra",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "ai: marks tests that require AI/Gemini API",
+]
+
+# ============================================================
+# coverage configuration
+# ============================================================
+[tool.coverage.run]
+source = ["server"]
+omit = [
+    "server/test_*.py",
+    "server/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+precision = 2
+
+# ============================================================
+# mypy configuration
+# ============================================================
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+exclude = [
+    "test_.*\\.py$",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "eventlet.*",
+    "google.generativeai.*",
+    "flask_socketio.*",
+]
+ignore_missing_imports = true
+
+# ============================================================
+# ruff configuration (optional modern linter)
+# ============================================================
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E402",  # module level import not at top of file
+    "E501",  # line too long (handled by line-length)
+    "E701",  # multiple statements on one line
+    "E702",  # multiple statements on one line (semicolon)
+    "W291",  # trailing whitespace
+    "W293",  # blank line contains whitespace
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["F401", "F811"]
+"server.py" = ["F401", "F841"]

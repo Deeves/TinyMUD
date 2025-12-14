@@ -1,0 +1,163 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-8.4.2, pluggy-1.6.0 -- C:\Users\deeves\AppData\Local\Programs\Python\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\deeves\Desktop\TinyMUD\TinyMUD
+configfile: pyproject.toml
+plugins: cov-7.0.0
+collecting ... collected 1 item
+
+server/test_npc_actions.py::test_npc_drop FAILED                         [100%]
+
+================================== FAILURES ===================================
+________________________________ test_npc_drop ________________________________
+
+    def test_npc_drop():
+        w = _fresh_world()
+        r1 = Room(id="r1", description="Room 1")
+        w.rooms[r1.id] = r1
+        npc = "Dropper"
+        r1.npcs.add(npc)
+    
+        sheet = CharacterSheet(npc)
+        obj = Object(display_name="Rock", uuid="rock-123")
+        sheet.inventory.place(0, obj)
+        w.npc_sheets[npc] = sheet
+    
+        # Mock broadcast
+        messages = []
+    
+        def mock_broadcast(room_id, payload, exclude_sid=None):
+            messages.append((room_id, payload))
+    
+        original = _patch_broadcast_and_sync(mock_broadcast)
+    
+        try:
+            srv._npc_execute_action(npc, r1.id, {"tool": "drop", "args": {"object_uuid": "rock-123"}})
+    
+>           assert "rock-123" in r1.objects
+E           AssertionError: assert 'rock-123' in {}
+E            +  where {} = Room(id='r1', description='Room 1', players=set(), npcs={'Dropper'}, doors={}, stairs_up_to=None, stairs_down_to=None, uuid='fd30e15f-e158-4682-9008-1ed044d455b1', door_ids={}, stairs_up_id=None, stairs_down_id=None, door_locks={}, faction_id=None, objects={}, events=[], tags=[], owner_id=None).objects
+
+server\test_npc_actions.py:78: AssertionError
+---------------------------- Captured stdout setup ----------------------------
+No Gemini API key provided; skipping interactive prompt (non-interactive environment). AI disabled.
+No Gemini API key provided. Running with AI disabled.
+WARNING: Using default dev SECRET_KEY. Set SECRET_KEY env var in production.
+World data is current at version 4
+GOAP cleanup completed: 4 actions taken
+
+=== Server Command Quick Reference ===
+Auth:
+  /auth create <name> | <password> | <des...  - create an account & character
+  /auth login <name> | <password>             - log in to your character
+  /auth list_admins                           - list admin users
+
+Player commands (after auth):
+  look | l                                    - describe your current room
+  look at <name>                              - inspect a Player, NPC, or Object in the room
+  move through <name>                         - go via a named door or travel point
+  move up stairs | move down stairs           - use stairs, if present
+  say <message>                               - say something; anyone present may respond
+  say to <npc>[ and <npc>...]: <msg>          - address one or multiple NPCs directly
+  tell <Player or NPC> <message>              - speak directly to one person/NPC (room hears it)
+  whisper <Player or NPC> <message>           - private message; NPC always replies; not broadcast
+  roll <dice> [| Private]                     - roll dice publicly or privately (e.g., 2d6+1)
+  gesture <verb>                              - perform an emote (e.g., 'gesture wave' -> you wave)
+  gesture <verb> to <target>                  - targeted emote (e.g., 'gesture bow to Innkeeper')
+  interact with <Object>                      - list possible interactions for an object and choose one
+  /trade <Player or NPC>                      - pay coins for one of their items
+  /barter <Player or NPC>                     - trade one of your items for one of theirs
+  /claim <Object>                             - claim an Object as yours
+  /unclaim <Object>                           - remove your ownership from an Object
+  /rename <new name>                          - change your display name
+  /describe <text>                            - update your character description
+  /sheet                                      - show your character sheet
+  /help                                       - list available commands
+
+Admin commands (first created user is admin):
+  /auth promote <name>                        - elevate a user to admin
+  /auth demote <name>                         - revoke a user's admin rights
+  /auth list_admins                           - list admin users
+  /kick <playerName>                          - disconnect a player
+  /setup                                      - start world setup (create first room & NPC)
+  /teleport <room name>                       - teleport yourself to a room (fuzzy; 'here' allowed)
+  /teleport <player> | <room name>            - teleport another player (fuzzy; 'here' = your room)
+  /bring <player>                             - bring a player to your current room
+  /purge                                      - reset world to factory default (confirmation required)
+  /worldstate                                 - print the redacted contents of world_state.json
+  /safety <G|PG-13|R|OFF>                     - set AI content safety level (admins)
+  /faction factiongen                         - [Experimental] AI-generate a small faction
+
+Room management:
+  /room create <id> | <description>           - create a new room
+  /room setdesc <id> | <description>          - update a room's description
+  /room rename <room name> | <new room name>  - rename a room id (updates links)
+  /room adddoor <room name> | <door name>...  - add a named door and link target
+  /room removedoor <room name> | <door name>  - remove a named door
+  /room lockdoor <door name> | <name, nam...  - lock to players or relationships
+  relationship: <type> with <name>            - ...as an alternative lock rule
+  /room setstairs <room name> | <up room ...  - configure stairs
+  /room linkdoor <room_a> | <door_a> | <r...  - link two doors across rooms
+
+No Gemini API key provided; skipping interactive prompt (non-interactive environment). AI disabled.
+No Gemini API key provided. Running with AI disabled.
+WARNING: Using default dev SECRET_KEY. Set SECRET_KEY env var in production.
+World data is current at version 4
+GOAP cleanup completed: 4 actions taken
+
+=== Server Command Quick Reference ===
+Auth:
+  /auth create <name> | <password> | <des...  - create an account & character
+  /auth login <name> | <password>             - log in to your character
+  /auth list_admins                           - list admin users
+
+Player commands (after auth):
+  look | l                                    - describe your current room
+  look at <name>                              - inspect a Player, NPC, or Object in the room
+  move through <name>                         - go via a named door or travel point
+  move up stairs | move down stairs           - use stairs, if present
+  say <message>                               - say something; anyone present may respond
+  say to <npc>[ and <npc>...]: <msg>          - address one or multiple NPCs directly
+  tell <Player or NPC> <message>              - speak directly to one person/NPC (room hears it)
+  whisper <Player or NPC> <message>           - private message; NPC always replies; not broadcast
+  roll <dice> [| Private]                     - roll dice publicly or privately (e.g., 2d6+1)
+  gesture <verb>                              - perform an emote (e.g., 'gesture wave' -> you wave)
+  gesture <verb> to <target>                  - targeted emote (e.g., 'gesture bow to Innkeeper')
+  interact with <Object>                      - list possible interactions for an object and choose one
+  /trade <Player or NPC>                      - pay coins for one of their items
+  /barter <Player or NPC>                     - trade one of your items for one of theirs
+  /claim <Object>                             - claim an Object as yours
+  /unclaim <Object>                           - remove your ownership from an Object
+  /rename <new name>                          - change your display name
+  /describe <text>                            - update your character description
+  /sheet                                      - show your character sheet
+  /help                                       - list available commands
+
+Admin commands (first created user is admin):
+  /auth promote <name>                        - elevate a user to admin
+  /auth demote <name>                         - revoke a user's admin rights
+  /auth list_admins                           - list admin users
+  /kick <playerName>                          - disconnect a player
+  /setup                                      - start world setup (create first room & NPC)
+  /teleport <room name>                       - teleport yourself to a room (fuzzy; 'here' allowed)
+  /teleport <player> | <room name>            - teleport another player (fuzzy; 'here' = your room)
+  /bring <player>                             - bring a player to your current room
+  /purge                                      - reset world to factory default (confirmation required)
+  /worldstate                                 - print the redacted contents of world_state.json
+  /safety <G|PG-13|R|OFF>                     - set AI content safety level (admins)
+  /faction factiongen                         - [Experimental] AI-generate a small faction
+
+Room management:
+  /room create <id> | <description>           - create a new room
+  /room setdesc <id> | <description>          - update a room's description
+  /room rename <room name> | <new room name>  - rename a room id (updates links)
+  /room adddoor <room name> | <door name>...  - add a named door and link target
+  /room removedoor <room name> | <door name>  - remove a named door
+  /room lockdoor <door name> | <name, nam...  - lock to players or relationships
+  relationship: <type> with <name>            - ...as an alternative lock rule
+  /room setstairs <room name> | <up room ...  - configure stairs
+  /room linkdoor <room_a> | <door_a> | <r...  - link two doors across rooms
+
+=========================== short test summary info ===========================
+FAILED server/test_npc_actions.py::test_npc_drop - AssertionError: assert 'ro...
+============================== 1 failed in 1.27s ==============================

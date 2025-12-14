@@ -41,6 +41,8 @@ Thumbs.db
 desktop.ini
 .vscode/*
 !.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
 
 # Runtime data (regenerate locally)
 server/world_state.json

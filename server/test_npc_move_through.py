@@ -9,10 +9,17 @@ Covers:
 
 from world import World, Room, Object
 import server as srv
+import game_loop
 
 
 def _fresh_world():
     srv.world = World()
+    # Sync game_loop context with test world
+    try:
+        ctx = game_loop.get_context()
+        ctx.world = srv.world
+    except RuntimeError:
+        pass
     return srv.world
 
 

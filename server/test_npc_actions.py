@@ -2,11 +2,34 @@
 
 from world import World, Room, Object, CharacterSheet
 import server as srv
+import game_loop
 import pytest
+
 
 def _fresh_world():
     srv.world = World()
+    # Also update game_loop context to use the new world
+    try:
+        ctx = game_loop.get_context()
+        ctx.world = srv.world
+    except RuntimeError:
+        pass  # Context not initialized yet
     return srv.world
+
+
+def _patch_broadcast_and_sync(mock_broadcast):
+    """Helper to patch broadcast_to_room in both server and game_loop context."""
+    original = srv.broadcast_to_room
+    srv.broadcast_to_room = mock_broadcast
+    game_loop.update_broadcast_to_room(mock_broadcast)
+    return original
+
+
+def _restore_broadcast(original):
+    """Restore broadcast_to_room in both server and game_loop context."""
+    srv.broadcast_to_room = original
+    game_loop.update_broadcast_to_room(original)
+
 
 def test_npc_say():
     w = _fresh_world()
@@ -14,25 +37,26 @@ def test_npc_say():
     w.rooms[r1.id] = r1
     npc = "Talker"
     r1.npcs.add(npc)
-    
+
     # Mock broadcast
     messages = []
+
     def mock_broadcast(room_id, payload, exclude_sid=None):
         messages.append((room_id, payload))
-    
-    original_broadcast = srv.broadcast_to_room
-    srv.broadcast_to_room = mock_broadcast
-    
+
+    original = _patch_broadcast_and_sync(mock_broadcast)
+
     try:
         srv._npc_execute_action(npc, r1.id, {"tool": "say", "args": {"message": "Hello world!"}})
-        
+
         assert len(messages) == 1
         assert messages[0][0] == "r1"
         assert messages[0][1]['type'] == 'npc'
         assert messages[0][1]['name'] == npc
         assert messages[0][1]['content'] == "Hello world!"
     finally:
-        srv.broadcast_to_room = original_broadcast
+        _restore_broadcast(original)
+
 
 def test_npc_drop():
     w = _fresh_world()
@@ -48,21 +72,21 @@ def test_npc_drop():
     
     # Mock broadcast
     messages = []
+
     def mock_broadcast(room_id, payload, exclude_sid=None):
         messages.append((room_id, payload))
-    
-    original_broadcast = srv.broadcast_to_room
-    srv.broadcast_to_room = mock_broadcast
-    
+
+    original = _patch_broadcast_and_sync(mock_broadcast)
+
     try:
         srv._npc_execute_action(npc, r1.id, {"tool": "drop", "args": {"object_uuid": "rock-123"}})
-        
+
         assert "rock-123" in r1.objects
         assert sheet.inventory.slots[0] is None
         assert len(messages) == 1
         assert "drops the Rock" in messages[0][1]['content']
     finally:
-        srv.broadcast_to_room = original_broadcast
+        _restore_broadcast(original)
 
 def test_npc_look():
     w = _fresh_world()
@@ -73,19 +97,19 @@ def test_npc_look():
     
     # Mock broadcast
     messages = []
+
     def mock_broadcast(room_id, payload, exclude_sid=None):
         messages.append((room_id, payload))
-    
-    original_broadcast = srv.broadcast_to_room
-    srv.broadcast_to_room = mock_broadcast
-    
+
+    original = _patch_broadcast_and_sync(mock_broadcast)
+
     try:
         srv._npc_execute_action(npc, r1.id, {"tool": "look", "args": {"target": "something"}})
-        
+
         assert len(messages) == 1
         assert "examines the something" in messages[0][1]['content']
     finally:
-        srv.broadcast_to_room = original_broadcast
+        _restore_broadcast(original)
 
 def test_autonomous_mappings():
     w = _fresh_world()
@@ -96,37 +120,36 @@ def test_autonomous_mappings():
     
     # Mock broadcast
     messages = []
+
     def mock_broadcast(room_id, payload, exclude_sid=None):
         messages.append((room_id, payload))
-    
-    original_broadcast = srv.broadcast_to_room
-    srv.broadcast_to_room = mock_broadcast
-    
+
+    original = _patch_broadcast_and_sync(mock_broadcast)
+
     try:
         # Test boast_achievements -> emote
         srv._npc_execute_action(npc, r1.id, {"tool": "boast_achievements", "args": {"audience": "everyone"}})
         assert "boasts about their achievements" in messages[-1][1]['content']
-        
+
         # Test offer_help -> emote
         srv._npc_execute_action(npc, r1.id, {"tool": "offer_help", "args": {"target": "Player1"}})
         assert "offers to help Player1" in messages[-1][1]['content']
-        
+
         # Test challenge_competitor -> say
         srv._npc_execute_action(npc, r1.id, {"tool": "challenge_competitor", "args": {"target": "Rival"}})
         assert messages[-1][1]['type'] == 'npc'
         assert "challenges Rival" in messages[-1][1]['content']
-        
+
         # Test report_crime -> say
         srv._npc_execute_action(npc, r1.id, {"tool": "report_crime", "args": {"criminal": "Thief"}})
         assert messages[-1][1]['type'] == 'npc'
         assert "witnessed a crime by Thief" in messages[-1][1]['content']
-        
+
         # Test initiate_trade -> emote
         srv._npc_execute_action(npc, r1.id, {"tool": "initiate_trade", "args": {"target": "Merchant"}})
         assert "approaches Merchant to trade" in messages[-1][1]['content']
-        
     finally:
-        srv.broadcast_to_room = original_broadcast
+        _restore_broadcast(original)
 
 def test_autonomous_move_mappings():
     w = _fresh_world()
