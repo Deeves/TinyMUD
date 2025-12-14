@@ -105,24 +105,40 @@ Please also read CONTRIBUTING.md for style and PR tips.
 - Never commit secrets. Set environment variables in your shell or `.env` (which is git‑ignored).
 - Required/optional env vars: `GEMINI_API_KEY` or `GOOGLE_API_KEY` (optional), `SECRET_KEY` (recommended), `HOST`, `PORT`. See `.env.example`.
 
-### Quick command reference
+### Quick Command Reference
 
-- Auth:
-  - `/auth create <name> | <password> | <description>`
-  - `/auth login <name> | <password>`
-  - First created account becomes admin automatically
-- Basics:
-  - `look` or `l` — describe current room
-  - `/help` — list available commands for your role
-  - `/rename <new name>` — change your display name
-  - `/describe <text>` — update your description
-  - `/sheet` — show your character sheet
-- Admin:
-  - `/kick <playerName>` — disconnect a player
-  - `/room create <id> | <description>`
-  - `/room setdesc <id> | <description>`
-  - `/npc add <room name> <npc name...>` / `/npc remove <room name> <npc name...>` / `/npc setdesc <npc name> | <description>`
-  - `/auth promote <name>` / `/auth demote <name>` / `/auth list_admins`
+**Getting Started:**
+- `create` — Interactive account creation wizard
+- `login` — Interactive login
+- `/auth create <name> | <pass> | <desc>` — One-line account creation
+- `/auth login <name> | <pass>` — One-line login
+- First account becomes admin automatically
+
+**Moving & Looking:**
+- `look` (or `l`) — Describe current room
+- `look at <name>` — Inspect a player, NPC, or object
+- `move through <door>` — Go through a named door or travel point
+- `move up/down stairs` — Use stairs if present
+
+**Communication:**
+- `say <message>` — Say something to the room
+- `say to <npc>: <msg>` — Address an NPC directly
+- `tell <target> <message>` — Speak to a specific person
+- `whisper <target> <message>` — Private message (NPC remembers context)
+
+**Actions:**
+- `interact with <object>` — List available interactions
+- `gesture <verb> [to <target>]` — Emote (wave, bow, etc.)
+- `/claim <object>` / `/unclaim <object>` — Object ownership
+- `/sheet` — View your character sheet
+- `/help` — Full command list for your role
+
+**Admin Commands** (see `/help` in-game for full list):
+- `/room create <id> | <desc>` — Create a room
+- `/room adddoor <door> | <target>` — Add a door linking rooms
+- `/npc add <room> | <name> | <desc>` — Add an NPC
+- `/object createtemplateobject` — Wizard to create object templates
+- `/teleport <target> | <room>` — Teleport players
 
 ## Troubleshooting
 

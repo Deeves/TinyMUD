@@ -1,56 +1,86 @@
 # Add a New Location (Room)
 
-You can add new places for players to visit by creating Rooms in `server/world.py`.
+Create new places for players to explore using in-game commands or code.
 
-A Room has:
-- `id`: a short unique string (e.g., `"tavern"`)
-- `description`: a short paragraph players see when they `look`
-- `npcs`: optional set of visible NPC names (strings)
+## Quick Start: In-Game Commands
 
-## 1) Open `server/world.py`
+Logged in as an admin, use these commands:
 
-Find `World.ensure_default_room` for a good example.
+```
+/room create <id> | <description>
+```
 
-## 2) Add a new Room
+Example:
+```
+/room create tavern | A warm tavern filled with the clang of mugs and the smell of roasted meat. Lanterns sway gently from the rafters.
+```
 
-Add your room to `self.rooms` (usually in a new helper method or right after the default room is created). For example:
+### Connecting Rooms with Doors
+
+```
+/room adddoor <door name> | <target room>
+```
+
+Example (while standing in the tavern):
+```
+/room adddoor oak door | town_square
+```
+
+This creates a bidirectional door — the target room automatically gets a door back.
+
+### Stairs
+
+```
+/room setstairs <up_room> | <down_room>
+```
+
+## Room Tags
+
+Rooms can have special tags that modify their behavior:
+
+| Tag | Effect |
+|-----|--------|
+| `[external]` | Appends time-of-day description (dawn, noon, dusk, etc.) |
+| `[internal]` | Standard indoor room |
+| `[ownable]` | Can be claimed by factions or players |
+
+## Tips for Good Descriptions
+
+- **Keep it short:** 1-3 sentences work best in the chat window
+- **Use present tense:** "You enter..." or "The room is..."
+- **Include senses:** Sight, sound, smell make rooms memorable
+- **Mention exits:** "A wooden door leads north" helps navigation
+
+## Manual Setup (Advanced)
+
+For programmatic room creation in `server/world.py`:
 
 ```python
-self.rooms["tavern"] = Room(
-    id="tavern",
-    description=(
-        "You enter a warm tavern. Lanterns sway gently and the smell of bread fills the air."
-    ),
-    npcs={"Bartender", "Quiet Bard"},
+from world import Room
+
+room = Room(
+    id="smithy",
+    description="A hot workshop. The forge glows orange, and the rhythmic clang of hammers fills the air.",
+    npcs={"Gareth the Smith"},
+    doors={"iron door": "marketplace"},
+    tags=["internal"]
 )
+world.rooms["smithy"] = room
 ```
 
-That’s it—your room exists in the world!
+## Door Locks
 
-## 3) Move a player into the room (optional)
+Restrict door access by player ID or relationships:
 
-Right now, everyone spawns in the `start` room. To move someone, add a command in `server/server.py`:
-
-```python
-# inside handle_message, after we compute text_lower
-if text_lower == "go tavern":
-    world.move_player(sid, "tavern")
-    emit('message', { 'type': 'system', 'content': world.describe_room_for(sid) })
-    return
+```
+/room lockdoor <door> | player:<user_id>
+/room lockdoor <door> | relationship:friend with <user_id>
 ```
 
-Now typing `go tavern` will move the player and describe the new room.
+## Linking Existing Doors
 
-## Tips
+If you need to manually pair doors between rooms:
 
-- Keep descriptions short (1–3 lines) so they fit nicely in the chat window.
-- Use present tense and sensory hints (sight, sound, smell) to set the mood.
-- NPC names in `npcs` are just strings; adding them makes them “listed” in the room.
-
-## Doors
-
-Use `/room adddoor <room name> | <door name> | <target room name>` to add a door in a room that leads to another room. Remove a door with `/room removedoor <room name> | <door name>`.
-
-When you add a door and the target room already exists, a matching door is automatically created in the target room that links back to the source. If the same door name is already in use in the target room and points somewhere else, a readable unique variant like `<door name> (to <source_room_id>)`, with a numeric suffix if needed, will be used on the target side.
-
-If the target room doesn't exist yet, the door will be created one-way. Once you create the target room, you can either run `/room adddoor` again from that side, or use `/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>` to explicitly pair doors.
+```
+/room linkdoor <room_a> | <door_a> | <room_b> | <door_b>
+```

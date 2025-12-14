@@ -1,57 +1,77 @@
-# Add or Customize AI/NPCs
+# Add or Customize NPCs
 
-There are two kinds of “characters” here:
+TinyMUD has a full NPC system with AI-powered dialogue and autonomous behavior.
 
-1) Visible names in a room (character list): these are strings in `Room.npcs` in `server/world.py`.
-2) The talking AI persona: configured in `server/server.py`.
+## Quick Start: In-Game Commands
 
-## Visible character names
+The easiest way to add NPCs is using admin commands in-game:
 
-In `server/world.py`, rooms can include a set of names:
+```
+/npc add <room> | <name> | <description>
+```
+
+Example:
+```
+/npc add tavern | Mira the Bartender | A cheerful woman who knows everyone's secrets.
+```
+
+## AI-Generated NPCs
+
+Generate fully-statted NPCs with the Nexus character system:
+
+```
+/npc generate                              # Contextual: fits current room
+/npc generate <room> | <name> | <desc>     # Explicit: specify details
+```
+
+This creates NPCs with:
+- FATE aspects (High Concept, Trouble, Background, Focus)
+- GURPS attributes (Strength, Dexterity, Intelligence, Health)
+- Psychosocial matrix (personality axes like Authority/Egalitarian)
+- Full derived stats (HP, Will, Perception, FP)
+
+See `docs/npc-generate-command.md` for the complete guide.
+
+## Editing NPC Attributes
+
+```
+/npc setdesc <name> | <new description>
+/npc setattr <name> | <attribute> | <value>    # e.g., strength | 14
+/npc setaspect <name> | <type> | <value>       # e.g., trouble | "Too Trusting"
+/npc setmatrix <name> | <axis> | <value>       # e.g., auth_egal | -3
+/npc sheet <name>                               # View full character sheet
+```
+
+## NPC Behavior
+
+NPCs have autonomous behavior driven by a GOAP (Goal-Oriented Action Planning) system:
+
+- **Needs:** Hunger, thirst, socialization, sleep (0-100 scale)
+- **Actions:** NPCs eat, drink, sleep, and socialize autonomously
+- **AI Planning:** When players are present, Gemini AI plans actions; otherwise uses a deterministic offline planner
+
+See `docs/goap-ai.md` for details.
+
+## Manual Setup (Advanced)
+
+For programmatic control, NPCs are stored as `CharacterSheet` objects:
 
 ```python
-self.rooms["start"] = Room(
-    id="start",
-    description="…",
-    npcs={"The Wizard", "Old Guard"}
+# In server/world.py or a service
+sheet = CharacterSheet(
+    display_name="The Wizard",
+    description="A wise, mysterious figure in flowing robes.",
+    strength=10, dexterity=12, intelligence=16, health=11,
+    high_concept="Master of the Arcane Arts",
+    trouble="Speaks in Riddles"
 )
+world.npc_sheets["The Wizard"] = sheet
+world.rooms["tower"].npcs.add("The Wizard")
 ```
 
-These names appear under “NPCs here:” when players `look`.
+## No API Key?
 
-## The AI persona (who talks back)
-
-In `server/server.py`, the server builds a `prompt` and emits a chat message with a `name` field.
-
-Change the `name` if you want a different speaker label:
-
-```python
-emit('message', {
-    'type': 'npc',
-    'name': 'The Wizard',  # change me
-    'content': ai_response.text
-})
-```
-
-Tweak the `prompt` to change the voice/tone:
-
-```python
-prompt = (
-    "You are a wise, slightly mysterious wizard in a fantasy MUD. "
-    f"A player says to you: '{player_message}'. How do you respond? "
-    "Ensure your response is concise and formatted with BBCode where helpful."
-)
-```
-
-Example: switch to a grumpy guard persona:
-
-```python
-prompt = (
-    "You are a gruff town guard who distrusts strangers. Keep answers short. "
-    f"Player: '{player_message}'. Reply in a brusque tone."
-)
-```
-
-## No API key? No problem.
-
-If no Gemini key is set, the server sends a friendly built‑in reply. You can adjust that fallback string in `server/server.py` too.
+Without a Gemini key, NPCs still work:
+- Dialogue uses friendly fallback replies
+- Behavior uses the deterministic offline planner
+- All mechanics function normally

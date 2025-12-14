@@ -1,41 +1,79 @@
 # Contributing Guide (Beginner‑friendly)
 
-Thanks for your interest in improving this tiny AI MUD! This project is intentionally small and welcoming for first contributions.
+Thanks for your interest in improving TinyMUD! This project is intentionally small and welcoming for first contributions.
 
-## What can I add?
+## What Can I Contribute?
 
-- New locations (Rooms) with atmospheric descriptions
-- New visible NPC names in rooms
-- Adjust the AI NPC’s personality and name
-- Improve messages or UI copy
+**Easy (great first issues):**
+- Fix typos or improve messages/UI copy
+- Add comments to confusing code
 
-## Project layout
+**Medium:**
+- Adjust the AI NPC's personality and prompts
+- Add new object templates (food, weapons, furniture)
+- Improve test coverage
 
-- Godot client (GDScript): `ChatUI.tscn`, `src/chat_ui.gd`, `src/socket_io_client.gd`, `OptionsMenu.tscn`, `src/options_menu.gd`
-- Python server: `server/server.py` (websocket + AI), `server/world.py` (in‑memory Rooms/Players)
+**Advanced:**
+- New game mechanics (see `docs/architecture.md`)
+- NPC behavior improvements (see `docs/goap-ai.md`)
+- Combat system tweaks (see `docs/combat-system.md`)
 
-## Workflow
+## Project Layout
 
-1) Fork this repo and create a new branch from `main`.
-2) Make your change in small steps. Test locally:
-   - Run the Python server: `cd server && python server.py`
-   - Run the Godot scene: open `ChatUI.tscn` in Godot and press Play
-3) Keep messages consistent with the client’s expectations:
-   - Server emits `message` events shaped like `{ type, content, name? }`
-4) Commit with a clear message:
-   - Example: "Add ‘tavern’ room with bartender NPC"
-5) Open a Pull Request and describe what you changed. Screenshots welcome!
+```
+TinyMUD/
+├── src/                    # Godot client (GDScript)
+│   ├── chat_ui.gd          # Main chat interface
+│   └── socket_io_client.gd # WebSocket client
+├── server/                 # Python server
+│   ├── server.py           # Main entry, Socket.IO events
+│   ├── world.py            # World model (Rooms, Players, NPCs)
+│   ├── *_service.py        # Feature services (combat, movement, etc.)
+│   └── *_router.py         # Command routing
+└── docs/                   # Documentation you're reading now!
+```
 
-## Code style (lightweight)
+## Development Workflow
 
-- Python: keep functions short and add docstrings/comments for beginners
-- GDScript: add a one‑line header comment at the top saying what the script does
-- Avoid clever one‑liners—prefer clarity
+1. **Fork** this repo and create a new branch from `main`
+2. **Set up locally:**
+   ```powershell
+   cd server
+   python -m pip install -r ../requirements.txt
+   python server.py
+   ```
+3. **Run Godot:** Open `project.godot` and press Play on `ChatUI.tscn`
+4. **Make changes** in small steps — test after each change
+5. **Commit** with clear messages: `"Add tavern room with bartender NPC"`
+6. **Open a Pull Request** describing what you changed. Screenshots welcome!
 
-## Where to add content
+## Code Style (Keep It Simple)
 
-- New locations: edit `server/world.py` (see docs/adding-locations.md)
-- New NPC names: add to a room’s `npcs` set in `world.py`
-- AI persona: edit the `prompt` (and `name`) in `server/server.py`
+- **Python:** Short functions with docstrings. Use type hints. See `CODING_STANDARDS.md`.
+- **GDScript:** Header comment explaining what the script does.
+- **Both:** Prefer clarity over cleverness. Write for beginners to read.
 
-Thanks again. Have fun and keep PRs small—small PRs get merged faster.
+## Where to Add Content
+
+| What | Where | Guide |
+|------|-------|-------|
+| New rooms | `server/world.py` or `/room create` in-game | `docs/adding-locations.md` |
+| New NPCs | `/npc add` in-game or `world.py` | `docs/adding-characters.md` |
+| Object templates | `/object createtemplateobject` in-game | `docs/architecture.md` |
+| AI personality | `server/server.py` (prompt strings) | `docs/adding-characters.md` |
+
+## Testing Your Changes
+
+```powershell
+cd server
+python -m pytest -v        # Run all tests
+python service_tests.py    # Quick service tests
+```
+
+## Getting Help
+
+- Check `docs/` for architecture and feature docs
+- Look at existing code for patterns to follow
+- Open an issue if you're stuck — we're friendly!
+
+Thanks again. Have fun and **keep PRs small** — small PRs get merged faster.
