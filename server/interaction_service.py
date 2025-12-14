@@ -1,4 +1,6 @@
 from __future__ import annotations
+import timeit
+import time
 
 """
 interaction_service.py — Player-facing object interaction flow.
@@ -628,6 +630,22 @@ def handle_interaction_input(
         # Object successfully picked up - transfer ownership atomically
         if obj and player:
             try:
+                # Determine event type (theft if owned by someone else)
+                event_type = 'take'
+                if getattr(obj, 'owner_id', None) and obj.owner_id != player.user_id:
+                    event_type = 'theft'
+                
+                # Log to room events
+                if room:
+                    room.add_event({
+                        'type': event_type,
+                        'actor_id': player.user_id,
+                        'actor_name': player.sheet.display_name,
+                        'target_obj_id': obj.uuid,
+                        'target_obj_name': getattr(obj, 'display_name', 'object'),
+                        'timestamp': time.time()
+                    })
+
                 # Transfer ownership to the picking player
                 obj.owner_id = player.user_id  # type: ignore[attr-defined]
             except Exception:

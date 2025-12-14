@@ -1,0 +1,24 @@
+{
+  "world_version": 4,
+  "rooms": {},
+  "npc_sheets": {},
+  "object_templates": {},
+  "users": {},
+  "npc_ids": {},
+  "factions": {},
+  "missions": {},
+  "world_name": null,
+  "world_description": null,
+  "world_conflict": null,
+  "start_room_id": null,
+  "setup_complete": false,
+  "safety_level": "G",
+  "advanced_goap_enabled": false,
+  "relationships": {},
+  "debug_creative_mode": false,
+  "game_time_ticks": 5,
+  "daily_update_timestamp": 0.0,
+  "time_descriptions": {
+    "5": "New Dawn Description"
+  }
+}

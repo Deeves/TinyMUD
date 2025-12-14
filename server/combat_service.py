@@ -11,6 +11,7 @@ High-level rules:
 """
 from __future__ import annotations
 import random
+import time
 from typing import List, Tuple, Optional
 
 from safe_utils import safe_call
@@ -124,6 +125,16 @@ def attack(world: World, state_path: str, attacker_sid: str, target_token: str, 
     if not attacker_npc_name:
         emits.append({"type": "system", "content": f"You attack {target_sheet.display_name} for {dmg} damage (HP {pre_hp}->{target_sheet.hp})."})
     broadcasts.append((MESSAGE_OUT, {"type": "system", "content": f"{attacker_name} attacks {target_sheet.display_name} for {dmg} damage."}))
+
+    # Log event to room
+    if room:
+        room.add_event({
+            'type': 'violence',
+            'actor_name': attacker_name,
+            'target_name': target_sheet.display_name,
+            'damage': dmg,
+            'timestamp': time.time()
+        })
 
     # Death check
     if target_sheet.hp <= 0:

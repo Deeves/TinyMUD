@@ -2,17 +2,63 @@
 import time
 import logging
 import uuid
+import random
 from typing import List, Optional
 
 from world import World
 from role_model import FactionRole
-from world import World
-from role_model import FactionRole
-from mission_model import Mission, MissionStatus, ObtainItemObjective, Objective
+from mission_model import Mission, MissionStatus, ObtainItemObjective, Objective, VisitRoomObjective
 import ambition_service
 
 # Constants
 DAY_LENGTH_TICKS = 24  # 24 ticks = 1 game day (at 60s/tick = 24 minutes)
+
+# Default Hourly Descriptions (0-23)
+HOURLY_DESCRIPTIONS = {
+    0: "The moon hangs high in the midnight sky.",
+    1: "A deep stillness settles over the world in the witching hour.",
+    2: "The stars shine brightly in the pitch-black sky.",
+    3: "A faint chill permeates the air before dawn.",
+    4: "The horizon begins to pale with the promise of day.",
+    5: "The birds begin to stir as the sky turns grey.",
+    6: "The first light of dawn breaks over the horizon.",
+    7: "The morning sun casts long shadows across the land.",
+    8: "The world is fully awake and bustling with morning energy.",
+    9: "The sun climbs higher, warming the earth.",
+    10: "The day is bright and the sky is a clear azure.",
+    11: "The sun approaches its zenith, casting short shadows.",
+    12: "The sun hangs directly overhead in the noon sky.",
+    13: "The afternoon sun beats down with intensity.",
+    14: "The heat of the day persists in the early afternoon.",
+    15: "The sun begins its slow descent towards the west.",
+    16: "Golden hour approaches as the light softens.",
+    17: "Long shadows return as evening draws near.",
+    18: "The sun touches the horizon, painting the sky in orange and red.",
+    19: "Twilight falls, blurring the lines between day and night.",
+    20: "The last traces of daylight fade into the west.",
+    21: "Darkness claims the sky, and the stars emerge.",
+    22: "The night deepens, wrapping the world in shadow.",
+    23: "The world is quiet under the starlit canopy."
+}
+
+def get_game_time_string(world: World) -> str:
+    """Return a prose description of the current time of day."""
+    if not hasattr(world, 'game_time_ticks'):
+        return ""
+    
+    # Calculate hour (assuming 1 tick = 1 hour for simplicity in this prose mapping, 
+    # though valid ticks might be faster. The constant DAY_LENGTH_TICKS is 24, so 1 tick = 1 hour is correct.)
+    hour = world.game_time_ticks % DAY_LENGTH_TICKS
+    
+    # Check if world has custom overrides (persisted time descriptions)
+    # Use a safe attribute access or default to global constant
+    descriptions = getattr(world, 'time_descriptions', HOURLY_DESCRIPTIONS)
+    
+    # Fallback to default if key missing in custom dict
+    desc = descriptions.get(hour, HOURLY_DESCRIPTIONS.get(hour, "Time passes."))
+    
+    return f"\n\nIt is currently {hour}:00. {desc}"
+
 
 def process_daily_cycle(world: World, broadcast_func=None):
     """Called every tick to check if a new day has dawned."""
@@ -62,24 +108,33 @@ def _start_new_day(world: World, broadcast_func=None):
 def _resolve_outstanding_contracts(world: World, member_id: str, faction_id: str, broadcast_func=None):
     """Check for active daily missions from this faction and fail them if expired."""
     # Find active missions assigned to this member from this faction
-    # Note: efficient lookup would require an index, doing linear scan for MVP
-    if not hasattr(world, 'missions'):
-         world.missions = {}
-
-    for mission in world.missions.values():
-        if (mission.assignee_id == member_id and 
-            mission.faction_id == faction_id and 
-            mission.status == MissionStatus.ACTIVE):
-            
-            # It's a new day, so any active daily mission is now FAILED
-            # (Assuming daily missions must be done same day. 
-            #  Could check 'deadline' field too, but simpler logic: New Day = Deadline passed)
-            
-            print(f"[Daily System] Member {member_id} failed mission {mission.uuid}")
-            mission.status = MissionStatus.FAILED
-            
-            # Apply Consequence: Rep Loss / Chew Out
-            _apply_failure_consequence(world, member_id, faction_id, mission, broadcast_func)
+    # Use O(1) index if available, else fallback
+    if hasattr(world, 'missions_by_assignee'):
+        mission_uuids = world.missions_by_assignee.get(member_id, set())
+        # Copy to list to avoid runtime error if we modify index during iteration (though remove logic usually handles this safely)
+        for mid in list(mission_uuids):
+            mission = world.missions.get(mid)
+            if (mission and 
+                mission.faction_id == faction_id and 
+                mission.status == MissionStatus.ACTIVE):
+                
+                print(f"[Daily System] Member {member_id} failed mission {mission.uuid}")
+                mission.status = MissionStatus.FAILED
+                
+                # Apply Consequence
+                _apply_failure_consequence(world, member_id, faction_id, mission, broadcast_func)
+    else:
+        # Fallback linear scan
+        if not hasattr(world, 'missions'):
+             world.missions = {}
+        for mission in world.missions.values():
+            if (mission.assignee_id == member_id and 
+                mission.faction_id == faction_id and 
+                mission.status == MissionStatus.ACTIVE):
+                
+                print(f"[Daily System] Member {member_id} failed mission {mission.uuid}")
+                mission.status = MissionStatus.FAILED
+                _apply_failure_consequence(world, member_id, faction_id, mission, broadcast_func)
 
 def _apply_failure_consequence(world: World, member_id: str, faction_id: str, mission: Mission, broadcast_func=None):
     """Punish the slacker."""
@@ -87,8 +142,6 @@ def _apply_failure_consequence(world: World, member_id: str, faction_id: str, mi
     if not faction: return
     
     # 1. Rep Loss (Simple implementation)
-    # Using social_status as proxy for standing since Faction doesn't track per-member rep numerically yet
-    # Also look for the player/NPC to deduct
     sheet = None
     player_sid = None
     
@@ -103,15 +156,20 @@ def _apply_failure_consequence(world: World, member_id: str, faction_id: str, mi
                 break
     else:
         # NPC
-        sheet = world.npc_sheets.get(member_id) # member_id might be npc name or uuid?
-        # Faction system currently uses npc_id (UUID). Need to resolve to sheet.
-        # But npc_sheets is by Name. 
-        # Ideally we map UUID -> Name. world.npc_ids maps Name -> UUID.
-        # Reverse lookup for MVP:
-        for name, uuid in world.npc_ids.items():
-            if uuid == member_id:
-                sheet = world.npc_sheets.get(name)
-                break
+        sheet = world.npc_sheets.get(member_id) # maybe it's a name?
+        if not sheet:
+            # Try UUID lookup
+            # Optimized reverse lookup
+            if hasattr(world, 'npc_ids_reverse'):
+                name = world.npc_ids_reverse.get(member_id)
+                if name:
+                    sheet = world.npc_sheets.get(name)
+            else:
+                # Fallback linear
+                for name, uuid in world.npc_ids.items():
+                    if uuid == member_id:
+                        sheet = world.npc_sheets.get(name)
+                        break
     
     if sheet:
         # Deduct status
@@ -127,22 +185,9 @@ def _apply_failure_consequence(world: World, member_id: str, faction_id: str, mi
         })
         
         # Messaging
-        fail_msg = f"You failed to complete '{mission.title}' for {faction.name}. Your standing has decreased."
-        if player_sid:
-            # Send specific message to player
-            if broadcast_func:
-                # We can hack a directed message via broadcast_func if it supports 'to' 
-                # or just rely on the implementation. 
-                # If broadcast_func is generic broadcast_to_all, this spams everyone.
-                # Better: daily_system creates a notification event we can pick up? 
-                # For MVP, just print to console or use broadcast if generic.
-                pass 
-                # Actually, can't easily send private message without `emit` access here.
-                # Just log for now.
-                print(f"Player {sheet.display_name} notified of failure.")
-        elif sheet:
-            # NPC Grumble?
-            pass
+        if player_sid and broadcast_func:
+            pass # messaging logic
+            print(f"Player {sheet.display_name} notified of failure.")
 
 def _assign_daily_contract(world: World, faction, member_id: str, role: FactionRole, broadcast_func=None):
     """Create a new mission based on the role."""
@@ -173,9 +218,29 @@ def _assign_daily_contract(world: World, faction, member_id: str, role: FactionR
         mission.objectives.append(obj)
         
     elif role.contract_type == "patrol":
-        # Visit a room
-        # For MVP, generic "Visit HQ"
-        obj = Objective(description="Report for duty", type="visit", target_count=1)
+        # Visit a random room
+        target_room_id = None
+        target_room_name = "Unknown Location"
+        
+        if world.rooms:
+            # Pick any room (for MVP)
+            # Ideal: Pick a room in faction territory or connected area
+            # Just random for now
+            rid = random.choice(list(world.rooms.keys()))
+            target_room_id = rid
+            target_room = world.rooms[rid]
+            # Try to get a nice name? Room doesn't have a 'name' field, just description and id.
+            # ID is often not human readable. 
+            # We can use First line of description or ID if simple.
+            # actually we can just say "Patrol designated area" and give ID in debug.
+            # or try to extract a name mechanism if one existed.
+            target_room_name = target_room.id # Usually user-friendly handle
+            
+        obj = VisitRoomObjective(
+            description=f"Patrol {target_room_name}",
+            target_id=target_room_id,
+            target_count=1
+        )
         mission.objectives.append(obj)
         
     # Rewards
@@ -186,5 +251,11 @@ def _assign_daily_contract(world: World, faction, member_id: str, role: FactionR
     if not hasattr(world, 'missions'):
         world.missions = {}
     world.missions[mission.uuid] = mission
+    
+    # Update Index
+    if hasattr(world, 'missions_by_assignee'):
+        if member_id not in world.missions_by_assignee:
+            world.missions_by_assignee[member_id] = set()
+        world.missions_by_assignee[member_id].add(mission.uuid)
     
     print(f"[Daily System] Assigned {mission.title} to {member_id}")

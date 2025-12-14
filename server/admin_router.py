@@ -34,7 +34,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         return False
     admin_cmds = {
         'kick', 'teleport', 'bring', 'purge', 'worldstate', 'safety', 'setup',
-        'room', 'npc', 'faction', 'object'
+        'room', 'npc', 'faction', 'object', 'settimedesc'
     }
     if cmd not in admin_cmds:
         return False
@@ -57,6 +57,7 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         'worldstate': OperationType.BASIC,  # Read-only operation
         'safety': OperationType.BASIC,  # Configuration change
         'setup': OperationType.MODERATE,  # World setup
+        'settimedesc': OperationType.BASIC, # Simple text update
     }
 
     cost = operation_costs.get(cmd, OperationType.HEAVY)  # Default to heavy for unknown
@@ -417,5 +418,28 @@ def try_handle(ctx: CommandContext, sid: str | None, cmd: str, args: list[str], 
         for room_id, payload in broadcasts2:
             ctx.broadcast_to_room(room_id, payload, exclude_sid=sid)
         return True if handled else False
+
+    # /settimedesc
+    if cmd == 'settimedesc':
+        if len(args) < 2:
+            _emit_system(emit, MESSAGE_OUT, "Usage: /settimedesc <hour> <description>")
+            return True
+        
+        try:
+            hour = int(args[0])
+            if not (0 <= hour <= 23):
+                raise ValueError
+        except ValueError:
+            _emit_error(emit, MESSAGE_OUT, "Hour must be an integer between 0 and 23.")
+            return True
+            
+        desc = " ".join(args[1:])
+        if not hasattr(world, 'time_descriptions'):
+            world.time_descriptions = {}
+            
+        world.time_descriptions[hour] = desc
+        save_world(world, ctx.state_path, debounced=True)
+        _emit_system(emit, MESSAGE_OUT, f"Description for hour {hour} updated.")
+        return True
 
     return False

@@ -101,6 +101,12 @@ def accept_mission(world: World, mission_id: str, assignee_id: str) -> Tuple[boo
     mission.status = MissionStatus.ACTIVE
     mission.assignee_id = assignee_id
     
+    # Update index
+    if hasattr(world, 'missions_by_assignee'):
+        if assignee_id not in world.missions_by_assignee:
+            world.missions_by_assignee[assignee_id] = set()
+        world.missions_by_assignee[assignee_id].add(mission.uuid)
+    
     emits = [
         {
             'type': 'system',

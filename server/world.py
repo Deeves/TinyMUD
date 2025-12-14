@@ -695,6 +695,18 @@ class Room:
     faction_id: Optional[str] = None
     # Objects physically present in the room (includes doors/stairs as Objects)
     objects: Dict[str, Object] = field(default_factory=dict)  # key: object uuid -> Object
+    # Transient events list for crime detection/recent history (not currently persisted)
+    events: List[Dict] = field(default_factory=list)
+    # Room Tags (e.g. ['external', 'ownable'])
+    tags: List[str] = field(default_factory=list)
+    # Ownership (ID of owning user or faction)
+    owner_id: Optional[str] = None
+
+    def add_event(self, event: Dict):
+        """Add an event to the room's history, capping at 50 items."""
+        self.events.append(event)
+        if len(self.events) > 50:
+            self.events = self.events[-50:]
 
     def describe(self, world: "World", viewer_sid: str | None = None) -> str:
         """Return a short multi-line description for a player to read.
@@ -702,6 +714,14 @@ class Room:
         Includes the room description, any visible NPC names, and other players present.
         """
         lines = [self.description.strip()]
+
+        # [External] Tag Logic: Append time
+        if "external" in self.tags:
+            # Import here to avoid circular dependency at module level
+            from daily_system import get_game_time_string
+            time_str = get_game_time_string(world)
+            if time_str:
+                lines.append(time_str)
 
         # NPCs
         if self.npcs:
@@ -791,6 +811,9 @@ class Room:
             "faction_id": self.faction_id,
             # Objects in the room
             "objects": {oid: obj.to_dict() for oid, obj in self.objects.items()},
+            # Tags and Ownership
+            "tags": self.tags,
+            "owner_id": self.owner_id,
         }
 
     @staticmethod
@@ -811,6 +834,8 @@ class Room:
             door_locks=dict(data.get("door_locks", {})),
             faction_id=str(data.get("faction_id")) if data.get("faction_id") else None,
             objects={},
+            tags=list(data.get("tags", [])),
+            owner_id=str(data.get("owner_id")) if data.get("owner_id") else None,
         )
         # Load objects if present
         try:
@@ -1297,9 +1322,17 @@ class World:
         # New: Global mapping of NPC display name -> stable UUID
         # Names are globally unique in this simple world; ids provide stability.
         self.npc_ids: Dict[str, str] = {}
+        # New: Reverse mapping of NPC UUID -> Display Name for O(1) lookup
+        self.npc_ids_reverse: Dict[str, str] = {}
         # Faction system: organized groups of players and NPCs with political relationships
         # Key is faction_id (UUID), value is Faction instance  
         self.factions: Dict[str, Faction] = {}
+        # Mission system: active and pending missions
+        # Key is mission_uuid, value is Mission instance
+        self.missions: Dict[str, Mission] = {}
+        # New: Index of missions by assignee_id for O(1) lookup
+        self.missions_by_assignee: Dict[str, Set[str]] = {}
+
         # Mission system: active and pending missions
         # Key is mission_uuid, value is Mission instance
         self.missions: Dict[str, Mission] = {}
@@ -1326,6 +1359,8 @@ class World:
         # Daily System / Time
         self.game_time_ticks: int = 0
         self.daily_update_timestamp: float = 0.0
+        # Custom Hourly Descriptions: hour (int) -> description (str)
+        self.time_descriptions: Dict[int, str] = {}
         # Schema version for migrations: tracks the data format version
         # New worlds start at latest version; old worlds are migrated on load
         self.world_version: int = 0  # Will be set to latest during save/load  # Will be set to latest during save/load
@@ -1438,6 +1473,7 @@ class World:
             # Time Persistence
             "game_time_ticks": self.game_time_ticks,
             "daily_update_timestamp": self.daily_update_timestamp,
+            "time_descriptions": {str(k): v for k, v in self.time_descriptions.items()},
         }
 
     @classmethod
@@ -1474,6 +1510,15 @@ class World:
         w.game_time_ticks = data.get("game_time_ticks", 0)
         w.daily_update_timestamp = data.get("daily_update_timestamp", 0.0)
         
+        # Load custom time descriptions
+        td = data.get("time_descriptions", {})
+        if isinstance(td, dict):
+            # Convert string keys back to int
+            try:
+                w.time_descriptions = {int(k): str(v) for k, v in td.items()}
+            except ValueError:
+                w.time_descriptions = {}
+        
         # Load rooms (migrations should have cleaned up any issues)
         rooms = data.get("rooms", {})
         if isinstance(rooms, dict):
@@ -1501,9 +1546,12 @@ class World:
                         pass
         
         # Load NPC ID mapping (migrations should have ensured completeness)
+        # Load NPC ID mapping (migrations should have ensured completeness)
         npc_ids = data.get("npc_ids", {})
         if isinstance(npc_ids, dict):
             w.npc_ids = dict(npc_ids)
+            # Build reverse index for O(1) lookup
+            w.npc_ids_reverse = {v: k for k, v in w.npc_ids.items()}
         
         # Load factions with safe error handling
         factions = data.get("factions", {})
@@ -1525,6 +1573,11 @@ class World:
                     try:
                         mission = Mission.from_dict(mdata)
                         w.missions[mission.uuid] = mission
+                        
+                        # Build index
+                        if mission.assignee_id not in w.missions_by_assignee:
+                            w.missions_by_assignee[mission.assignee_id] = set()
+                        w.missions_by_assignee[mission.assignee_id].add(mission.uuid)
                     except Exception:
                         print(f"Warning: Skipped malformed mission data for {mid}")
 
@@ -1642,6 +1695,11 @@ class World:
         if npc_name not in self.npc_ids:
             new_id = str(uuid.uuid4())
             self.npc_ids[npc_name] = new_id
+            
+            # Maintain reverse index
+            if not hasattr(self, 'npc_ids_reverse'):
+                self.npc_ids_reverse = {}
+            self.npc_ids_reverse[new_id] = npc_name
             
             # Log when creating new NPC IDs for debugging/audit trail
             print(f"Created new NPC ID for '{npc_name}': {new_id}")
