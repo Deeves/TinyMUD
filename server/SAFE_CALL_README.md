@@ -5,6 +5,7 @@ This project uses a structured approach to exception handling through the `safe_
 ## Problem Solved
 
 Previously, the codebase had many patterns like this:
+
 ```python
 try:
     risky_operation()
@@ -21,6 +22,7 @@ The `safe_call()` helper logs the first occurrence of each exception type per fu
 ## Usage Examples
 
 ### Basic Replacement
+
 ```python
 # Before
 try:
@@ -33,6 +35,7 @@ safe_call(socketio.emit, MESSAGE_OUT, payload, to=psid)
 ```
 
 ### With Default Return Values
+
 ```python
 # Before
 try:
@@ -46,6 +49,7 @@ return safe_call_with_default(config_reader, default_value, key)
 ```
 
 ### Complex Logic Refactoring
+
 ```python
 # Before
 try:
@@ -67,6 +71,7 @@ return safe_call(_find_room) or None
 ```
 
 ### Method Decorator
+
 ```python
 class GameEntity:
     @safe_decorator(default=[])
@@ -82,17 +87,10 @@ class GameEntity:
 4. **Zero Breaking Changes**: Drop-in replacement for existing patterns
 5. **Testing Friendly**: `reset_seen_exceptions()` for clean test state
 
-## Running the Demo
-
-See the migration patterns in action:
-```bash
-cd server
-python safe_call_demo.py
-```
-
 ## Integration Status
 
 Key areas where `safe_call()` has been integrated:
+
 - `broadcast_to_room()` - Network emission failures
 - `_setup_logging()` - Configuration failures  
 - `_npc_find_room_for()` - World state iteration failures
