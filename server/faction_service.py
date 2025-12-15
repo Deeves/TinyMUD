@@ -193,6 +193,98 @@ def _extract_json_payload(text: str) -> Optional[dict]:
             return None
 
 
+def _link_to_existing_world(world: World, created_rooms: List[str], faction_name: str, faction_id: Optional[str] = None):
+    """Ensure the new faction rooms are connected to the main world.
+    
+    Strategy:
+    1. Find a suitable 'Anchor' room in the existing world (e.g., Tavern, Square).
+    2. Link the first created room (conceptually the 'entrance') to this Anchor.
+    """
+    if not created_rooms:
+        return
+
+    # 1. Find Anchor
+    candidates = []
+    # Priority keywords for a hub
+    keywords = ["tavern", "inn", "square", "plaza", "center", "hub", "crossroads"]
+    
+    # Filter out newly created rooms to find an EXISTING anchor
+    existing_rooms = [r for r in world.rooms.values() if r.id not in created_rooms]
+    
+    if not existing_rooms:
+        return
+
+    # Sort by keyword priority
+    for r in existing_rooms:
+        score = 0
+        desc = (r.description or "").lower()
+        rid = (r.id or "").lower()
+        for k in keywords:
+            if k in rid: score += 2
+            if k in desc: score += 1
+        if score > 0:
+            candidates.append((score, r))
+    
+    # Sort descending by score
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    anchor: Room | None = None
+    if candidates:
+        anchor = candidates[0][1]
+    else:
+        # Fallback: just pick the first existing room
+        anchor = existing_rooms[0]
+        
+    if not anchor:
+        return
+        
+    # 2. Link
+    entrance_id = created_rooms[0]
+    entrance = world.rooms.get(entrance_id)
+    if not entrance: 
+        return
+        
+    door_to_faction = f"path to {faction_name}"
+    door_to_world = "exit to world"
+    
+    # Verify we aren't overwriting existing doors if possible (though unlikely for new rooms)
+    # create A->B
+    anchor.doors[door_to_faction] = entrance_id
+    # create B->A
+    entrance.doors[door_to_world] = anchor.id
+    
+    # Ensure Object entries for these doors (for Travel Point tags)
+    # Anchor side
+    if door_to_faction not in anchor.door_ids:
+        anchor.door_ids[door_to_faction] = str(uuid.uuid4())
+    oid_a = anchor.door_ids[door_to_faction]
+    if oid_a not in anchor.objects:
+        obj = Object(
+            display_name=door_to_faction,
+            description=f"A way leading to {faction_name}.",
+            object_tags={"Immovable", "Travel Point"},
+            link_target_room_id=entrance_id
+        )
+        obj.uuid = oid_a
+        anchor.objects[oid_a] = obj
+
+    # Entrance side
+    if door_to_world not in entrance.door_ids:
+        entrance.door_ids[door_to_world] = str(uuid.uuid4())
+    oid_b = entrance.door_ids[door_to_world]
+    if oid_b not in entrance.objects:
+        obj = Object(
+            display_name=door_to_world,
+            description="The way back to the wider world.",
+            object_tags={"Immovable", "Travel Point"},
+            link_target_room_id=anchor.id
+        )
+        obj.uuid = oid_b
+        if faction_id:
+            obj.faction_id = faction_id
+        entrance.objects[oid_b] = obj
+
+
 def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[List[str], List[str]]:
     """Create rooms, link doors, add NPCs, relationships, food/water, and beds.
 
@@ -415,6 +507,12 @@ def _apply_graph_to_world(world: World, state_path: str, graph: dict) -> Tuple[L
                 elif rtype == 'rival':
                     faction.add_rival(target_faction.faction_id)
                     target_faction.add_rival(faction.faction_id)
+
+                    faction.add_rival(target_faction.faction_id)
+                    target_faction.add_rival(faction.faction_id)
+
+    # 7) Link to Existing World
+    _link_to_existing_world(world, created_rooms, faction_name or "Unknown Faction", faction_id)
 
     # Best-effort save
     try:
