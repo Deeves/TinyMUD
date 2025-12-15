@@ -280,14 +280,17 @@ def handle_interaction_input(
     room = world.rooms.get(player.room_id) if player else None
     obj = None
     obj_uuid = sess.get('obj_uuid')
-    if room and obj_uuid and getattr(room, 'objects', None):
-        obj = room.objects.get(obj_uuid)
-    # Search hands and stowed inventory if not in room
     inv = player.sheet.inventory if player else None
     obj_loc = None  # 'room' | 'hand' | 'small' | 'large'
     hand_index = None
     stow_index = None
     stow_large_index = None
+    # Check room first
+    if room and obj_uuid and getattr(room, 'objects', None):
+        obj = room.objects.get(obj_uuid)
+        if obj:
+            obj_loc = 'room'
+    # Search hands and stowed inventory if not in room
     if (not obj) and inv:
         # hands 0,1 then small 2..5, large 6..7
         for i in range(0, 2):
@@ -869,7 +872,14 @@ def handle_interaction_input(
             inv.slots[stow_index] = None
         elif obj_loc == 'large' and stow_large_index is not None:
             inv.slots[stow_large_index] = None
+        elif obj_loc == 'room' and room and obj:
+            # Explicitly remove from room when item was found on room floor
+            try:
+                room.objects.pop(obj.uuid, None)
+            except Exception:
+                pass
         elif room and obj and obj.uuid in (room.objects or {}):
+            # Fallback: check if item is still in room even if obj_loc wasn't tracked
             try:
                 room.objects.pop(obj.uuid, None)
             except Exception:

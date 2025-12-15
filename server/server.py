@@ -2392,7 +2392,7 @@ def handle_command(sid: str | None, text: str) -> None:
 
     # Routers: auth & player utilities
     from command_context import CommandContext  # local import (avoid top-level weight during tests)
-    import auth_router, player_router  # type: ignore
+    import auth_router, player_router, admin_router  # type: ignore
     import combat_router  # type: ignore  # new combat commands (/attack)
     base_ctx = CommandContext(
         world=world,
@@ -2425,6 +2425,9 @@ def handle_command(sid: str | None, text: str) -> None:
     if auth_router.try_handle(base_ctx, sid, cmd, args, text, emit):
         return
     if player_router.try_handle(base_ctx, sid, cmd, args, text, emit):
+        return
+    # Admin router (admin commands: /room, /npc, /faction, /object, /teleport, etc.)
+    if admin_router.try_handle(base_ctx, sid, cmd, args, text, emit):
         return
     # Trade & barter router
     import trade_router  # type: ignore

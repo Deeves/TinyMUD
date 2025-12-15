@@ -8,7 +8,7 @@
       "doors": {},
       "stairs_up_to": null,
       "stairs_down_to": null,
-      "uuid": "42502875-e253-4917-aba0-6f87d2fc76a8",
+      "uuid": "a083f58e-93a8-442b-972e-c2e10543bd4b",
       "door_ids": {},
       "stairs_up_id": null,
       "stairs_down_id": null,
@@ -22,8 +22,8 @@
   "npc_sheets": {},
   "object_templates": {},
   "users": {
-    "d2df7d65-4688-49c2-b5b8-c43219443604": {
-      "user_id": "d2df7d65-4688-49c2-b5b8-c43219443604",
+    "d3da90cf-33c8-435b-a1ee-d092025a5402": {
+      "user_id": "d3da90cf-33c8-435b-a1ee-d092025a5402",
       "display_name": "TestPlayer",
       "password": "password123",
       "description": "A brave adventurer",
