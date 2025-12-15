@@ -317,14 +317,14 @@ def try_handle_flow(ctx: CommandContext, sid: str, player_message: str, emit: Em
                 mentioned = _extract_npc_mentions(tell_msg, others)
             except Exception:
                 mentioned = []
-                for nm in mentioned:
-                    try:
-                        import server as _srv
-                        if _srv.dice_roll('d%').total <= 33:
-                            _send_npc_reply(nm, tell_msg, sid)
-                    except Exception:
-                        if random.randint(1, 100) <= 33:
-                            _send_npc_reply(nm, tell_msg, sid)
+            for nm in mentioned:
+                try:
+                    import server as _srv
+                    if _srv.dice_roll('d%').total <= 33:
+                        _send_npc_reply(nm, tell_msg, sid)
+                except Exception:
+                    if random.randint(1, 100) <= 33:
+                        _send_npc_reply(nm, tell_msg, sid)
         return True
 
     # ---------------- WHISPER ----------------

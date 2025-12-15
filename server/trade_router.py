@@ -163,17 +163,18 @@ def _barter_handle(ctx: CommandContext, world: World, sid: str, text: str):
 
 
 def _trade_begin(ctx: CommandContext, world: World, sid: str, *, target_kind: str, target_display: str, room_id: str, target_sid: str | None = None, target_name: str | None = None):
-    ctx.trade_sessions.pop(sid, None)
-    ctx.barter_sessions.pop(sid, None)
-    session = {
-        'step': 'choose_desired',
-        'target_kind': target_kind,
-        'target_sid': target_sid,
-        'target_name': target_name,
-        'target_display': target_display,
-        'room_id': room_id,
-    }
-    ctx.trade_sessions[sid] = session
+    with atomic_many(['trade_sessions', 'barter_sessions']):
+        ctx.trade_sessions.pop(sid, None)
+        ctx.barter_sessions.pop(sid, None)
+        session = {
+            'step': 'choose_desired',
+            'target_kind': target_kind,
+            'target_sid': target_sid,
+            'target_name': target_name,
+            'target_display': target_display,
+            'room_id': room_id,
+        }
+        ctx.trade_sessions[sid] = session
     emits = [
         {'type': 'system', 'content': f"Beginning trade with {target_display}. Type 'cancel' to abort."},
         {'type': 'system', 'content': f"What item do you want from {target_display}'s inventory?"},

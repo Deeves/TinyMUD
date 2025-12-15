@@ -1,6 +1,7 @@
 from __future__ import annotations
-import timeit
+
 import time
+import logging
 
 """
 interaction_service.py — Player-facing object interaction flow.
@@ -445,9 +446,10 @@ def handle_interaction_input(
                 missing_list: list[str] = []
                 for nm, cnt in req_counts.items():
                     if have_counts.get(nm, 0) < cnt:
-                        # Use original-cased name for message when available
-                        # Find an example casing from required list
-                        example = next((r for r in required if r.lower() == nm), nm)
+                        # Use title-cased name for message to normalize display
+                        # Find an example casing from required list or use nm
+                        raw_example = next((r for r in required if r.lower() == nm), nm)
+                        example = raw_example.title()
                         deficit = cnt - have_counts.get(nm, 0)
                         if deficit == 1:
                             missing_list.append(example)
@@ -491,11 +493,19 @@ def handle_interaction_input(
                             ),
                         }], []
             from world import Object as _Obj
-            made = (
-                _Obj.from_dict(tmpl.to_dict())
-                if hasattr(tmpl, 'to_dict')
-                else _Obj.from_dict(tmpl)
-            )
+            
+            made = None
+            if hasattr(tmpl, 'to_dict'):
+                made = _Obj.from_dict(tmpl.to_dict())
+            elif isinstance(tmpl, dict):
+                made = _Obj.from_dict(tmpl)
+                
+            if not made:
+                logging.error(f"Crafting Error: Invalid template {type(tmpl)} in recipe.")
+                return True, None, [{
+                    'type': 'error',
+                    'content': "Crafting failed: Invalid recipe result (Items consumed)."
+                }], []
             # Place in room (simple initial rule: spawns into the world at the spot)
             if room is None:
                 # Fallback if room missing
@@ -908,7 +918,7 @@ def handle_interaction_input(
         line = 'drink' if chosen.lower().startswith('drink') else 'eat'
         msg = f'You {line} the {name}.'
         if created_names:
-            msg += " You now have: " + ", ".join(created_names) + "."
+            msg += " The following appeared on the floor: " + ", ".join(created_names) + "."
         return True, None, [{'type': 'system', 'content': msg}], []
 
     if chosen.lower() == 'open':
@@ -1006,19 +1016,21 @@ def handle_interaction_input(
                     tags2 = set(getattr(spawned, 'object_tags', []) or [])
                     placed = False
                     if 'large' in tags2:
-                        for i in range(0, 2):
-                            slots = getattr(obj, 'container_large_slots', [None, None])
-                            if slots[i] is None:
-                                obj.container_large_slots[i] = spawned
-                                placed = True
-                                break
+                        slots = getattr(obj, 'container_large_slots', None)
+                        if slots:
+                            for i, s in enumerate(slots):
+                                if s is None:
+                                    slots[i] = spawned
+                                    placed = True
+                                    break
                     else:
-                        for i in range(0, 2):
-                            slots = getattr(obj, 'container_small_slots', [None, None])
-                            if slots[i] is None:
-                                obj.container_small_slots[i] = spawned
-                                placed = True
-                                break
+                        slots = getattr(obj, 'container_small_slots', None)
+                        if slots:
+                            for i, s in enumerate(slots):
+                                if s is None:
+                                    slots[i] = spawned
+                                    placed = True
+                                    break
                     if not placed:
                         spawned = None  # no space; discard spawn silently
             except Exception:

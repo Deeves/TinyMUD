@@ -118,9 +118,14 @@ def _resolve_outstanding_contracts(world: World, member_id: str, faction_id: str
                 mission.faction_id == faction_id and 
                 mission.status == MissionStatus.ACTIVE):
                 
+                _notify_player(world, member_id, f"Mission Failed: {mission.title}", broadcast_func)
                 print(f"[Daily System] Member {member_id} failed mission {mission.uuid}")
                 mission.status = MissionStatus.FAILED
                 
+                # Clean up index
+                if hasattr(world, 'missions_by_assignee') and member_id in world.missions_by_assignee:
+                    world.missions_by_assignee[member_id].discard(mission.uuid)
+
                 # Apply Consequence
                 _apply_failure_consequence(world, member_id, faction_id, mission, broadcast_func)
     else:
@@ -132,6 +137,7 @@ def _resolve_outstanding_contracts(world: World, member_id: str, faction_id: str
                 mission.faction_id == faction_id and 
                 mission.status == MissionStatus.ACTIVE):
                 
+                _notify_player(world, member_id, f"Mission Failed: {mission.title}", broadcast_func)
                 print(f"[Daily System] Member {member_id} failed mission {mission.uuid}")
                 mission.status = MissionStatus.FAILED
                 _apply_failure_consequence(world, member_id, faction_id, mission, broadcast_func)
@@ -185,9 +191,9 @@ def _apply_failure_consequence(world: World, member_id: str, faction_id: str, mi
         })
         
         # Messaging
-        if player_sid and broadcast_func:
-            pass # messaging logic
-            print(f"Player {sheet.display_name} notified of failure.")
+        # Messaging
+        _notify_player(world, member_id, f"Consequence: Reputation with {faction.name} decreased by 5.", broadcast_func)
+        print(f"Player {sheet.display_name} notified of failure.")
 
 def _assign_daily_contract(world: World, faction, member_id: str, role: FactionRole, broadcast_func=None):
     """Create a new mission based on the role."""
@@ -252,10 +258,40 @@ def _assign_daily_contract(world: World, faction, member_id: str, role: FactionR
         world.missions = {}
     world.missions[mission.uuid] = mission
     
+    
     # Update Index
     if hasattr(world, 'missions_by_assignee'):
         if member_id not in world.missions_by_assignee:
             world.missions_by_assignee[member_id] = set()
         world.missions_by_assignee[member_id].add(mission.uuid)
     
+    _notify_player(world, member_id, f"New Daily Mission: {mission.title} - {mission.description}", broadcast_func)
     print(f"[Daily System] Assigned {mission.title} to {member_id}")
+
+def _notify_player(world: World, member_id: str, message: str, broadcast_func=None):
+    """Notify a player of a system event via broadcast."""
+    if not broadcast_func:
+        return
+        
+    # Check if member_id is a User ID (player)
+    if member_id in (getattr(world, 'users', {}) or {}):
+        user = world.users[member_id]
+        # Find active session
+        player_sid = None
+        for sid, p in world.players.items():
+            if p.sheet and p.sheet.display_name == user.display_name:
+                player_sid = sid
+                break
+        
+        if player_sid:
+            try:
+                # Attempt to target specific player session
+                # If broadcast_func is socketio.emit, 'to' kwarg works.
+                # If it's a wrapper that suppresses kwargs, this might fail or be ignored.
+                # We assume standard socketio-like behavior or our wrapper supports it.
+                broadcast_func({'type': 'system', 'content': message}, to=player_sid)
+            except TypeError:
+                # Fallback if function doesn't accept 'to' (e.g. simple print wrapper)
+                # But we don't want to broadcast private info to everyone.
+                # So we just log error or skip.
+                print(f"[Daily System] Warning: broadcast_func does not support targeting. Message to {member_id} suppressed.")

@@ -148,10 +148,14 @@ def attack(world: World, state_path: str, attacker_sid: str, target_token: str, 
     else:
         # Morale yield check for NPC only
         if target_kind == "npc":
-            # Trigger conditions: low HP or morale roll failure
-            low_hp = target_sheet.hp <= max(1, int(target_sheet.max_hp * 0.3))
+            # Trigger conditions: low HP (<=30%) always yields, or wounded (<=50%) fails morale
+            max_hp = max(1, target_sheet.max_hp)
+            critical_hp = target_sheet.hp <= int(max_hp * 0.3)
+            wounded_hp = target_sheet.hp <= int(max_hp * 0.5)
+            
             morale_roll = random.randint(1, 100) + target_sheet.morale + target_sheet.confidence - target_sheet.aggression
-            if low_hp or morale_roll < 50:  # simple threshold heuristic
+            
+            if critical_hp or (wounded_hp and morale_roll < 50):  # simple threshold heuristic
                 target_sheet.yielded = True
                 yield_msg = f"{target_sheet.display_name} yields! They will not continue fighting."
                 broadcasts.append((MESSAGE_OUT, {"type": "system", "content": yield_msg}))
@@ -173,8 +177,7 @@ def flee(world: World, state_path: str, sid: str, sessions: dict, admins: set, b
     sheet = player.sheet
     if sheet.is_dead:
         return True, "You are dead and cannot act. Create a new character.", emits, broadcasts
-    if sheet.yielded:
-        return True, "You have yielded and cannot flee.", emits, broadcasts
+
 
     room = world.rooms.get(player.room_id)
     if not room:
@@ -195,7 +198,7 @@ def flee(world: World, state_path: str, sid: str, sessions: dict, admins: set, b
     # Move player
     old_room_id = player.room_id
     player.room_id = dest_id
-    emits.append({"type": "system", "content": f"You flee to {world.rooms[dest_id].id}."})
+    emits.append({"type": "system", "content": f"You flee to {world.rooms[dest_id].description}."})
     broadcasts.append((MESSAGE_OUT, {"type": "system", "content": f"{sheet.display_name} flees from combat!"}))
 
     # Persist world

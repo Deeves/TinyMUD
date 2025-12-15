@@ -184,6 +184,9 @@ def test_eat_spawns_outputs():
     # Core spawned
     names = [o.display_name for o in room.objects.values()]
     assert "Core" in names
+    # Verify accurate message
+    text = emits2[0]['content']
+    assert "The following appeared on the floor: Core" in text
 
 
 def test_drink_spawns_outputs():
@@ -199,6 +202,9 @@ def test_drink_spawns_outputs():
     assert drink.uuid not in room.objects
     names = [o.display_name for o in room.objects.values()]
     assert "Empty Bottle" in names
+    # Verify accurate message
+    text = emits2[0]['content']
+    assert "The following appeared on the floor: Empty Bottle" in text
 
 
 def test_container_open_requires_search():

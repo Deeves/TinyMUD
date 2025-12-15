@@ -138,5 +138,5 @@ def test_flee_command():
     # Flee
     handled, err, out_emits, out_broadcasts = flee(world, "", "sid1", {}, set(), dummy_broadcast, dummy_emit)
     assert player.room_id == "room2", f"Expected room2, got {player.room_id}"
-    assert any("flee to room2" in e["content"] for e in out_emits), "Flee message missing"
+    assert any("flee to Room2" in e["content"] for e in out_emits), "Flee message missing"
 
